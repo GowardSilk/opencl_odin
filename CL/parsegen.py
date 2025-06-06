@@ -24,14 +24,14 @@ class Attribute(Enum):
 
 class Function:
     def into_odin(self) -> str:
-        if ret == "void":
-            params_str: str = ""
-            for index, param in params:
-                params_str += f"{params[1]}: {params[0]}{", " if index < params.len() - 1 else ""}"
+        params_str: str = ""
+        for index, param in enumerate(self.params):
+            params_str += f"{param[1]}: {param[0]}{", " if index < len(self.params) - 1 else ""}"
 
-            return f"{name} :: proc {"\"stdcall\"" if attr == Attribute.STDCALL else ""} ({params_str}) ---"
+        if self.ret == "void":
+            return f"{self.name} :: proc {"\"stdcall\"" if self.attr == Attribute.STDCALL else ""} ({params_str}) ---"
 
-        return f"{name} :: proc {"\"stdcall\"" if attr == Attribute.STDCALL else ""} ({params_str}) -> {ret} ---"
+        return f"{self.name} :: proc {"\"stdcall\"" if self.attr == Attribute.STDCALL else ""} ({params_str}) -> {self.ret} ---"
 
     attr:   Attribute
     ret:    Type
@@ -90,7 +90,7 @@ c_to_odin_types = {
     "uintptr_t":   CTypeMapping("uintptr", None),
 
     # does this have to be here?
-    "void*":       CTypeMapping("rawptr", None),
+    # "void*":       CTypeMapping("rawptr", None),
 }
 
 """
@@ -113,7 +113,10 @@ def extract_file_content(preprocessed_fname: str, target_file: str) -> str:
             _, file_name, *_ = match.groups() # original_line_number, file_name, flags
             current_file = file_name.replace("\\", "/")
         elif current_file and target_file in current_file and line:
-            output_lines.append(line)
+            # TODO: maybe some better way to get rid of all
+            # unnecessary directive lines?????
+            if "#pragma" not in line:
+                output_lines.append(line)
 
     return "\n".join(output_lines)
 
@@ -217,13 +220,50 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
     ## assuming next is a 'word'
     name = next
     next, next_cursor = next_token_unwrap(fcontent, cursor)
+    print(f"Assuming the next word is name: {name}")
     if next == "{":
-        compound, cursor = parse_compound_type(fcontent, cursor)
+        _, next_cursor = next_token_unwrap(fcontent, cursor)
+        compound, cursor = parse_compound_type(fcontent, next_cursor)
         return "{\n" + '\n'.join(f'\t{line}' for line in compound.splitlines()) + "\n}", cursor
     elif next == "*":
-        return "^" + name, next_cursor
+        # TODO: This is down bad... it only works because nobody has the balls
+        # to define a pointer to an anonymous structure defined in-place
+        if name not in g_aliases and name not in g_aliases.values():
+            return "distinct rawptr", cursor
 
-    return name, cursor
+        return "^" + name, cursor
+
+    assert False # should never happen...
+    # return name, cursor
+
+"""
+Note: function checks only for <type> and "("
+"""
+def is_function_type(fcontent, cursor) -> bool:
+    name, cursor = next_token_unwrap(fcontent, cursor)
+    if name in g_aliases or name in g_aliases[name] or name == "void":
+        if next_token_unwrap(fcontent, cursor)[0] == "("
+            return True
+
+def parse_function_type(fcontent, cursor) -> tuple[Type, int]:
+    tok, cursor = next_token_unwrap(fcontent, cursor)
+    attr: Attribute = Attribute.NONE
+    if tok == "__stdcall":
+        attr = Attribute.STDCALL
+        tok, cursor = next_token_unwrap(fcontent, cursor)
+    if tok == "*":
+        name_tok, cursor = next_token_unwrap(fcontent, cursor)
+        close_tok, cursor = next_token_unwrap(fcontent, cursor)
+        # TODO: make such meaningful messages everywhere, maybe even more assertions (since we are basically doing C subset parser)
+        assert close_tok == ")", f"Expected ')', got {close_tok}"
+
+        param_tok, _ = next_token_unwrap(fcontent, cursor)
+        assert param_tok == "(", f"Expected '(' for parameters, got {param_tok}"
+
+        params, cursor = parse_params(fcontent, cursor)
+        param_str = ", ".join(f"{n}: {t}" for t, n in params)
+
+        return f"proc({param_str})", cursor
 
 
 # <type> ::= { "struct" | "union" } [word] [<body>] | <word_seq> [ "*"* ]
@@ -250,6 +290,15 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
     print(f"\x1b[31mParsing base:\x1b[0m {base}")
     print(f"\x1b[31mParsing base (next):\x1b[0m {next_token_unwrap(fcontent, cursor)}")
 
+    if base == "void":
+        potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
+        if potential_ptr == "*":
+            return "rawptr", potential_cursor
+        if potential_ptr == "(":
+            ftype, cursor = parse_function_type(fcontent, potential_cursor)
+            return f"{ftype} -> {base}", cursor
+        return "void", cursor
+
     if base in c_to_odin_types:
         # clGetPlatformIDs_t * -> ^clGetPlatformIDs_t
 
@@ -258,16 +307,7 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
             return "^" + c_to_odin_types[base][sign_idx], potential_cursor
         return c_to_odin_types[base][sign_idx], cursor
 
-    for alias in g_aliases:
-        #print(f"{alias}: {g_aliases[alias]}")
-        pass
-
-    if base in g_aliases:
-        potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
-        if potential_ptr == "*":
-            return "^" + g_aliases[base], potential_cursor
-        return g_aliases[base], cursor
-    elif base in g_aliases.values():
+    if base in g_aliases or base in g_aliases.values():
         potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
         if potential_ptr == "*":
             return "^" + base, potential_cursor
@@ -292,11 +332,17 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
         if cursor != ";":
             _, cursor = next_token_unwrap(fcontent, cursor)
 
+        if blob == "distinct rawptr":
+            return blob, cursor
+
         if base == "union":
             return "struct #raw_union " + blob, cursor
 
         return base + blob, cursor
 
+    # for alias in g_aliases:
+    #     print(f"{alias}: {g_aliases[alias]}")
+    #     pass
     assert False
 
 def parse_conv(fcontent, cursor) -> tuple[Attribute, int]:
@@ -327,12 +373,16 @@ def parse_params(fcontent, cursor) -> tuple[list[tuple[Type, str]], int]:
     assert word == "("
 
     while True:
-        word, next_cursor = next_token_unwrap(fcontent, next_cursor)
+        word, _ = next_token_unwrap(fcontent, next_cursor)
         if word == ")":
             break
 
-        _type = word
-        name, next_cursor = next_token_unwrap(fcontent, next_cursor)
+        is_fn_type: bool = is_function_type(fcontent, next_cursor):
+        _type, next_cursor = parse_type(fcontent, next_cursor)
+        name: str = ""
+        if not is_fn_type:
+            name, next_cursor = next_token_unwrap(fcontent, next_cursor)
+        print(f"Appending: {(_type, name)}")
         params.append((_type, name))
 
         word, next_cursor = next_token_unwrap(fcontent, next_cursor)
@@ -410,16 +460,9 @@ def parse(fcontent: str) -> None:
                         g_definitions.append(d)
 
             case _:
-                print(f"\x1b[31mSkipping token\x1b[0m: \x1b[33m{word}\x1b[0m")
+                print(f"\x1b[31mSkipping token\x1b[0m: \x1b[34m{word}\x1b[0m")
 
         cursor = next_cursor
-
-"""
-Determines whether given C type is opaque (i.e. in Odin `distinct rawptr')
-"""
-def is_opaque(value: str) -> bool:
-    opaque_pattern = re.compile(r"^struct\s+\w+\s*\*$")
-    return opaque_pattern.match(value) is not None
 
 def preprocess_run(cc: str, current_location: str, target: str) -> str:
     include_path   = os.path.join(current_location, "../")
@@ -433,7 +476,7 @@ def main(cc: str, out_dir: str) -> None:
     print(f"Running parsegen → Output: {out_dir}")
 
     #header_files = ["cl_platform.h", "cl.h", "cl_version.h", "cl_icd.h"]
-    header_files = ["cl_platform.h"]
+    header_files = ["cl_platform.h", "cl_version.h", "cl.h"]
     current_location = os.path.dirname(os.path.abspath(__file__))
 
     for target_header in header_files:
@@ -445,32 +488,21 @@ def main(cc: str, out_dir: str) -> None:
 
     file_blob: str = ""
 
-    for defs in g_definitions:
-        file_blob += defs.into_odin() + '\n'
+    # for defs in g_definitions:
+    #     file_blob += defs.into_odin() + '\n'
+    #
+    # file_blob += '\n'
 
+    max_length = max(len(alias) for alias in g_aliases)
     for alias in g_aliases:
-        file_blob += alias + " :: " + g_aliases[alias] + '\n'
+        file_blob += f"{alias.ljust(max_length)} :: {g_aliases[alias]}\n"
+
+    file_blob += '\n'
 
     for func in g_functions:
         file_blob += func + '\n'
 
-    # aliases_str: str = ""
-    # aliases_rec: set[str] = set()
-    # for value in g_aliases:
-    #     if g_aliases[value] not in aliases_rec:
-    #         ctype_idx = 0
-    #         if "unsigned" in c_to_odin_types:
-    #             ctype_idx = 1
-    #
-    #         if is_opaque(value):
-    #             aliases_str += f"{g_aliases[value]} :: distinct rawptr; // {value}\n";
-    #         else:
-    #             if value in c_to_odin_types:
-    #                 aliases_str += f"{g_aliases[value]} :: {c_to_odin_types[value][ctype_idx]};\n"
-    #             else:
-    #                 aliases_str += f"{g_aliases[value]} :: {value};\n"
-    #
-    #         aliases_rec.add(g_aliases[value])
+    file_blob += '\n'
 
     with open(os.path.join(out_dir, "out.odin"), "w+") as file:
         file.write("package cl;\n\n")
