@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Adding basic example]
+
+#### Added
+- `test_program.cl`; CL program for vector scaling (loaded by `main.odin`)
+
+#### Changed
+- Updated `main.odin` for exemplary opencl vector scale program
+
 ### [Adding macro support (partial)]
 
 #### Changed

@@ -1554,7 +1554,7 @@ foreign opencl {
                                          param_value_size_ret: ^c.size_t) -> cl_int ---
 	clCreateKernel :: proc "stdcall" (
                                   program: cl_program,
-                                  kernel_name: ^c.schar,
+                                  kernel_name: cstring,
                                   errcode_ret: ^cl_int) -> cl_kernel ---
 	clCreateKernelsInProgram :: proc "stdcall" (
                                             program: cl_program,
