@@ -1,11 +1,11 @@
 import os
 import re
 import subprocess
-from CL.log import custom_print, Level
-from CL.parse_types import *
+from log import custom_print, Level
+from parse_types import *
 
 g_definitions: list[Definition] = []
-g_aliases: dict[str, str] = {}
+g_aliases: dict[str, AliasEntry] = {}
 g_functions: list[Function] = []
 
 ODIN_CONFIG: dict[str, str] = {
@@ -40,20 +40,30 @@ C_TO_ODIN_TYPES = {
     "size_t": CTypeMapping("c.size_t", None),
     "intptr_t": CTypeMapping("c.intptr_t", None),
     "uintptr_t": CTypeMapping("c.uintptr_t", None),
+    # d3d11
     "ID3D11Buffer": CTypeMapping("d3d11.ID3D11Buffer", None),
     "ID3D11Texture2D": CTypeMapping("d3d11.ID3D11Texture2D", None),
     "ID3D11Texture3D": CTypeMapping("d3d11.ID3D11Texture3D", None),
+    # dxgi
     "UINT": CTypeMapping("dxgi.UINT", None),
     "DXGI_FORMAT": CTypeMapping("dxgi.DXGI_FORMAT", None),
 }
 
-"""
-Extracts all lines belonging to `target_file' after running preprocessor (preprocessor
-    output absolute file path expected in `preprocessed_fname') in one string.
-"""
+
+def get_alias_type(key: str) -> str | None:
+    entry = g_aliases.get(key)
+    return entry._from if entry else None
+
+
+def add_alias(a: Alias) -> None:
+    g_aliases[a._to] = AliasEntry(_from=a._from._from, file=a._from.file)
 
 
 def extract_file_content(preprocessed_fname: str, target_file: str) -> str:
+    """
+    Extracts all lines belonging to `target_file' after running preprocessor (preprocessor
+        output absolute file path expected in `preprocessed_fname') in one string.
+    """
     current_file: str | None = None
     output_lines: list[str] = []
 
@@ -192,7 +202,7 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
     elif next == "*":
         # TODO: This is down bad... it only works because nobody has the balls
         # to define a pointer to an anonymous structure defined in-place
-        if name not in g_aliases and name not in g_aliases.values():
+        if name not in g_aliases and not any([name == value._from for value in g_aliases.values()]):
             return "distinct rawptr", cursor
 
         return "^" + name, cursor
@@ -201,12 +211,10 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
     # return name, cursor
 
 
-"""
-Note: function checks only for <type> and "("
-"""
-
-
 def is_function_ptr_type(fcontent, cursor) -> str | None:
+    """
+    Note: function checks only for <type> and "("
+    """
     _, cursor = next_token_unwrap(fcontent, cursor)  # base type
     name, cursor = next_token_unwrap(fcontent, cursor)
     if name != "(":
@@ -237,7 +245,10 @@ def parse_function_ptr_type(fcontent, cursor) -> tuple[Type, int]:
         params, cursor = parse_params(fcontent, cursor)
         param_str = ", ".join(f"{n}: {t}" for t, n in params)
 
-        return f"#type proc{" \"stdcall\" " if attr is not Attribute.NONE else ""}({param_str})", cursor
+        return (
+            f"#type proc{" \"stdcall\" " if attr is not Attribute.NONE else ""}({param_str})",
+            cursor,
+        )
 
     custom_print(
         f'Unreachable code; expected "*" when trying to parse (`{tok}`) for function pointer!',
@@ -247,7 +258,7 @@ def parse_function_ptr_type(fcontent, cursor) -> tuple[Type, int]:
 
 
 def is_void_alias(base: str) -> bool:
-    return base == "void" or g_aliases.get(base) == "void"
+    return base == "void" or get_alias_type(base) == "void"
 
 
 def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
@@ -302,9 +313,9 @@ def try_apply_function_type(
         return "", -1, ""
 
     param_blob = ", ".join(f"{n}: {t}" for t, n in f.params)
-    conv       = ' "stdcall" ' if f.attr is not Attribute.NONE else ""
-    ret_suffix = f" -> {f.ret}" if f.ret != 'void' else ""
-    odin_type  = f"#type proc{conv}({param_blob}){ret_suffix}"
+    conv = ' "stdcall" ' if f.attr is not Attribute.NONE else ""
+    ret_suffix = f" -> {f.ret}" if f.ret != "void" else ""
+    odin_type = f"#type proc{conv}({param_blob}){ret_suffix}"
     return odin_type, next_cursor, f.name
 
 
@@ -358,7 +369,7 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
         assert base
         return apply_pointer_and_func_type(base, cursor, fcontent)
 
-    if base in g_aliases or base in g_aliases.values():
+    if base in g_aliases or any([base == value._from for value in g_aliases.values()]):
         return apply_pointer_and_func_type(base, cursor, fcontent)
 
     if base == "struct" or base == "union":
@@ -388,7 +399,7 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
         return base + blob, cursor
 
     # for alias in g_aliases:
-    #     custom_print(f"{alias}: {g_aliases[alias]}", Level.DEBUG)
+    #     custom_print(f"{alias}: {g_aliases[alias]._from}", Level.DEBUG)
     #     pass
     assert False
 
@@ -461,7 +472,7 @@ def parse_params(fcontent, cursor) -> tuple[list[tuple[Type, str]], int]:
     return params, next_cursor
 
 
-def parse(fcontent: str) -> None:
+def parse(fcontent: str, forigin: str) -> None:
     cursor = 0
 
     while True:
@@ -502,6 +513,7 @@ def parse(fcontent: str) -> None:
                     Level.DEBUG,
                 )
                 custom_print(f"Result: `{f.into_odin()}`", Level.INFO)
+                f.file = forigin
                 g_functions.append(f)
 
                 word, next_cursor = next_token_unwrap(fcontent, next_cursor)
@@ -511,13 +523,14 @@ def parse(fcontent: str) -> None:
                 # <typedef> ::= "typedef" <type> word ";"
                 a = Alias()
 
-                a._from, next_cursor = parse_type(fcontent, next_cursor)
+                _type, next_cursor = parse_type(fcontent, next_cursor)
+                a._from = AliasEntry(_type, forigin)
 
                 potential_fn, potential_cursor, a._to = try_apply_function_type(
-                    a._from, fcontent, next_cursor
+                    a._from._from, fcontent, next_cursor
                 )
                 if potential_fn != "" and potential_cursor != -1:  # function decl
-                    a._from = potential_fn
+                    a._from._from = potential_fn
                     custom_print(f"Typedef function result: {potential_fn}", Level.INFO)
                 else:
                     a._to, next_cursor = next_token_unwrap(fcontent, next_cursor)
@@ -525,7 +538,7 @@ def parse(fcontent: str) -> None:
                     assert terminator == ";", f'Expected ";" but received: {terminator}'
                 custom_print(f"Found alias: <{a._from} | {a._to}>", Level.INFO)
 
-                g_aliases[a._to] = a._from
+                add_alias(a)
 
             case "#define":
                 # <define> ::= "#define" word word
@@ -585,7 +598,7 @@ def main(cc: str, out_dir: str) -> None:
         with open(os.path.join("out", f"{preprocess_fout}.ex"), "w+") as file:
             file.write(preprocess_extract)
         custom_print(f"Parsing file: {target_header}", Level.ERROR)
-        parse(preprocess_extract)
+        parse(preprocess_extract, target_header)
 
     file_blob: str = ""
 
@@ -594,18 +607,28 @@ def main(cc: str, out_dir: str) -> None:
     #
     # file_blob += '\n'
 
-    max_length = max(len(alias) for alias in g_aliases)
-    for alias in g_aliases:
-        file_blob += f"{alias.ljust(max_length)} :: {g_aliases[alias]}\n"
-
     file_blob += "\n"
-    file_blob += 'foreign import opencl "OpenCL.lib"\n'
-    file_blob += "foreign opencl {\n"
+    file_blob += "foreign import opencl \"OpenCL.lib\"\n\n"
 
-    for func in g_functions:
-        file_blob += "\t" + func.into_odin() + "\n"
+    for target_header in header_files:
+        functions = list(filter(lambda func: func.file == target_header, g_functions))
+        aliases   = list(filter(lambda alias: alias.file == target_header, g_aliases.values()))
 
-    file_blob += "}\n"
+        if len(functions) > 0 or len(aliases) > 0:
+            file_blob += f"/* =========================================\n*               {target_header}\n* ========================================= */\n\n"
+            max_length = max(len(alias) for alias in g_aliases)
+            for alias in g_aliases:
+                if g_aliases[alias].file == target_header:
+                    file_blob += f"{alias.ljust(max_length)} :: {get_alias_type(alias)}\n"
+            
+            file_blob += "\n"
+
+            if len(functions) > 0:
+                file_blob += "foreign opencl {\n"
+                for func in functions:
+                    file_blob += "\t" + func.into_odin() + "\n"
+                file_blob += "}\n"
+
 
     with open(os.path.join(out_dir, "out.odin"), "w+") as file:
         file.write("package cl;\n\n")

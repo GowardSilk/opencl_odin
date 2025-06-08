@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Parsegen output formatting]
+
+#### Changed
+- Added `--suppress-warnings` in `main.py` for disabling warning messages
+- Updated `parsegen.py` to support better formatting in the output file such that the parsed data is ordered by files from which they came
+
 ### [Message logging]
 
 #### Added

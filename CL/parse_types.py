@@ -3,6 +3,7 @@ from typing import Optional
 from dataclasses import dataclass
 
 Type = str
+File_Origin = str
 
 
 class Definition:
@@ -45,10 +46,17 @@ class Function:
     ret: Type
     params: list[tuple[Type, str]]
     name: str
+    file: File_Origin
+
+
+@dataclass
+class AliasEntry:
+    _from: str
+    file: str
 
 
 class Alias:
-    _from: str
+    _from: AliasEntry
     _to: str
 
 

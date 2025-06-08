@@ -6,11 +6,16 @@ import inspect
 colorama_init(autoreset=True)
 
 s_debug_msg_out: bool = False
+s_warning_msg_out: bool = True
 
 
 def set_debug_msg_out(val: bool) -> None:
     global s_debug_msg_out
     s_debug_msg_out = val
+
+def set_warning_msg_out(val: bool) -> None:
+    global s_warning_msg_out
+    s_warning_msg_out = val
 
 
 def supports_color() -> bool:
@@ -53,6 +58,8 @@ def custom_print(msg: str, level: Level = Level.INFO) -> None:
     Prints message
     """
     if level == Level.DEBUG and not s_debug_msg_out:
+        return None
+    if level == Level.WARN and not s_warning_msg_out:
         return None
 
     prefix = get_caller_info()

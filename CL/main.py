@@ -14,6 +14,7 @@ def print_help() -> None:
         "\t--cc       ... specifies C compiler to be used for CL header preprocessing"
     )
     print("\t--verbose  ... enables DEBUG messages")
+    print("\t--suppress_warnings  ... disables WARNING messages")
 
 
 def arg_validator(s: str) -> str:
@@ -60,6 +61,7 @@ def main() -> None:
     )
     parser.add_argument("--help", action="store_true", help="Show help message")
     parser.add_argument("--verbose", action="store_true", help="Enables DEBUG messages")
+    parser.add_argument("--suppress-warnings", action="store_true", help="Enables DEBUG messages")
 
     args, unknown = parser.parse_known_args()
 
@@ -71,6 +73,7 @@ def main() -> None:
         print_help()
     else:
         log.set_debug_msg_out(args.verbose)
+        log.set_warning_msg_out(not args.suppress_warnings)
 
         out_dir = args.out or os.getcwd()
         parsegen.main(find_cc(args.cc), out_dir)
