@@ -12,6 +12,7 @@ class Definition:
 
     key: str
     value: str
+    file: str
 
 
 class Attribute(Enum):

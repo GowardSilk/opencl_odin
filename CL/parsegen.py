@@ -41,12 +41,12 @@ C_TO_ODIN_TYPES = {
     "intptr_t": CTypeMapping("c.intptr_t", None),
     "uintptr_t": CTypeMapping("c.uintptr_t", None),
     # d3d11
-    "ID3D11Buffer": CTypeMapping("d3d11.ID3D11Buffer", None),
-    "ID3D11Texture2D": CTypeMapping("d3d11.ID3D11Texture2D", None),
-    "ID3D11Texture3D": CTypeMapping("d3d11.ID3D11Texture3D", None),
+    "ID3D11Buffer": CTypeMapping("d3d11.IBuffer", None),
+    "ID3D11Texture2D": CTypeMapping("d3d11.ITexture2D", None),
+    "ID3D11Texture3D": CTypeMapping("d3d11.ITexture3D", None),
     # dxgi
     "UINT": CTypeMapping("dxgi.UINT", None),
-    "DXGI_FORMAT": CTypeMapping("dxgi.DXGI_FORMAT", None),
+    "DXGI_FORMAT": CTypeMapping("dxgi.FORMAT", None),
 }
 
 
@@ -262,7 +262,7 @@ def is_void_alias(base: str) -> bool:
 
 
 def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
-    base = "rawptr" if is_void_alias(base) else base
+    base = "rawptr" if is_void_alias(base) else f"^{base}"
 
     while True:
         token_peek, peek_cursor = next_token_unwrap(fcontent, cursor)
@@ -545,15 +545,105 @@ def parse(fcontent: str, forigin: str) -> None:
 
                 d = Definition()
                 d.key, next_cursor = next_token_unwrap(fcontent, next_cursor)
-                d.value, potential_cursor = next_token_unwrap(fcontent, next_cursor)
-                # note: this will miss some of the #define(s) but they are not important to the bindings
-                match d.value:
-                    case "#define" | "typedef" | "extern":
-                        # blank define, useless for us
-                        pass
-                    case _:
-                        next_cursor = potential_cursor
-                        g_definitions.append(d)
+                
+                # Skip whitespace after the key
+                while next_cursor < len(fcontent) and fcontent[next_cursor].isspace() and fcontent[next_cursor] != '\n':
+                    next_cursor += 1
+                
+                cursor = next_cursor
+                # Find end of line (value portion)
+                while next_cursor < len(fcontent) and fcontent[next_cursor] != '\n':
+                    next_cursor += 1
+                
+                # Extract the raw value
+                raw_value = fcontent[cursor:next_cursor].strip()
+                
+                # Skip if empty or special cases
+                if not raw_value or raw_value in {"#define", "typedef", "extern"}:
+                    continue
+
+                def clean_numeric(value: str) -> str:
+                    value = re.sub(
+                        r'\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*([a-zA-Z0-9_]+)',
+                        r'cast(\1)\2',
+                        value
+                    )
+
+                    # for each numerical expression we have to get rid of suffixes
+                    def clean_single_number(m):
+                        num = m.group(0)
+                        if num.lower().startswith(('0x', '0x')):
+                            return re.sub(r'[uUlL]+$', '', num)
+                        elif 'e' in num.lower():
+                            return re.sub(r'[fFdD]+$', '', num)
+                        return re.sub(r'[uUlLfFdD]+$', '', num)
+                    
+                    # Match all numeric literals in the expression
+                    numeric_pattern = re.compile(
+                        r'-?'  # Optional sign
+                        r'(?:'
+                        r'0[xX][0-9a-fA-F]+(?:[uUlL]+)?'  # Hex
+                        r'|0[xX][0-9a-fA-F.]+p[+-]?\d+(?:[fFdD]+)?'  # Hex float
+                        r'|\d+\.?\d*(?:[eE][+-]?\d+)?(?:[fFdD]+)?'  # Decimal/scientific
+                        r'|\.\d+(?:[eE][+-]?\d+)?(?:[fFdD]+)?'  # .decimal
+                        r')(?=\s*[+-/*%]|\s*$)'  # Lookahead for operator or end
+                    )
+                    
+                    # Process each number in the expression
+                    return numeric_pattern.sub(clean_single_number, value)
+
+                cleaned_value = clean_numeric(raw_value)
+
+                # def remove_suffixes(match):
+                #     num = match.group(1)
+                #     # Handle hex literals (preserve a-f, remove only trailing u/l)
+                #     if num.lower().startswith(('0x', '0x')):
+                #         return re.sub(r'[uUlL]+$', '', num)
+                #     # Handle scientific notation (preserve e/E, remove only trailing f)
+                #     if 'e' in num.lower():
+                #         return re.sub(r'[fFdD]+$', '', num)
+                #     # Default case for decimals/ints
+                #     return re.sub(r'[uUlLfFdD]+$', '', num)
+                #     # num = match.group(1)
+                #     # if not num.lower().startswith(("0x", "0x")):
+                #     #     return re.sub(r'[uUlLfFdD]+$', '', num)
+                #     # else:
+                #     #     return re.sub(r'[uUlLdD]+$', '', num)
+                
+                # # Improved pattern for numeric constants and simple expressions
+                # constant_pattern = re.compile(
+                #     r'''
+                #     (?:\(\s*\w+\s*\))?       # Optional cast like (int)
+                #     \s*                      # Optional whitespace
+                #     (                        # Capture group for the value:
+                #     -?                     # Optional minus sign
+                #     (?:0[xX][0-9a-fA-F]+   # Hex literal
+                #     |\d+\.?\d*            # Decimal number (with optional fraction)
+                #     |\.\d+)                # Decimal fraction starting with .
+                #     (?:[uUlLfFdD]*)\b      # Optional suffixes
+                #     |\w+                   # Or another identifier (for enum values)
+                #     |'\\?.'                # Character literal
+                #     |"\\?."                # String literal (though rare in #defines)
+                #     )
+                #     (?:\s*[+-/*%]\s*         # Optional simple arithmetic
+                #     (?:-?\d+\b            # Followed by numbers
+                #     |\w+\b)               # Or identifiers
+                #     )*
+                #     ''', re.VERBOSE
+                # )
+                
+                # # Clean up the value
+                # cleaned_value = constant_pattern.sub(remove_suffixes, raw_value)
+                
+                # Remove trailing comments
+                cleaned_value = re.sub(r'/\*.*\*/', '', cleaned_value).strip()
+                cleaned_value = re.sub(r'//.*$', '', cleaned_value).strip()
+                cleaned_value = cleaned_value.strip()
+                
+                if cleaned_value:  # Only add if we have a value
+                    d.value = cleaned_value
+                    d.file = forigin
+                    g_definitions.append(d)
 
             case _:
                 custom_print(f"Skipping token: {word}", Level.WARN)
@@ -602,26 +692,27 @@ def main(cc: str, out_dir: str) -> None:
 
     file_blob: str = ""
 
-    # for defs in g_definitions:
-    #     file_blob += defs.into_odin() + '\n'
-    #
-    # file_blob += '\n'
-
     file_blob += "\n"
     file_blob += "foreign import opencl \"OpenCL.lib\"\n\n"
 
     for target_header in header_files:
         functions = list(filter(lambda func: func.file == target_header, g_functions))
-        aliases   = list(filter(lambda alias: alias.file == target_header, g_aliases.values()))
+        aliases   = list(filter(lambda alias: alias[1].file == target_header, g_aliases.items()))
+        definitions = list(filter(lambda _def: _def.file == target_header, g_definitions))
 
-        if len(functions) > 0 or len(aliases) > 0:
+        if len(functions) > 0 or len(aliases) > 0 or len(definitions):
             file_blob += f"/* =========================================\n*               {target_header}\n* ========================================= */\n\n"
+
+            for defs in definitions:
+                file_blob += defs.into_odin() + '\n'
+
+            file_blob += "\n" if len(definitions) > 0 else ""
+
             max_length = max(len(alias) for alias in g_aliases)
-            for alias in g_aliases:
-                if g_aliases[alias].file == target_header:
-                    file_blob += f"{alias.ljust(max_length)} :: {get_alias_type(alias)}\n"
+            for name, alias in aliases:
+                file_blob += f"{name.ljust(max_length)} :: {alias._from}\n"
             
-            file_blob += "\n"
+            file_blob += "\n" if len(definitions) > 0 else ""
 
             if len(functions) > 0:
                 file_blob += "foreign opencl {\n"

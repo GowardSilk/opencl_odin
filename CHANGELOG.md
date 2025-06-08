@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Adding macro support (partial)]
+
+#### Changed
+- Updated `parsegen.py` to support:
+  - basic macros (`#define <name> <value>`)
+  - removal of numerical suffixes (basic case works; does not work for complex cases like casting involvement or more robust arithmetic expression)
+  - cast change from C-style cast to Odin `cast` operator
+
+#### Fixed
+- Fixing basic types not being displayed with `^` appropriate pointer type when not a `void*` (e.g. `cl_platform_id` instead of `^cl_platform_id` but `rawptr` when `void*`)
+
 ### [Parsegen output formatting]
 
 #### Changed
