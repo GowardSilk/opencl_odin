@@ -7,10 +7,6 @@ from enum import Enum
 
 Type = str
 
-# class Type:
-#     ctype: str # string of c type code (should be used to indetify for c to odin conversion if necessary)
-#     otype: str # odin type (transformed from ctype during parsing)
-
 class Definition:
     def into_odin(self) -> str:
         return f"{self.key} :: {self.value}"
@@ -56,41 +52,45 @@ class CTypeMapping:
     unsigned: Optional[str]
 
 c_to_odin_types = {
-    "__int8":      CTypeMapping("i8",   "u8"),
-    "__int16":     CTypeMapping("i16",  "u16"),
-    "__int32":     CTypeMapping("i32",  "u32"),
-    "__int64":     CTypeMapping("i64",  "u64"),
+    "__int8":      CTypeMapping("c.int8_t",   "c.uint8_t"),
+    "__int16":     CTypeMapping("c.int16_t",  "c.uint16_t"),
+    "__int32":     CTypeMapping("c.int32_t",  "c.uint32_t"),
+    "__int64":     CTypeMapping("c.int64_t",  "c.uint64_t"),
 
     # CLANG/MSVC ONLY
-    "__m128":      CTypeMapping("#simd[4]f32", ""),
-    "__m128d":     CTypeMapping("#simd[2]f64", ""),
+    "__m128":      CTypeMapping("#simd[4]c.float", None),
+    "__m128d":     CTypeMapping("#simd[2]c.double", None),
 
-    "__m128i":     CTypeMapping("#simd[4]i32", ""),
-    "__m64":       CTypeMapping("#simd[2]i32", ""),
+    "__m128i":     CTypeMapping("#simd[4]c.int32_t", None),
+    "__m64":       CTypeMapping("#simd[2]c.int32_t", None),
 
-    "int8_t":      CTypeMapping("i8",   "u8"),
-    "uint8_t":     CTypeMapping(None,  "u8"),
-    "int16_t":     CTypeMapping("i16",  "u16"),
-    "uint16_t":    CTypeMapping(None,  "u16"),
-    "int32_t":     CTypeMapping("i32",  "u32"),
-    "uint32_t":    CTypeMapping(None,  "u32"),
-    "int64_t":     CTypeMapping("i64",  "u64"),
-    "uint64_t":    CTypeMapping(None,  "u64"),
+    "int8_t":      CTypeMapping("c.int8_t",   "c.uint8_t"),
+    "uint8_t":     CTypeMapping(None,         "c.uint8_t"),
+    "int16_t":     CTypeMapping("c.int16_t",  "c.uint16_t"),
+    "uint16_t":    CTypeMapping(None,         "c.uint16_t"),
+    "int32_t":     CTypeMapping("c.int32_t",  "c.uint32_t"),
+    "uint32_t":    CTypeMapping(None,         "c.uint32_t"),
+    "int64_t":     CTypeMapping("c.int64_t",  "c.uint64_t"),
+    "uint64_t":    CTypeMapping(None,         "c.uint64_t"),
 
-    "char":        CTypeMapping("i8",   "u8"),
-    "short":       CTypeMapping("i16",  "u16"),
-    "int":         CTypeMapping("i32",  "u32"),
-    "long":        CTypeMapping("i64",  "u64"),
+    "char":        CTypeMapping("c.schar",   "c.char"),
+    "short":       CTypeMapping("c.short",   "c.ushort"),
+    "int":         CTypeMapping("c.int",     "c.uint"),
+    "long":        CTypeMapping("c.long",    "c.ulong"),
 
-    "float":       CTypeMapping("f32",  None),
-    "double":      CTypeMapping("f64",  None),
+    "float":       CTypeMapping("c.float",   None),
+    "double":      CTypeMapping("c.double",  None),
 
-    "size_t":      CTypeMapping("uintptr", None),
-    "intptr_t":    CTypeMapping("intptr", None),
-    "uintptr_t":   CTypeMapping("uintptr", None),
+    "size_t":      CTypeMapping("c.size_t", None),
+    "intptr_t":    CTypeMapping("c.intptr_t", None),
+    "uintptr_t":   CTypeMapping("c.uintptr_t", None),
 
-    # does this have to be here?
-    # "void*":       CTypeMapping("rawptr", None),
+    "ID3D11Buffer":     CTypeMapping("d3d11.ID3D11Buffer", None),
+    "ID3D11Texture2D":  CTypeMapping("d3d11.ID3D11Texture2D", None),
+    "ID3D11Texture3D":  CTypeMapping("d3d11.ID3D11Texture3D", None),
+
+    "UINT":             CTypeMapping("dxgi.UINT", None),
+    "DXGI_FORMAT":      CTypeMapping("dxgi.DXGI_FORMAT", None),
 }
 
 """
@@ -160,6 +160,9 @@ def parse_member_type_array_identifier(fcontent, cursor) -> tuple[str, int]:
         return f"[{number}]", next_cursor
     return f"[]", next_cursor
 
+def parse_function_parameter_type_array_identifier(fcontent, cursor) -> tuple[str, int]:
+    return parse_member_type_array_identifier(fcontent, cursor)
+
 def parse_member_type(fcontent, cursor) -> tuple[str, int]:
     _type, cursor = parse_type(fcontent, cursor)
     # parse name/array identifier or both
@@ -169,7 +172,7 @@ def parse_member_type(fcontent, cursor) -> tuple[str, int]:
     if is_delim(name):
         #print(f"Previous: {next_token_unwrap(fcontent, cursor)}")
         #print(f"Current: {next_token_unwrap(fcontent, next_cursor)}")
-        return f"using: _: {_type},\n", next_cursor
+        return f"using _: {_type},\n", next_cursor
 
     # name
     cursor = next_cursor
@@ -208,7 +211,6 @@ def parse_compound_type(fcontent, cursor) -> tuple[str, int]:
         word, cursor = parse_member_type(fcontent, cursor)
         blob += word
 
-
     return blob, cursor
 
 def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
@@ -239,13 +241,19 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
 """
 Note: function checks only for <type> and "("
 """
-def is_function_type(fcontent, cursor) -> bool:
+def is_function_ptr_type(fcontent, cursor) -> str | None:
+    _, cursor = next_token_unwrap(fcontent, cursor) # base type
     name, cursor = next_token_unwrap(fcontent, cursor)
-    if name in g_aliases or name in g_aliases[name] or name == "void":
-        if next_token_unwrap(fcontent, cursor)[0] == "("
-            return True
+    if name != '(':
+        return None
+    name, cursor = next_token_unwrap(fcontent, cursor) # potential attribute
+    if name == "__stdcall":
+        name, cursor = next_token_unwrap(fcontent, cursor)
+    if name != "*":
+        return None
+    return next_token_unwrap(fcontent, cursor)[0]
 
-def parse_function_type(fcontent, cursor) -> tuple[Type, int]:
+def parse_function_ptr_type(fcontent, cursor) -> tuple[Type, int]:
     tok, cursor = next_token_unwrap(fcontent, cursor)
     attr: Attribute = Attribute.NONE
     if tok == "__stdcall":
@@ -263,8 +271,72 @@ def parse_function_type(fcontent, cursor) -> tuple[Type, int]:
         params, cursor = parse_params(fcontent, cursor)
         param_str = ", ".join(f"{n}: {t}" for t, n in params)
 
-        return f"proc({param_str})", cursor
+        return f"#type proc{" \"stdcall\" " if attr!="" else ""}({param_str})", cursor
 
+def is_void_alias(base: str) -> bool:
+    return base == "void" or g_aliases.get(base) == "void"
+
+def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
+    base = "rawptr" if is_void_alias(base) else base
+
+    while True:
+        token_peek, peek_cursor = next_token(fcontent, cursor)
+        if token_peek != "*":
+            break
+        cursor = peek_cursor
+        base = f"^{base}"
+
+    return base if "rawptr" in base else f"^{base}", cursor
+
+def apply_func_ptr_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
+    ftype, cursor = parse_function_ptr_type(fcontent, cursor)
+    if base == "void":
+        return f"{ftype}", cursor
+    else:
+        return f"{ftype} -> {base}", cursor
+
+# <fn_decl> ::= <return_type> [<convention> ^ <attribute>] <fname> ([<params>]);
+# Note: params are ignored (assumed to be correct)
+def try_apply_function_type(ret: str, fcontent: str, cursor: int) -> tuple[str, int, str]:
+    f = Function()
+
+    next_cursor: int = 0
+
+    try:
+        f.ret = ret
+        print(f"Read ret: {f.ret}")
+
+        f.attr, next_cursor = next_token_unwrap(fcontent, cursor)
+        print(f"Read attr: {f.attr}")
+        if f.attr != "__stdcall":
+            f.name = f.attr
+            f.attr = ""
+            print("Rolling back")
+        else:
+            f.name, next_cursor = next_token_unwrap(fcontent, next_cursor)
+        print(f"Read name: {f.name}")
+        if is_delim(f.name):
+            return "", -1, ""
+
+        params: list[tuple[Type, str]] = []
+        f.params, next_cursor = parse_params(fcontent, next_cursor)
+
+    except:
+        print(f"Caught exception")
+        return "", -1, ""
+
+    return f"#type proc{" \"stdcall\" " if f.attr!="" else "" }({", ".join(f"{n}: {t}" for t, n in f.params)}){f" -> {f.ret}" if f.ret!="void"else""}", next_cursor, f.name
+
+def apply_pointer_and_func_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
+    potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
+
+    if potential_ptr == "*": # "normal" ptr OR ptr as a return type for a function
+        ptr, cursor = apply_pointer_type(base, potential_cursor, fcontent)
+        return ptr, cursor
+    if potential_ptr == "(": # function ptr
+        return apply_func_ptr_type(base, potential_cursor, fcontent)
+
+    return base, cursor
 
 # <type> ::= { "struct" | "union" } [word] [<body>] | <word_seq> [ "*"* ]
 # type
@@ -278,41 +350,29 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
     base: str | None = None
     sign_idx = 0  # signed == 0; unsigned == 1
     base, cursor = next_token_unwrap(fcontent, cursor)
-    # ignore const...
-    if base == "const":
-        base, cursor = next_token_unwrap(fcontent, cursor)
-    elif base == "signed":
-        base, cursor = next_token_unwrap(fcontent, cursor)
-    elif base == "unsigned":
-        base, cursor = next_token_unwrap(fcontent, cursor)
-        sign_idx = 1
+    while True:
+        if base == "const":
+            base, cursor = next_token_unwrap(fcontent, cursor)
+        elif base == "signed":
+            base, cursor = next_token_unwrap(fcontent, cursor)
+        elif base == "unsigned":
+            base, cursor = next_token_unwrap(fcontent, cursor)
+            sign_idx = 1
+        else:
+            break
 
     print(f"\x1b[31mParsing base:\x1b[0m {base}")
     print(f"\x1b[31mParsing base (next):\x1b[0m {next_token_unwrap(fcontent, cursor)}")
 
     if base == "void":
-        potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
-        if potential_ptr == "*":
-            return "rawptr", potential_cursor
-        if potential_ptr == "(":
-            ftype, cursor = parse_function_type(fcontent, potential_cursor)
-            return f"{ftype} -> {base}", cursor
-        return "void", cursor
+        return apply_pointer_and_func_type(base, cursor, fcontent)
 
     if base in c_to_odin_types:
-        # clGetPlatformIDs_t * -> ^clGetPlatformIDs_t
-
-        potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
-        if potential_ptr == "*":
-            return "^" + c_to_odin_types[base][sign_idx], potential_cursor
-        return c_to_odin_types[base][sign_idx], cursor
+        base = c_to_odin_types[base][sign_idx]
+        return apply_pointer_and_func_type(base, cursor, fcontent)
 
     if base in g_aliases or base in g_aliases.values():
-        potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
-        if potential_ptr == "*":
-            return "^" + base, potential_cursor
-        return base, cursor
-
+        return apply_pointer_and_func_type(base, cursor, fcontent)
 
     if base == "struct" or base == "union":
         # struct{ cl_char x, y; }; -> using _###: struct { x, y: cl_char; }
@@ -370,25 +430,42 @@ def parse_params(fcontent, cursor) -> tuple[list[tuple[Type, str]], int]:
     params: list[tuple[Type, str]] = []
 
     word, next_cursor = next_token_unwrap(fcontent, cursor)
-    assert word == "("
+    assert word == "(", f"Exepected \"(\" but received: \"{word}\""
+
+    anonymous_param_cnt = 1
 
     while True:
         word, _ = next_token_unwrap(fcontent, next_cursor)
         if word == ")":
             break
 
-        is_fn_type: bool = is_function_type(fcontent, next_cursor):
+        name: str | None = is_function_ptr_type(fcontent, next_cursor)
         _type, next_cursor = parse_type(fcontent, next_cursor)
-        name: str = ""
-        if not is_fn_type:
-            name, next_cursor = next_token_unwrap(fcontent, next_cursor)
-        print(f"Appending: {(_type, name)}")
-        params.append((_type, name))
+        if not name:
+            name, pnext_cursor = next_token_unwrap(fcontent, next_cursor)
+            # check if the parameter is anonynous or not
+            if not is_delim(name):
+                if name == "context": # odin exception, `context` special kw
+                    name = "_context"
+                next_cursor = pnext_cursor
+                potential_array, pnext_cursor = next_token_unwrap(fcontent, next_cursor)
+                if potential_array == "[":
+                    blob, next_cursor = parse_function_parameter_type_array_identifier(fcontent, pnext_cursor)
+                    _type = f"{blob}{_type}"
+            elif name == "[":
+                assert False, "TODO: Implement anonymous parmeter array parsing!"
+            else:
+                name = f"_{anonymous_param_cnt}"
+                anonymous_param_cnt += 1
+        if _type != "void": # exception: C way of saying "no parameter given"
+            print(f"Appending: {(_type, name)}")
+            params.append((_type, name))
 
         word, next_cursor = next_token_unwrap(fcontent, next_cursor)
         if word == ")":
             break
         elif word != ",":
+            #print(f"\x1b[31mError: Unexpected token in param list: {word}\x1b[0m")
             raise Exception(f"Unexpected token in param list: {word}")
 
     return params, next_cursor
@@ -414,9 +491,9 @@ def parse(fcontent: str) -> None:
                 # <convention>  ::= __stdcall
                 # <attribute>   ::= __attribute__((__stdcall__))
                 # <fname>       ::= word
-                f = Function()
 
                 print("Parsing Function: ")
+                f = Function()
                 f.ret, next_cursor    = parse_type(fcontent, next_cursor)
                 print(f"\tFound return type: {f.ret}")
                 f.attr, next_cursor   = parse_conv(fcontent, next_cursor) # <convention> == <attribute>
@@ -424,23 +501,28 @@ def parse(fcontent: str) -> None:
                 f.name, next_cursor   = next_token_unwrap(fcontent, next_cursor)
                 print(f"\tFound name: {f.name}")
                 f.params, next_cursor = parse_params(fcontent, next_cursor)
-                print(f"\tFound params: {' '.join(f'{param[0]}{param[1]}' for param in f.params)}")
+                print(f"\tFound params: {' '.join(f'{param[0]} : {param[1]},' for param in f.params)}")
                 print(f"Result: `{f.into_odin()}`")
+                g_functions.append(f)
 
-                word, next_cursor     = next_token(fcontent, next_cursor)
-                assert word == ";"
+                word, next_cursor = next_token(fcontent, next_cursor)
+                assert word == ";", f"Expected \";\" but received: {word}"
 
             case "typedef":
                 # <typedef> ::= "typedef" <type> word ";"
                 a = Alias()
 
                 a._from, next_cursor = parse_type(fcontent, next_cursor)
-                a._to, next_cursor = next_token_unwrap(fcontent, next_cursor)
-                print(f"Found alias: <{a._from} | {a._to}>")
 
-                terminator, next_cursor = next_token_unwrap(fcontent, next_cursor)
-                #print(f"Terminator: `{terminator}` {len(terminator)}\nnext_cursor: {next_cursor} vs. len: {len(fcontent)}")
-                assert terminator == ";"
+                potential_fn, potential_cursor, a._to = try_apply_function_type(a._from, fcontent, next_cursor)
+                if potential_fn != "" and potential_cursor != -1: # function decl
+                    a._from = potential_fn
+                    print(f"Typedef function result: {potential_fn}")
+                else:
+                    a._to, next_cursor = next_token_unwrap(fcontent, next_cursor)
+                    terminator, next_cursor = next_token_unwrap(fcontent, next_cursor)
+                    assert terminator == ";", f"Expected \";\" but received: {terminator}"
+                print(f"Found alias: <{a._from} | {a._to}>")
 
                 g_aliases[a._to] = a._from
 
@@ -466,7 +548,8 @@ def parse(fcontent: str) -> None:
 
 def preprocess_run(cc: str, current_location: str, target: str) -> str:
     include_path   = os.path.join(current_location, "../")
-    preprocess_out = os.path.join(current_location, f"{target}.out.txt")
+    os.makedirs(os.path.join(current_location, "out"), exist_ok=True)
+    preprocess_out = os.path.join(current_location, os.path.join("out", f"{target}.out.txt"))
     target         = os.path.join(current_location, target)
     subprocess.run(f"{cc} -dD -E \"{target}\" -I \"{include_path}\" -o \"{preprocess_out}\"", check=True)
     return preprocess_out
@@ -475,14 +558,25 @@ def main(cc: str, out_dir: str) -> None:
     print("parsegen turned \x1b[32mON\x1b[0m")
     print(f"Running parsegen → Output: {out_dir}")
 
-    #header_files = ["cl_platform.h", "cl.h", "cl_version.h", "cl_icd.h"]
-    header_files = ["cl_platform.h", "cl_version.h", "cl.h"]
+    # TODO: d3d10.h SHOULD BE MADE INTO ANOTHER CUSTOM HEADER TO BE WRAPPED AROUND THE SAME VARIABLE (_WIN32) AS IS IN defs.odin.c
+    header_files = [
+        # TODO: "d3d10.h",
+        "cl_platform.h",
+        "cl_version.h",
+        "cl.h",
+        "cl_function_types.h",
+        # "cl_d3d10.h",
+        # "cl_d3d11.h",
+        # "cl_ext.h",
+        # "cl_gl.h",
+        # TODO: "cl_icd.h",
+    ]
     current_location = os.path.dirname(os.path.abspath(__file__))
 
     for target_header in header_files:
         preprocess_fout = preprocess_run(cc, current_location, target_header)
         preprocess_extract = extract_file_content(preprocess_fout, target_header)
-        with open(f"{preprocess_fout}.ex", "w+") as file:
+        with open(os.path.join("out", f"{preprocess_fout}.ex"), "w+") as file:
             file.write(preprocess_extract)
         parse(preprocess_extract)
 
@@ -498,13 +592,31 @@ def main(cc: str, out_dir: str) -> None:
         file_blob += f"{alias.ljust(max_length)} :: {g_aliases[alias]}\n"
 
     file_blob += '\n'
+    file_blob += "foreign import opencl \"OpenCL.lib\"\n"
+    file_blob += "foreign opencl {\n"
 
     for func in g_functions:
-        file_blob += func + '\n'
+        file_blob += '\t' + func.into_odin() + '\n'
 
-    file_blob += '\n'
+    file_blob += '}\n'
+
+    g_config_file: dict[str, str] = {
+        "d3d10_types": "import \"vendor:directx/d3d11\"\nimport \"vendor:directx/dxgi\"\n",
+        "win_imports": ""
+    }
 
     with open(os.path.join(out_dir, "out.odin"), "w+") as file:
         file.write("package cl;\n\n")
-        # file.write(aliases_str)
+        file.write("import \"core:c\"\n")
+        file.write("import \"vendor:glfw\"\n")
+        preprocess_out = preprocess_run(cc, current_location, "defs.odin.c")
+        with open(preprocess_out, "r") as defsfile:
+            defs = defsfile.readlines()
+            for line in defs:
+                var = re.compile(r"^@(.*?)@$", re.DOTALL)
+                match = var.match(line)
+                if match:
+                    key = match.group(1)
+                    file.write(g_config_file[key])
+        file.write("\n")
         file.write(file_blob)

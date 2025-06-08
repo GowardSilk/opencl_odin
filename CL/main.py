@@ -55,5 +55,7 @@ def main() -> None:
         out_dir = args.out or os.getcwd()
         parsegen.main(find_cc(args.cc), out_dir)
 
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 if __name__ == "__main__":
     main()
