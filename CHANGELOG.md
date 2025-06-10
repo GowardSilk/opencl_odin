@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Creating basic example directory]
+
+#### Changed
+- moved `main.odin` into `examples/basic/main.odin`
+- moved `test_program.cl` into `examples/basic/test_program.cl`
+
 ### [Adding basic example]
 
 #### Added

@@ -4,7 +4,7 @@ import "base:runtime"
 import "core:c"
 import "core:log"
 
-import cl "opencl"
+import cl "shared:opencl"
 
 /**
  * @brief picks platform and device IDs based on max compute unit count
