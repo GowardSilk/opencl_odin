@@ -10,7 +10,7 @@ g_functions: list[Function] = []
 
 ODIN_CONFIG: dict[str, str] = {
     "d3d10_types": 'import "vendor:directx/d3d11"\nimport "vendor:directx/dxgi"\n',
-    "win_imports": "",
+    "win_imports": 'import win32 "core:sys/windows"',
 }
 
 C_TO_ODIN_TYPES = {
@@ -44,9 +44,32 @@ C_TO_ODIN_TYPES = {
     "ID3D11Buffer": CTypeMapping("d3d11.IBuffer", None),
     "ID3D11Texture2D": CTypeMapping("d3d11.ITexture2D", None),
     "ID3D11Texture3D": CTypeMapping("d3d11.ITexture3D", None),
+    "D3D_PRIMITIVE_TOPOLOGY": CTypeMapping("d3d11.PRIMITIVE_TOPOLOGY", None),
+    "D3D_PRIMITIVE": CTypeMapping("d3d11.PRIMITIVE", None),
+    "D3D_SRV_DIMENSION": CTypeMapping("d3d11.D3D10_SRV_DIMENSION", None),
     # dxgi
-    "UINT": CTypeMapping("dxgi.UINT", None),
     "DXGI_FORMAT": CTypeMapping("dxgi.FORMAT", None),
+    "DXGI_SAMPLE_DESC": CTypeMapping("dxgi.SAMPLE_DESC", None),
+    # win32
+    # TODO: Either grab this from windows headers or from Odin
+    "BOOL": CTypeMapping("win32.BOOL", None),
+    "INT": CTypeMapping("win32.INT", None),
+    "UINT": CTypeMapping("win32.UINT", None),
+    "UINT8": CTypeMapping("win32.UINT8", None),
+    "UINT64": CTypeMapping("win32.UINT8", None),
+    "SIZE_T": CTypeMapping("win32.SIZE_T", None),
+    "ULONG": CTypeMapping("win32.ULONG", None),
+    "BYTE": CTypeMapping("win32.BYTE", None),
+    "BYTE": CTypeMapping("win32.BYTE", None),
+    "LPCSTR": CTypeMapping("win32.LPCSTR", None),
+    "LPSTR": CTypeMapping("win32.LPSTR", None),
+    "HANDLE": CTypeMapping("win32.HANDLE", None),
+    "FLOAT": CTypeMapping("win32.FLOAT", None),
+    "RECT": CTypeMapping("win32.RECT", None),
+    "RPC_IF_HANDLE": CTypeMapping("win32.LPVOID", None),
+    "IID": CTypeMapping("win32.IID", None),
+    "GUID": CTypeMapping("win32.GUID", None),
+    "HRESULT": CTypeMapping("win32.HRESULT", None),
 }
 
 
@@ -56,7 +79,7 @@ def get_alias_type(key: str) -> str | None:
 
 
 def add_alias(a: Alias) -> None:
-    g_aliases[a._to] = AliasEntry(_from=a._from._from, file=a._from.file)
+    g_aliases[a._to] = a._from
 
 
 def extract_file_content(preprocessed_fname: str, target_file: str) -> str:
@@ -163,27 +186,69 @@ def parse_member_type(fcontent, cursor) -> tuple[str, int]:
         return f"{name}: {_type},\n", cursor
 
 
-def parse_compound_type(fcontent, cursor) -> tuple[str, int]:
+def parse_enum_member(fcontent, cursor) -> tuple[str, int]:
+    name, cursor = next_token_unwrap(fcontent, cursor)
+    op, cursor = next_token_unwrap(fcontent, cursor)
+    print(f'Name: {name}; "{op}"')
+    if op == ",":
+        return f"{name},", cursor
+
+    assert op == "=", f'Expected "=" but received: {op}'
+    # TODO: THIS CAN CONTAIN ANY NUMERIC EXPRESSION!
+    # QUICKFIX: AT LEAST FOR NOW, GRAB EVERYTHING THAT COMES AFTER
+    # THE ASSIGNMENT OPERATOR
+    curr = fcontent[cursor]
+    value: str = ""
+    while cursor < len(fcontent) and curr != "," and curr != "}":
+        if not curr.isspace():
+            value += curr
+        cursor += 1
+        curr = fcontent[cursor]
+
+    if curr == ",":
+        value += ",\n"
+        cursor += 1
+
+    # value, cursor = next_token_unwrap(fcontent, cursor)
+    # potential_comma, next_cursor = next_token_unwrap(fcontent, cursor)
+    # if potential_comma == ',':
+    #     cursor = next_cursor
+    #     value += ",\n"
+
+    return f"{name} = {value}", cursor
+
+
+def parse_compound_type(base: str, fcontent, cursor) -> tuple[str, int]:
     # parse types until "}"
     blob: str = ""
     while True:
-        word, next_cursor = next_token_unwrap(fcontent, cursor)
+        word, next_curosr = next_token_unwrap(fcontent, cursor)
         if word == "}":
-            # word, _ = next_token_unwrap(fcontent, next_cursor)
-            # if word == ";":
-            #     cursor = next_cursor
+            cursor = next_curosr
             break
 
-        word, cursor = parse_member_type(fcontent, cursor)
+        if base == "enum":
+            word, cursor = parse_enum_member(fcontent, cursor)
+        else:
+            word, cursor = parse_member_type(fcontent, cursor)
+
         blob += word
 
     return blob, cursor
 
 
-def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
+def is_compound_type(base: str) -> bool:
+    match base:
+        case "enum" | "struct" | "union":
+            return True
+        case _:
+            return False
+
+
+def parse_type_compound_helper(base: str, fcontent, cursor) -> tuple[str, int]:
     next, cursor = next_token_unwrap(fcontent, cursor)
     if next == "{":
-        compound, cursor = parse_compound_type(fcontent, cursor)
+        compound, cursor = parse_compound_type(base, fcontent, cursor)
         return (
             "{\n" + "\n".join(f"\t{line}" for line in compound.splitlines()) + "\n}",
             cursor,
@@ -194,7 +259,7 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
     next, next_cursor = next_token_unwrap(fcontent, cursor)
     if next == "{":
         _, next_cursor = next_token_unwrap(fcontent, cursor)
-        compound, cursor = parse_compound_type(fcontent, next_cursor)
+        compound, cursor = parse_compound_type(base, fcontent, next_cursor)
         return (
             "{\n" + "\n".join(f"\t{line}" for line in compound.splitlines()) + "\n}",
             cursor,
@@ -202,13 +267,14 @@ def parse_type_compound_helper(fcontent, cursor) -> tuple[str, int]:
     elif next == "*":
         # TODO: This is down bad... it only works because nobody has the balls
         # to define a pointer to an anonymous structure defined in-place
-        if name not in g_aliases and not any([name == value._from for value in g_aliases.values()]):
-            return "distinct rawptr", cursor
+        if name not in g_aliases and not any(
+            [name == value._from for value in g_aliases.values()]
+        ):
+            return "distinct rawptr", next_cursor
 
         return "^" + name, cursor
 
-    assert False  # should never happen...
-    # return name, cursor
+    return name, cursor
 
 
 def is_function_ptr_type(fcontent, cursor) -> str | None:
@@ -262,7 +328,17 @@ def is_void_alias(base: str) -> bool:
 
 
 def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
-    base = "rawptr" if is_void_alias(base) else f"^{base}"
+    if is_void_alias(base):
+        base = "rawptr"
+    elif base == "char":
+        base = "cstring"
+    else:
+        base = f"^{base}"
+
+    potential_const, potential_cursor = next_token_unwrap(fcontent, cursor)
+    if potential_const == "const":  # const ptr
+        custom_print("Skipping const ptr", Level.ERROR)
+        cursor = potential_cursor  # skip, Odin does not care
 
     while True:
         token_peek, peek_cursor = next_token_unwrap(fcontent, cursor)
@@ -372,7 +448,13 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
     if base in g_aliases or any([base == value._from for value in g_aliases.values()]):
         return apply_pointer_and_func_type(base, cursor, fcontent)
 
-    if base == "struct" or base == "union":
+    # check for anonymous pointers
+    potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
+    if potential_ptr == "*":
+        custom_print(f"Reading anonymous pointer!", Level.WARN)  # TODO: better msg ?
+        return apply_pointer_type("rawptr", potential_cursor, fcontent)
+
+    if is_compound_type(base):
         # struct{ cl_char x, y; }; -> using _###: struct { x, y: cl_char; }
 
         # struct _cl_sampler * -> ^_cl_sampler (additional filter needed later: -> distinct rawptr)
@@ -386,9 +468,9 @@ def parse_type(fcontent, cursor) -> tuple[Type, int]:
         #   image_channel_data_type: cl_channel_type;
         # }
 
-        blob, cursor = parse_type_compound_helper(fcontent, cursor)
-        if cursor != ";":
-            _, cursor = next_token_unwrap(fcontent, cursor)
+        blob, cursor = parse_type_compound_helper(base, fcontent, cursor)
+        # if cursor != ";":
+        #     _, cursor = next_token_unwrap(fcontent, cursor)
 
         if blob == "distinct rawptr":
             return blob, cursor
@@ -494,27 +576,42 @@ def parse(fcontent: str, forigin: str) -> None:
                 # <attribute>   ::= __attribute__((__stdcall__))
                 # <fname>       ::= word
 
-                custom_print("Parsing Function", Level.INFO)
-                f = Function()
-                f.ret, next_cursor = parse_type(fcontent, next_cursor)
-                custom_print(f"\tFound return type: {f.ret}", Level.DEBUG)
-                f.attr, next_cursor = parse_conv(
-                    fcontent, next_cursor
-                )  # <convention> == <attribute>
-                custom_print(
-                    f"\tFound attribute: {"none" if f.attr == Attribute.NONE else "stdcall"}",
-                    Level.DEBUG,
+                _type, next_cursor = parse_type(fcontent, next_cursor)
+                potential_ftype, potential_cursor, potential_fname = (
+                    try_apply_function_type(_type, fcontent, next_cursor)
                 )
-                f.name, next_cursor = next_token_unwrap(fcontent, next_cursor)
-                custom_print(f"\tFound name: {f.name}", Level.DEBUG)
-                f.params, next_cursor = parse_params(fcontent, next_cursor)
-                custom_print(
-                    f"\tFound params: {' '.join(f'{param[0]} : {param[1]},' for param in f.params)}",
-                    Level.DEBUG,
-                )
-                custom_print(f"Result: `{f.into_odin()}`", Level.INFO)
-                f.file = forigin
-                g_functions.append(f)
+                if potential_ftype != "" and potential_cursor != -1:
+                    custom_print("Parsing Function", Level.INFO)
+                    custom_print(f"Result: `{potential_fname} :: {potential_ftype}`")
+                    next_cursor = potential_cursor
+                else:
+                    name, next_cursor = next_token_unwrap(fcontent, next_cursor)
+                    # TODO: this can be made possible with yet another table...
+                    custom_print(
+                        f"Requires a value! {name}: {_type} = ???", Level.ERROR
+                    )
+
+                # custom_print("Parsing Function", Level.INFO)
+                # f = Function()
+                # f.ret, next_cursor = parse_type(fcontent, next_cursor)
+                # custom_print(f"\tFound return type: {f.ret}", Level.DEBUG)
+                # f.attr, next_cursor = parse_conv(
+                #     fcontent, next_cursor
+                # )  # <convention> == <attribute>
+                # custom_print(
+                #     f"\tFound attribute: {"none" if f.attr == Attribute.NONE else "stdcall"}",
+                #     Level.DEBUG,
+                # )
+                # f.name, next_cursor = next_token_unwrap(fcontent, next_cursor)
+                # custom_print(f"\tFound name: {f.name}", Level.DEBUG)
+                # f.params, next_cursor = parse_params(fcontent, next_cursor)
+                # custom_print(
+                #     f"\tFound params: {' '.join(f'{param[0]} : {param[1]},' for param in f.params)}",
+                #     Level.DEBUG,
+                # )
+                # custom_print(f"Result: `{f.into_odin()}`", Level.INFO)
+                # f.file = forigin
+                # g_functions.append(f)
 
                 word, next_cursor = next_token_unwrap(fcontent, next_cursor)
                 assert word == ";", f'Expected ";" but received: {word}'
@@ -527,15 +624,41 @@ def parse(fcontent: str, forigin: str) -> None:
                 a._from = AliasEntry(_type, forigin)
 
                 potential_fn, potential_cursor, a._to = try_apply_function_type(
-                    a._from._from, fcontent, next_cursor
+                    _type, fcontent, next_cursor
                 )
                 if potential_fn != "" and potential_cursor != -1:  # function decl
                     a._from._from = potential_fn
                     custom_print(f"Typedef function result: {potential_fn}", Level.INFO)
                 else:
                     a._to, next_cursor = next_token_unwrap(fcontent, next_cursor)
+                    print(f"?????? {a._from._from} {a._to}")
                     terminator, next_cursor = next_token_unwrap(fcontent, next_cursor)
                     assert terminator == ";", f'Expected ";" but received: {terminator}'
+
+                    # special exception of kind:
+                    # typedef struct <name> <name>;
+                    # or
+                    # typedef <knowntype> <type>;
+                    # this has no meaning in Odin, but the type may be referred to inside the code so, make a "blank"
+                    # alias <name> -> <name>, that ought to be rewritten later
+                    space = a._from._from.find(" ")
+                    is_blank_typedef = (
+                        space == -1 and a._from._from == a._to
+                    )  # typedef <name> <name2>
+                    is_blank_typedef = (
+                        is_blank_typedef
+                        or is_compound_type(a._from._from[:space])
+                        and a._from._from[space:] == a._to
+                    )  # typedef "struct|enum|union" <name> <name2>;
+                    if is_blank_typedef:
+                        a._from._from = a._to
+                        custom_print(
+                            f"Found blank typedef: <{a._to} | {a._to}>", Level.INFO
+                        )
+                        add_alias(a)
+                        cursor = next_cursor
+                        continue
+
                 custom_print(f"Found alias: <{a._from} | {a._to}>", Level.INFO)
 
                 add_alias(a)
@@ -545,50 +668,54 @@ def parse(fcontent: str, forigin: str) -> None:
 
                 d = Definition()
                 d.key, next_cursor = next_token_unwrap(fcontent, next_cursor)
-                
+
                 # Skip whitespace after the key
-                while next_cursor < len(fcontent) and fcontent[next_cursor].isspace() and fcontent[next_cursor] != '\n':
+                while (
+                    next_cursor < len(fcontent)
+                    and fcontent[next_cursor].isspace()
+                    and fcontent[next_cursor] != "\n"
+                ):
                     next_cursor += 1
-                
+
                 cursor = next_cursor
                 # Find end of line (value portion)
-                while next_cursor < len(fcontent) and fcontent[next_cursor] != '\n':
+                while next_cursor < len(fcontent) and fcontent[next_cursor] != "\n":
                     next_cursor += 1
-                
+
                 # Extract the raw value
                 raw_value = fcontent[cursor:next_cursor].strip()
-                
+
                 # Skip if empty or special cases
                 if not raw_value or raw_value in {"#define", "typedef", "extern"}:
                     continue
 
                 def clean_numeric(value: str) -> str:
                     value = re.sub(
-                        r'\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*([a-zA-Z0-9_]+)',
-                        r'cast(\1)\2',
-                        value
+                        r"\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*([a-zA-Z0-9_]+)",
+                        r"cast(\1)\2",
+                        value,
                     )
 
                     # for each numerical expression we have to get rid of suffixes
                     def clean_single_number(m):
                         num = m.group(0)
-                        if num.lower().startswith(('0x', '0x')):
-                            return re.sub(r'[uUlL]+$', '', num)
-                        elif 'e' in num.lower():
-                            return re.sub(r'[fFdD]+$', '', num)
-                        return re.sub(r'[uUlLfFdD]+$', '', num)
-                    
+                        if num.lower().startswith(("0x", "0x")):
+                            return re.sub(r"[uUlL]+$", "", num)
+                        elif "e" in num.lower():
+                            return re.sub(r"[fFdD]+$", "", num)
+                        return re.sub(r"[uUlLfFdD]+$", "", num)
+
                     # Match all numeric literals in the expression
                     numeric_pattern = re.compile(
-                        r'-?'  # Optional sign
-                        r'(?:'
-                        r'0[xX][0-9a-fA-F]+(?:[uUlL]+)?'  # Hex
-                        r'|0[xX][0-9a-fA-F.]+p[+-]?\d+(?:[fFdD]+)?'  # Hex float
-                        r'|\d+\.?\d*(?:[eE][+-]?\d+)?(?:[fFdD]+)?'  # Decimal/scientific
-                        r'|\.\d+(?:[eE][+-]?\d+)?(?:[fFdD]+)?'  # .decimal
-                        r')(?=\s*[+-/*%]|\s*$)'  # Lookahead for operator or end
+                        r"-?"  # Optional sign
+                        r"(?:"
+                        r"0[xX][0-9a-fA-F]+(?:[uUlL]+)?"  # Hex
+                        r"|0[xX][0-9a-fA-F.]+p[+-]?\d+(?:[fFdD]+)?"  # Hex float
+                        r"|\d+\.?\d*(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # Decimal/scientific
+                        r"|\.\d+(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # .decimal
+                        r")(?=\s*[+-/*%]|\s*$)"  # Lookahead for operator or end
                     )
-                    
+
                     # Process each number in the expression
                     return numeric_pattern.sub(clean_single_number, value)
 
@@ -609,7 +736,7 @@ def parse(fcontent: str, forigin: str) -> None:
                 #     #     return re.sub(r'[uUlLfFdD]+$', '', num)
                 #     # else:
                 #     #     return re.sub(r'[uUlLdD]+$', '', num)
-                
+
                 # # Improved pattern for numeric constants and simple expressions
                 # constant_pattern = re.compile(
                 #     r'''
@@ -631,15 +758,15 @@ def parse(fcontent: str, forigin: str) -> None:
                 #     )*
                 #     ''', re.VERBOSE
                 # )
-                
+
                 # # Clean up the value
                 # cleaned_value = constant_pattern.sub(remove_suffixes, raw_value)
-                
+
                 # Remove trailing comments
-                cleaned_value = re.sub(r'/\*.*\*/', '', cleaned_value).strip()
-                cleaned_value = re.sub(r'//.*$', '', cleaned_value).strip()
+                cleaned_value = re.sub(r"/\*.*\*/", "", cleaned_value).strip()
+                cleaned_value = re.sub(r"//.*$", "", cleaned_value).strip()
                 cleaned_value = cleaned_value.strip()
-                
+
                 if cleaned_value:  # Only add if we have a value
                     d.value = cleaned_value
                     d.file = forigin
@@ -667,18 +794,17 @@ def preprocess_run(cc: str, current_location: str, target: str) -> str:
 def main(cc: str, out_dir: str) -> None:
     custom_print(f"Running parsegen → Output: {out_dir}", Level.INFO)
 
-    # TODO: d3d10.h SHOULD BE MADE INTO ANOTHER CUSTOM HEADER TO BE WRAPPED AROUND THE SAME VARIABLE (_WIN32) AS IS IN defs.odin.c
     header_files = [
-        # TODO: "d3d10.h",
+        "d3d10.h",
         "cl_platform.h",
         "cl_version.h",
         "cl.h",
         "cl_function_types.h",
-        # "cl_d3d10.h",
+        "cl_d3d10.h",
         "cl_d3d11.h",
         "cl_ext.h",
         "cl_gl.h",
-        # TODO: "cl_icd.h",
+        "cl_icd.h",
     ]
     current_location = os.path.dirname(os.path.abspath(__file__))
 
@@ -693,25 +819,29 @@ def main(cc: str, out_dir: str) -> None:
     file_blob: str = ""
 
     file_blob += "\n"
-    file_blob += "foreign import opencl \"OpenCL.lib\"\n\n"
+    file_blob += 'foreign import opencl "OpenCL.lib"\n\n'
 
     for target_header in header_files:
         functions = list(filter(lambda func: func.file == target_header, g_functions))
-        aliases   = list(filter(lambda alias: alias[1].file == target_header, g_aliases.items()))
-        definitions = list(filter(lambda _def: _def.file == target_header, g_definitions))
+        aliases = list(
+            filter(lambda alias: alias[1].file == target_header, g_aliases.items())
+        )
+        definitions = list(
+            filter(lambda _def: _def.file == target_header, g_definitions)
+        )
 
         if len(functions) > 0 or len(aliases) > 0 or len(definitions):
             file_blob += f"/* =========================================\n*               {target_header}\n* ========================================= */\n\n"
 
             for defs in definitions:
-                file_blob += defs.into_odin() + '\n'
+                file_blob += defs.into_odin() + "\n"
 
             file_blob += "\n" if len(definitions) > 0 else ""
 
             max_length = max(len(alias) for alias in g_aliases)
             for name, alias in aliases:
                 file_blob += f"{name.ljust(max_length)} :: {alias._from}\n"
-            
+
             file_blob += "\n" if len(definitions) > 0 else ""
 
             if len(functions) > 0:
@@ -719,7 +849,6 @@ def main(cc: str, out_dir: str) -> None:
                 for func in functions:
                     file_blob += "\t" + func.into_odin() + "\n"
                 file_blob += "}\n"
-
 
     with open(os.path.join(out_dir, "out.odin"), "w+") as file:
         file.write("package cl;\n\n")

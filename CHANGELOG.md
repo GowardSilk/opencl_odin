@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Extending parsing 1/2]
+
+#### Changed
+- added protection against different compilers; now we only support `clang` (`main.py`)
+- added parsing of enums, anonymous pointers, and other typedef "exceptions" (`parsegen.py`)
+
 ### [Creating basic example directory]
 
 #### Changed

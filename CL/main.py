@@ -43,6 +43,8 @@ def find_cc(cc: str | None) -> str:
         print("\x1b[31mNo working compiler found in PATH.\x1b[0m")
         exit(1)
 
+    assert cc == "clang", f"This version does not support {cc} compiler YET! Use clang"
+
     return shutil.which(cc)
 
 
