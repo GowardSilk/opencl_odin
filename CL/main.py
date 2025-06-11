@@ -7,14 +7,14 @@ import log
 
 
 def print_help() -> None:
-    print("py main.py [--parsegen] [--out=<outdir>] [--cc=<cc>]")
-    print("\t--parsegen ... generates odin files out of cl headers (set by default)")
+    print("py main.py [--out=<outdir>] [--cc=<cc>]")
+    print("\t--parsegen ... generates odin files out of cl headers")
     print("\t--out      ... specifies output directory for *.odin bindings")
     print(
         "\t--cc       ... specifies C compiler to be used for CL header preprocessing"
     )
     print("\t--verbose  ... enables DEBUG messages")
-    print("\t--suppress_warnings  ... disables WARNING messages")
+    print("\t--suppress-warnings  ... disables WARNING messages")
 
 
 def arg_validator(s: str) -> str:
@@ -71,14 +71,16 @@ def main() -> None:
         print(f"\x1b[31mInvalid\x1b[0m parameter(s): {' '.join(unknown)}")
         print_help()
         sys.exit(1)
-    elif args.help:
-        print_help()
-    else:
+    elif args.parsegen:
         log.set_debug_msg_out(args.verbose)
         log.set_warning_msg_out(not args.suppress_warnings)
 
         out_dir = args.out or os.getcwd()
-        parsegen.main(find_cc(args.cc), out_dir)
+        parsegen.main(find_cc(args.cc), out_dir, os.name == "nt")
+    else:
+        print_help()
+        if not args.help:
+            print("Hint: use `--parsegen` to active parsing.")
 
 
 import sys

@@ -155,12 +155,15 @@ def parse_function_parameter_type_array_identifier(fcontent, cursor) -> tuple[st
 
 
 def parse_member_type(fcontent, cursor) -> tuple[str, int]:
-    _type, cursor = parse_type(fcontent, cursor)
+    _type, next_cursor = parse_type(fcontent, cursor)
     # parse name/array identifier or both
-    name, next_cursor = next_token_unwrap(fcontent, cursor)
+    name, next_cursor = next_token_unwrap(fcontent, next_cursor)
 
     # end
     if is_delim(name):
+        potential_fname = is_function_ptr_type(fcontent, cursor)
+        if potential_fname:
+            return f"{potential_fname}: {_type},\n", next_cursor
         return f"using _: {_type},\n", next_cursor
 
     # name
@@ -791,30 +794,39 @@ def preprocess_run(cc: str, current_location: str, target: str) -> str:
     return preprocess_out
 
 
-def main(cc: str, out_dir: str) -> None:
+def parse_helper(cc: str, current_location: str, target_header: str) -> None:
+    preprocess_fout = preprocess_run(cc, current_location, target_header)
+    preprocess_extract = extract_file_content(preprocess_fout, target_header)
+    with open(os.path.join("out", f"{preprocess_fout}.ex"), "w+") as file:
+        file.write(preprocess_extract)
+    parse(preprocess_extract, target_header)
+
+
+def main(cc: str, out_dir: str, enable_d3d: bool) -> None:
     custom_print(f"Running parsegen → Output: {out_dir}", Level.INFO)
 
     header_files = [
-        "d3d10.h",
         "cl_platform.h",
         "cl_version.h",
         "cl.h",
         "cl_function_types.h",
-        "cl_d3d10.h",
-        "cl_d3d11.h",
         "cl_ext.h",
         "cl_gl.h",
         "cl_icd.h",
     ]
     current_location = os.path.dirname(os.path.abspath(__file__))
 
+    if enable_d3d:
+        parse_helper(cc, current_location, "d3d10.h")
+
+        header_files += [
+            "cl_d3d10.h",
+            "cl_d3d11.h",
+            "d3d10.h",
+        ]
+
     for target_header in header_files:
-        preprocess_fout = preprocess_run(cc, current_location, target_header)
-        preprocess_extract = extract_file_content(preprocess_fout, target_header)
-        with open(os.path.join("out", f"{preprocess_fout}.ex"), "w+") as file:
-            file.write(preprocess_extract)
-        custom_print(f"Parsing file: {target_header}", Level.ERROR)
-        parse(preprocess_extract, target_header)
+        parse_helper(cc, current_location, target_header)
 
     file_blob: str = ""
 

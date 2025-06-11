@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Restructuring d3d parsing]
+
+### Changed
+- making `--parsegen` option obligatory when needing to parse files (`main.py`)
+- fixing parsing (and consequently C-Odin transpilation) of function pointers as struct members (viz. d3d10.h vtables for example) (`parsegen.py`)
+- making `d3d10.h` and its related OpenCL headers win32 only in python script (`main.py`/`parsegen.py`)
+
 ### [Extending parsing 1/2]
 
 #### Changed
