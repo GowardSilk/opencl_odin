@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [Started creating new example (pckg video)]
+## Added
+- `main.odin`
+- `image.odin` .... <<future:>> should  contain image loading facilities that will be displayed in the ui (Draw_Image ?)
+- `ui.odin` .... basic setup (much inspired by imgui); what is left to do is the batched rendering itself
+- `video.odin` .... <<future:>> should contain video loading facilities that will be displayed in the ui (Draw_Video ?)
+
 ## [Formatting changes]
 
 ## Added
