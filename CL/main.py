@@ -15,6 +15,7 @@ def print_help() -> None:
     )
     print("\t--verbose  ... enables DEBUG messages")
     print("\t--suppress-warnings  ... disables WARNING messages")
+    print("\t--only-essential  ... omits non-essential headers")
 
 
 def arg_validator(s: str) -> str:
@@ -64,6 +65,7 @@ def main() -> None:
     parser.add_argument("--help", action="store_true", help="Show help message")
     parser.add_argument("--verbose", action="store_true", help="Enables DEBUG messages")
     parser.add_argument("--suppress-warnings", action="store_true", help="Enables DEBUG messages")
+    parser.add_argument("--only-essential", action="store_true", help="")
 
     args, unknown = parser.parse_known_args()
 
@@ -76,7 +78,7 @@ def main() -> None:
         log.set_warning_msg_out(not args.suppress_warnings)
 
         out_dir = args.out or os.getcwd()
-        parsegen.main(find_cc(args.cc), out_dir, os.name == "nt")
+        parsegen.main(find_cc(args.cc), out_dir, os.name == "nt", args.only_essential)
     else:
         print_help()
         if not args.help:

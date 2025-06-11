@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [Formatting changes]
+
+## Added
+- `fmt.py` for unified way to construct certain Odin statements/typedefs
+- also supports `cl_` prefix deletion (and its derivations) in the following way:
+  - `cl`XyZy -> XyZy (functions, though this may be subject to change with @(link_name="") if we decide to change the casing to something else)
+  - `CL`X_Y_Z -> X_Y_Z (macros)
+  - `cl`TyT -> Ty_T (types; todo: types need fixing, e.g. ID gets transformed into I_D... not very convenient)
+
+### Changed
+- `main.py` adding `--only-essential` which compiles only necessary cl_*.h headers for minimal build
+- `parsegen.py` adding support for Oding type construction from `fmt.py`; also fixed `try_apply_function_type` for unified parsing for typedef(s) as well as extern function(s)
+  - also fixed unintentional double reads of data when parsing function on `extern` without re-applying the correct cursor
+- `parse_types.py` to support `fmt` as well
+
 ### [Restructuring d3d parsing]
 
 ### Changed

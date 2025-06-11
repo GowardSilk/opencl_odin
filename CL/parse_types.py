@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
+from fmt import strip_cl_prefix, format_param, format
 
 Type = str
 File_Origin = str
@@ -8,7 +9,7 @@ File_Origin = str
 
 class Definition:
     def into_odin(self) -> str:
-        return f"{self.key} :: {self.value}"
+        return f"{format(self.key)} :: {format(self.value)}"
 
     key: str
     value: str
@@ -21,18 +22,26 @@ class Attribute(Enum):
 
 
 class Function:
-    def into_odin(self) -> str:
+    def into_odin(self, *, typed: bool = False) -> str:
         attr = '"stdcall"' if self.attr == Attribute.STDCALL else ""
 
-        param_parts = [f"{name}: {type_}" for type_, name in self.params]
+        param_parts = [
+            format_param(name, type_) for type_, name in self.params
+        ]
         single_line_params = ", ".join(param_parts)
 
-        base = f"{self.name} :: proc {attr} ("
+        base: str = ""
+        if typed:
+            base = f"#type proc {attr} ("
+        else:
+            base = f"{strip_cl_prefix(self.name)} :: proc {attr} ("
 
         line = f"{base}{single_line_params})"
         if self.ret != "void":
-            line += f" -> {self.ret}"
+            line += f" -> {format(self.ret)}"
         if len(line) <= 100:
+            if typed:
+                return line
             return f"{line} ---"
 
         # perform formatting if line exceeds 100 chars
@@ -40,7 +49,10 @@ class Function:
         multiline_params = ",\n".join([indent + part for part in param_parts])
         result = f"{base}\n{multiline_params})"
         if self.ret != "void":
-            result += f" -> {self.ret}"
+            result += f" -> {format(self.ret)}"
+
+        if typed:
+            return result
         return f"{result} ---"
 
     attr: Attribute
