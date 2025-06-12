@@ -4,23 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-## [Started creating new example (pckg video)]
-## Added
+### [Extending batch rendering (pckg video)]
+
+#### Added
+- `pix.glsl` and `vert.glsl` as basic shaders; will do more when the full rendering is going to work
+
+#### Chagned
+- `ui.odin` ... filling `Batch_Renderer` data, layout out basic structure for per-window batches (Missing Vertex Attributes initialization as well as some coloring for ui; also Text is not done at all)
+
+### [Started creating new example (pckg video)]
+#### Added
 - `main.odin`
 - `image.odin` .... <<future:>> should  contain image loading facilities that will be displayed in the ui (Draw_Image ?)
 - `ui.odin` .... basic setup (much inspired by imgui); what is left to do is the batched rendering itself
 - `video.odin` .... <<future:>> should contain video loading facilities that will be displayed in the ui (Draw_Video ?)
 
-## [Formatting changes]
+### [Formatting changes]
 
-## Added
+#### Added
 - `fmt.py` for unified way to construct certain Odin statements/typedefs
 - also supports `cl_` prefix deletion (and its derivations) in the following way:
   - `cl`XyZy -> XyZy (functions, though this may be subject to change with @(link_name="") if we decide to change the casing to something else)
   - `CL`X_Y_Z -> X_Y_Z (macros)
   - `cl`TyT -> Ty_T (types; todo: types need fixing, e.g. ID gets transformed into I_D... not very convenient)
 
-### Changed
+#### Changed
 - `main.py` adding `--only-essential` which compiles only necessary cl_*.h headers for minimal build
 - `parsegen.py` adding support for Oding type construction from `fmt.py`; also fixed `try_apply_function_type` for unified parsing for typedef(s) as well as extern function(s)
   - also fixed unintentional double reads of data when parsing function on `extern` without re-applying the correct cursor
@@ -28,7 +36,7 @@ All notable changes to this project will be documented in this file.
 
 ### [Restructuring d3d parsing]
 
-### Changed
+#### Changed
 - making `--parsegen` option obligatory when needing to parse files (`main.py`)
 - fixing parsing (and consequently C-Odin transpilation) of function pointers as struct members (viz. d3d10.h vtables for example) (`parsegen.py`)
 - making `d3d10.h` and its related OpenCL headers win32 only in python script (`main.py`/`parsegen.py`)

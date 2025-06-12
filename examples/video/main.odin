@@ -14,7 +14,7 @@ main :: proc() {
 
     ok: runtime.Allocator_Error;
     context.user_ptr, ok = ui_init();
-    assert(ok == .None);
+    assert(ok == .None && context.user_ptr != nil);
 
     _ = ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
     ui_draw();
