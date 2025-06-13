@@ -15,6 +15,7 @@ import "base:runtime"
 import "core:c"
 import "core:log"
 import "core:mem"
+import "core:image"
 
 import "vendor:glfw"
 import gl "vendor:OpenGL"
@@ -47,15 +48,19 @@ Window_Index :: distinct uint;
 Draw_Command_Text :: struct {
     text: string,
     size: c.double,
-    rect: Rect,
 }
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
     rect: Rect,
 }
+Draw_Command_Image :: struct {
+    img: u32,
+    rect: Rect,
+}
 Draw_Command :: union {
     Draw_Command_Button,
     Draw_Command_Text,
+    Draw_Command_Image,
 }
 Draw_Command_Queue :: struct {
     commands: [dynamic]Draw_Command,
@@ -64,7 +69,7 @@ Draw_Command_Queue :: struct {
 }
 
 @(private="file")
-Vertex_Array_Buffer_Constructor :: struct {
+Vertex_Buffer_Constructor :: struct {
     vao: u32,
     vbo: u32,
     vertices: [dynamic]f32,
@@ -72,13 +77,27 @@ Vertex_Array_Buffer_Constructor :: struct {
     ibo: u32,
     indexes: [dynamic]u32,
 }
-/** @brief contains all batched buffers for one Window render */
 @(private="file")
-Batch_Renderer :: struct {
-    using ctor: Vertex_Array_Buffer_Constructor,
+Image_Buffer_Constructor :: struct {
+    images: [dynamic]u32,
+}
+@(private="file")
+Shader_Program_Constructor :: struct {
     vs: u32,
     ps: u32,
     program: u32,
+}
+@(private="file")
+Font_Atlas_Constructor :: struct {
+    font_buf: ^u32, /**< view to the (first) image in the Image_Buffer_Constructor */
+}
+/** @brief contains all batched buffers for one Window render */
+@(private="file")
+Batch_Renderer :: struct {
+    using vertex_ctor: Vertex_Buffer_Constructor,
+    using shader_ctor: Shader_Program_Constructor,
+    using image_ctor:  Image_Buffer_Constructor,
+    using font_ctor:   Font_Atlas_Constructor,
 }
 
 Draw_Context :: struct {
@@ -93,6 +112,7 @@ get_context :: #force_inline proc() -> ^Draw_Context {
 
 @(private="file")
 batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: runtime.Allocator_Error) {
+    // vertices/indexes
     gl.GenVertexArrays(1, &ren.vao);
 
     gl.GenBuffers(1, &ren.vbo);
@@ -113,11 +133,26 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: runtime.Allocator_Err
     ren.program, ok = shader_link(ren.vs, ren.ps);
     if !ok do return ren, .Invalid_Argument;
 
+    // images
+    ren.images = make([dynamic]u32) or_return;
+
+    // font atlas
+    /*
+    img, imgerr := load_image("font.bmp");
+    if imgerr != nil do return ren, .Invalid_Argument;
+    gl.GenTextures(1, &ren.images[0]);
+    gl.BindTexture(gl.TEXTURE_2D, ren.images[0]);
+    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
+        cast(i32)img.width, cast(i32)img.height, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
+    ren.font_buf = &ren.images[0];
+    */
+
     return ren, err;
 }
 
 @(private="file")
-batch_renderer_add :: proc(ren: ^Batch_Renderer, r: Rect) {
+_batch_renderer_add_rect :: proc(ren: ^Batch_Renderer, r: Rect) {
     base_index := cast(u32)len(ren^.vertices) / 2;
 
     // CCW
@@ -132,6 +167,29 @@ batch_renderer_add :: proc(ren: ^Batch_Renderer, r: Rect) {
         base_index + 2, base_index + 3, base_index + 0,
     );
 }
+
+@(private="file")
+batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
+    _batch_renderer_add_rect(ren, cmd.rect);
+    batch_renderer_add_text(ren, cmd.text);
+}
+
+@(private="file")
+batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
+    // todo: we need to grab for each character its appropriate offset
+    // then load it sequentially (via glTexSubImage2D??)
+    // for c in cmd.text {
+    // }
+}
+
+@(private="file")
+batch_renderer_add_image :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Image) {
+    _batch_renderer_add_rect(ren, cmd.rect);
+    // note: image data must have been passed preemptively
+}
+
+@(private="file")
+batch_renderer_add :: proc { batch_renderer_add_button, batch_renderer_add_text, batch_renderer_add_image }
 
 @(private="file")
 batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
@@ -159,9 +217,20 @@ batch_renderer_clear :: proc(ren: ^Batch_Renderer) {
 
 @(private="file")
 batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
-    gl.DeleteVertexArrays(1, &ren.vao);
+    // vertex buffer constructor
+    delete(ren^.vertices);
+    delete(ren^.indexes);
     buffers := [2]u32 { ren^.vbo, ren^.ibo };
     gl.DeleteBuffers(2, &buffers[0]);
+    gl.DeleteVertexArrays(1, &ren^.vao);
+
+    // image buffer constructor + font atlas constructor
+    gl.DeleteTextures(cast(i32)len(ren^.images), raw_data(ren^.images));
+    delete(ren^.images);
+    ren^.font_buf = nil;
+
+    // shader program constructor
+    gl.DeleteProgram(ren^.program);
 }
 
 @(private="file")
@@ -350,35 +419,49 @@ ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
 }
 
+@(private="file")
+ui_create_rect :: #force_inline proc(pos: [2]f32, sz: [2]f32) -> Rect {
+    return Rect {
+        pos.x, pos.y,
+        pos.x + sz.x, pos.y + sz.y,
+    };
+}
+
+@(private="file")
+ui_create_rect64 :: proc(pos: [2]c.double, sz: [2]c.double) -> Rect64 {
+    return Rect64 {
+        pos.x, pos.y,
+        pos.x + sz.x, pos.y + sz.y,
+    };
+}
+
 ui_draw_button :: proc(name: string) -> bool {
     queue := get_context()^.queue;
     active_window := queue.windows[queue.active_window];
 
-    // TODO: IF WE WON'T USE THIS ANYWHERE ELSE, MAKE THIS [2]c.double BY DEFAULT
-    button_pos := ui_draw_cursor_current();
+    button_pos  := ui_draw_cursor_current();
+    button_size := active_window.cursor.button_size;
     defer ui_draw_cursor_button_next(); // move to the next "slot"
-    button_size := [2]c.double{ cast(c.double)active_window.cursor.button_size.x, cast(c.double)active_window.cursor.button_size.y };
 
-    r := Rect {
-            cast(f32)button_pos.x,  cast(f32)button_pos.y,
-            cast(f32)button_pos.x + cast(f32)button_size.x, cast(f32)button_pos.y + cast(f32)button_size.y,
-        };
-    r_ndc := ui_pos_to_ndc(r);
-    // r_ndc := Rect {
-    //     x1 = -0.5,
-    //     y1 = -0.5,
-    //     x2 =  0.5,
-    //     y2 =  0.5,
-    // };
+    r_ndc := ui_pos_to_ndc(
+        ui_create_rect(
+            [2]f32 { cast(f32)button_pos.x, cast(f32)button_pos.y },
+            [2]f32 { cast(f32)button_size.x, cast(f32)button_size.y },
+        ),
+    );
     ui_register_draw_command(Draw_Command_Button {
-        Draw_Command_Text { name, active_window.cursor.font_size, r_ndc }, r_ndc,
+        Draw_Command_Text { name, active_window.cursor.font_size },
+        r_ndc,
     });
+
+    button_pos64  := [2]c.double { cast(c.double)button_pos.x, cast(c.double)button_pos.y };
+    button_size64 := [2]c.double { cast(c.double)button_size.x, cast(c.double)button_size.y };
 
     state := glfw.GetMouseButton(active_window.handle, glfw.MOUSE_BUTTON_LEFT);
     if (state == glfw.PRESS) {
         mouse_xpos, mouse_ypos := glfw.GetCursorPos(active_window.handle);
         if ui_is_inside_widget(
-            Rect64{cast(c.double)button_pos.x, cast(c.double)button_pos.y, cast(c.double)button_pos.x + button_size.x, cast(c.double)button_pos.y + button_size.y},
+            ui_create_rect64(button_pos64, button_size64),
             {mouse_xpos, mouse_ypos}
         ) {
             return true;
@@ -387,21 +470,29 @@ ui_draw_button :: proc(name: string) -> bool {
     return false;
 }
 
+ui_draw_image :: #force_inline proc(img: Image) {
+    draw_cmd := Draw_Command_Image {};
+
+    img_pos  := ui_draw_cursor_current();
+    img_size := [2]f32 { cast(f32)img.width, cast(f32)img.height };
+    draw_cmd.rect = ui_create_rect(
+        [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y },
+        img_size,
+    );
+    defer ui_draw_cursor_button_next(); // move to the next "slot"
+
+    gl.GenTextures(1, &draw_cmd.img);
+    gl.BindTexture(gl.TEXTURE_2D, draw_cmd.img);
+    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
+        cast(i32)img.width, cast(i32)img.height, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
+
+    ui_register_draw_command(draw_cmd);
+}
+
 @(private="file")
 ui_register_draw_command :: #force_inline proc(cmd: Draw_Command) {
     append(&get_context()^.queue.commands, cmd)
-}
-
-@(private="file")
-ui_execute_draw_button_command :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
-    batch_renderer_add(ren, cmd.rect);
-    ui_execute_draw_text_command(ren, cmd.text);
-}
-
-@(private="file")
-ui_execute_draw_text_command :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
-    //assert(false, "TODO: Add text!");
-    //batch_renderer_add(ren, cmd.rect);
 }
 
 @(private="file")
@@ -412,8 +503,9 @@ ui_execute_draw_commands :: proc() {
 
     for cmd in ctx^.queue.commands {
         switch c in cmd {
-            case Draw_Command_Button: ui_execute_draw_button_command(ren, c);
-            case Draw_Command_Text:   ui_execute_draw_text_command(ren, c);
+            case Draw_Command_Button:  batch_renderer_add(ren, c);
+            case Draw_Command_Text:    batch_renderer_add(ren, c);
+            case Draw_Command_Image:   batch_renderer_add(ren, c);
         }
     }
 

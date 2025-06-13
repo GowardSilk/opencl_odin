@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Basic outline of image rendering]
+
+#### Changed
+- `image.odin` to support (or rather "alias" at this point) image loading; will be much proliferative in the future when we will have image manipulation functions
+- `ui.odin` outlining basic image rendering; todo: maybe some fix for batching? we could use PBO and then waitsync on actual render
+
 ### [Fixing rendering]
 
 #### Changed
