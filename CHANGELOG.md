@@ -4,12 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Fixing rendering]
+
+#### Changed
+- `ui.odin` fixing rendering bugs; now we can see the "Button"(s)!!
+- `main.odin` adding proper check for window register
+
 ### [Extending batch rendering (pckg video)]
 
 #### Added
 - `pix.glsl` and `vert.glsl` as basic shaders; will do more when the full rendering is going to work
 
-#### Chagned
+#### Changed
 - `ui.odin` ... filling `Batch_Renderer` data, layout out basic structure for per-window batches (Missing Vertex Attributes initialization as well as some coloring for ui; also Text is not done at all)
 
 ### [Started creating new example (pckg video)]

@@ -16,11 +16,13 @@ main :: proc() {
     context.user_ptr, ok = ui_init();
     assert(ok == .None && context.user_ptr != nil);
 
-    _ = ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
+    assert(ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen));
     ui_draw();
 
     ui_destroy();
 }
+
+OPTIONS_WINDOW_OPENED := false;
 
 draw_main_screen :: proc(w: Window) {
     ui_set_button_size({100, 50});
@@ -28,13 +30,18 @@ draw_main_screen :: proc(w: Window) {
     else if ui_draw_button("img2") do load_image("img2.png");
     else if ui_draw_button("img3") do load_image("img3.png");
     else if ui_draw_button("options") {
-        if !ui_register_window({512, 512}, "Image Settings", draw_options) {
-            glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
+        if !OPTIONS_WINDOW_OPENED {
+            if !ui_register_window({512, 512}, "Image Settings", draw_options) {
+                log.errorf("Failed to open auxiliary option window!");
+                glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
+            } else do OPTIONS_WINDOW_OPENED = true;
         }
     }
 }
 
-draw_options :: proc(_: Window) {
+draw_options :: proc(w: Window) {
+    if w.signal == .SHOULD_CLOSE do OPTIONS_WINDOW_OPENED = false;
+
     ui_set_button_size({200, 50});
     if      ui_draw_button("Do something #1") do nothing();
     else if ui_draw_button("Do something #2") do nothing();

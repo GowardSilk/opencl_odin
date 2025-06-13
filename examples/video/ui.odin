@@ -14,6 +14,7 @@ import "base:runtime"
 
 import "core:c"
 import "core:log"
+import "core:mem"
 
 import "vendor:glfw"
 import gl "vendor:OpenGL"
@@ -27,12 +28,17 @@ Draw_Cursor :: struct {
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
     return Draw_Cursor { {0, 0}, {20, 20}, 10 };
 }
+Window_Signal :: enum {
+    NONE = 0,
+    SHOULD_CLOSE,
+}
 Window :: struct {
     size: [2]c.int,
     name: cstring,
     handle: glfw.WindowHandle,
     draw_proc: Draw_Proc,
     cursor: Draw_Cursor,
+    signal: Window_Signal,
 }
 
 @(private="file")
@@ -64,7 +70,7 @@ Vertex_Array_Buffer_Constructor :: struct {
     vertices: [dynamic]f32,
 
     ibo: u32,
-    indexes: [dynamic]i32,
+    indexes: [dynamic]u32,
 }
 /** @brief contains all batched buffers for one Window render */
 @(private="file")
@@ -88,13 +94,12 @@ get_context :: #force_inline proc() -> ^Draw_Context {
 @(private="file")
 batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: runtime.Allocator_Error) {
     gl.GenVertexArrays(1, &ren.vao);
-    gl.BindVertexArray(ren.vao);
 
     gl.GenBuffers(1, &ren.vbo);
     ren.vertices = make([dynamic]f32) or_return;
 
     gl.GenBuffers(1, &ren.ibo);
-    ren.indexes = make([dynamic]i32) or_return;
+    ren.indexes = make([dynamic]u32) or_return;
 
     vertex_src := #load("vert.glsl", cstring);
     pixel_src  := #load("pix.glsl", cstring);
@@ -102,20 +107,18 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: runtime.Allocator_Err
     // shaders
     ok: bool;
     ren.vs, ok = shader_compile(&vertex_src, gl.VERTEX_SHADER);
-    log.info("Vertex compiled? (%v)", ok);
     if !ok do return ren, .Invalid_Argument;
     ren.ps, ok = shader_compile(&pixel_src, gl.FRAGMENT_SHADER);
-    log.info("Pixel compiled? (%v)", ok);
     if !ok do return ren, .Invalid_Argument;
-    ren.program = shader_link(ren.vs, ren.ps);
-    log.info("Shaders linked? (%v)", ok);
+    ren.program, ok = shader_link(ren.vs, ren.ps);
+    if !ok do return ren, .Invalid_Argument;
 
     return ren, err;
 }
 
 @(private="file")
 batch_renderer_add :: proc(ren: ^Batch_Renderer, r: Rect) {
-    base_index := cast(i32)len(ren^.vertices) / 2;
+    base_index := cast(u32)len(ren^.vertices) / 2;
 
     // CCW
     append(&ren^.vertices,
@@ -132,11 +135,15 @@ batch_renderer_add :: proc(ren: ^Batch_Renderer, r: Rect) {
 
 @(private="file")
 batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
-    gl.BindBuffer(gl.ARRAY_BUFFER, ren.vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, len(ren.vertices) * size_of(f32), &ren.vertices[0], gl.DYNAMIC_DRAW);
+    gl.UseProgram(ren^.program);
 
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ren.ibo);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(ren.indexes) * size_of(i32), &ren.indexes[0], gl.DYNAMIC_DRAW);
+    gl.BindVertexArray(ren^.vao);
+
+    gl.BindBuffer(gl.ARRAY_BUFFER, ren^.vbo);
+    gl.BufferData(gl.ARRAY_BUFFER, len(ren^.vertices) * size_of(f32), raw_data(ren^.vertices), gl.DYNAMIC_DRAW);
+
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ren^.ibo);
+    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(ren^.indexes) * size_of(u32), raw_data(ren^.indexes), gl.DYNAMIC_DRAW);
 
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * size_of(f32), 0);
@@ -146,8 +153,8 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
 
 @(private="file")
 batch_renderer_clear :: proc(ren: ^Batch_Renderer) {
-    clear_dynamic_array(&ren^.vertices);
-    clear_dynamic_array(&ren^.indexes);
+    clear(&ren^.vertices);
+    clear(&ren^.indexes);
 }
 
 @(private="file")
@@ -158,12 +165,19 @@ batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
 }
 
 @(private="file")
+debug_callback :: proc "c" (source: u32, type: u32, id: u32, severity: u32, length: i32, message: cstring, userParam: rawptr) {
+    context = runtime.default_context();
+    log.errorf("GL DEBUG: %s\n", message);
+}
+
+@(private="file")
 ui_prepare_window :: proc(size: [2]c.int, name: cstring) -> Window {
     glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE);
 	glfw.WindowHint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
 	glfw.WindowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, 4);
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, 6);
+    when ODIN_DEBUG do glfw.WindowHint(glfw.OPENGL_DEBUG_CONTEXT, glfw.TRUE);
 	
 	window_handle := glfw.CreateWindow(size.x, size.y, name, nil, nil);
 
@@ -177,23 +191,38 @@ ui_prepare_window :: proc(size: [2]c.int, name: cstring) -> Window {
 	// ?? glfw.SetKeyCallback(window_handle, key_callback);
 	// ?? glfw.SetFramebufferSizeCallback(window_handle, size_callback);
 
+    when ODIN_DEBUG {
+        gl.load_up_to(int(4), 6, glfw.gl_set_proc_address);
+
+        is_debug: i32;
+        gl.GetIntegerv(gl.CONTEXT_FLAGS, &is_debug);
+        if (is_debug & gl.CONTEXT_FLAG_DEBUG_BIT) != 0 {
+            gl.Enable(gl.DEBUG_OUTPUT);
+            gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
+            gl.DebugMessageCallback(debug_callback, nil);
+            log.info("Debug callback registered!");
+        }
+    }
+
     return Window {
         size,
         name,
         window_handle,
         nil,
         DRAW_CURSOR_DEFAULT(),
+        .NONE,
     };
 }
 
 @(private="file")
-ui_destroy_window :: proc(w: Window) {
+ui_destroy_window :: #force_inline proc(w: Window) {
     glfw.DestroyWindow(w.handle);
 }
 
 ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> bool {
     w := ui_prepare_window(size, name);
     if w.handle == nil do return false;
+    w.draw_proc = draw;
     
     // deferred batch renderer initialization
     ctx := get_context();
@@ -202,6 +231,8 @@ ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> bo
         ctx^.ren, err = batch_renderer_new();
         if err != .None do return false;
     }
+
+    append(&ctx^.queue.windows, w);
 
     return true;
 }
@@ -222,14 +253,20 @@ shader_compile :: proc(src: ^cstring, kind: u32) -> (id: u32, ok: bool) {
 };
 
 @(private="file")
-shader_link :: proc(vs: u32, fs: u32) -> u32 {
-    program := gl.CreateProgram();
+shader_link :: proc(vs: u32, fs: u32) -> (program: u32, ok: bool) {
+    program = gl.CreateProgram();
     gl.AttachShader(program, vs);
     gl.AttachShader(program, fs);
     gl.LinkProgram(program);
+    if program == 0 {
+        info: [512]u8;
+        gl.GetProgramInfoLog(program, 512, nil, &info[0]);
+        log.errorf("Linker error: %s", info);
+        return 0, false;
+    }
     gl.DeleteShader(vs);
     gl.DeleteShader(fs);
-    return program;
+    return program, true;
 };
 
 @(private="file")
@@ -246,8 +283,6 @@ ui_init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
 		return nil, .None;
 	}
 
-	gl.load_up_to(int(4), 6, glfw.gl_set_proc_address);
-
     ctx = new(Draw_Context) or_return;
 
     // batch renderer
@@ -262,6 +297,12 @@ ui_init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
 }
 
 @(private="file")
+ui_draw_cursor_reset :: #force_inline proc() {
+    queue := get_context()^.queue;
+    queue.windows[queue.active_window].cursor = DRAW_CURSOR_DEFAULT();
+}
+
+@(private="file")
 ui_draw_cursor_current :: #force_inline proc() -> [2]c.int {
     queue := get_context()^.queue;
     return queue.windows[queue.active_window].cursor.pos.xy;
@@ -271,7 +312,12 @@ ui_draw_cursor_current :: #force_inline proc() -> [2]c.int {
 ui_draw_cursor_button_next :: #force_inline proc() {
     queue := get_context()^.queue;
     active_window := &queue.windows[queue.active_window];
-    active_window^.cursor.pos.xy += active_window^.cursor.button_size.xy;
+    active_window^.cursor.pos.x += active_window^.cursor.button_size.x;
+    width, _ := glfw.GetWindowSize(active_window^.handle);
+    if active_window^.cursor.pos.x >= width {
+        active_window^.cursor.pos.x = 0;
+        active_window^.cursor.pos.y += active_window^.cursor.button_size.y;
+    }
 }
 
 ui_set_button_size :: #force_inline proc(size: [2]c.int) {
@@ -318,6 +364,12 @@ ui_draw_button :: proc(name: string) -> bool {
             cast(f32)button_pos.x + cast(f32)button_size.x, cast(f32)button_pos.y + cast(f32)button_size.y,
         };
     r_ndc := ui_pos_to_ndc(r);
+    // r_ndc := Rect {
+    //     x1 = -0.5,
+    //     y1 = -0.5,
+    //     x2 =  0.5,
+    //     y2 =  0.5,
+    // };
     ui_register_draw_command(Draw_Command_Button {
         Draw_Command_Text { name, active_window.cursor.font_size, r_ndc }, r_ndc,
     });
@@ -336,9 +388,8 @@ ui_draw_button :: proc(name: string) -> bool {
 }
 
 @(private="file")
-ui_register_draw_command :: proc(cmd: Draw_Command) {
-    queue := get_context()^.queue;
-    append(&queue.commands, cmd);
+ui_register_draw_command :: #force_inline proc(cmd: Draw_Command) {
+    append(&get_context()^.queue.commands, cmd)
 }
 
 @(private="file")
@@ -349,52 +400,72 @@ ui_execute_draw_button_command :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_B
 
 @(private="file")
 ui_execute_draw_text_command :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
-    assert(false, "TODO: Add text!");
-    batch_renderer_add(ren, cmd.rect);
+    //assert(false, "TODO: Add text!");
+    //batch_renderer_add(ren, cmd.rect);
 }
 
 @(private="file")
 ui_execute_draw_commands :: proc() {
     ctx := get_context();
-    ren := ctx^.ren;
-    batch_renderer_clear(&ren);
+    ren := &ctx^.ren;
+    batch_renderer_clear(ren);
 
     for cmd in ctx^.queue.commands {
         switch c in cmd {
-            case Draw_Command_Button: ui_execute_draw_button_command(&ren, c);
-            case Draw_Command_Text:   ui_execute_draw_text_command(&ren, c);
+            case Draw_Command_Button: ui_execute_draw_button_command(ren, c);
+            case Draw_Command_Text:   ui_execute_draw_text_command(ren, c);
         }
     }
 
-    batch_renderer_construct(&ren);
+    batch_renderer_construct(ren);
 }
 
 ui_draw :: proc() {
     queue := &get_context()^.queue;
 
-    for w, index in queue^.windows {
-        glfw.PollEvents();
-        if (!glfw.WindowShouldClose(w.handle)) {
-            queue^.active_window = cast(Window_Index)index;
-            glfw.MakeContextCurrent(w.handle);
+    for len(queue^.windows) > 0 {
+        l := len(queue^.windows);
+        for index := 0; index < l; index += 1 {
+            w := queue^.windows[index];
+            glfw.PollEvents();
 
-            gl.ClearColor(0.1, 0.1, 0.1, 1.0);
-            gl.Clear(gl.COLOR_BUFFER_BIT);
+            if (!glfw.WindowShouldClose(w.handle)) {
+                queue^.active_window = cast(Window_Index)index;
+                glfw.MakeContextCurrent(w.handle);
 
-            w->draw_proc();
-            glfw.SwapBuffers(w.handle);
+                gl.ClearColor(0.1, 0.1, 0.1, 1.0);
+                gl.Clear(gl.COLOR_BUFFER_BIT);
+
+                w->draw_proc();
+                ui_execute_draw_commands();
+                ui_reset_state();
+                glfw.SwapBuffers(w.handle);
+            } else {
+                // signal to the draw function that the window is being closed
+                w.signal = .SHOULD_CLOSE;
+                w->draw_proc();
+                ordered_remove(&queue^.windows, index);
+                l -= 1;
+            }
         }
-        ui_execute_draw_commands();
     }
 }
 
-ui_destroy :: proc() {
-	glfw.Terminate();
+ui_reset_state :: proc() {
     ctx := get_context();
+
+    ui_draw_cursor_reset();
+    clear(&ctx^.queue.commands);
+}
+
+ui_destroy :: proc() {
+    ctx := get_context();
+
+	glfw.Terminate();
+    batch_renderer_delete(&ctx^.ren);
     for w in ctx^.queue.windows {
         ui_destroy_window(w);
     }
-    batch_renderer_delete(&ctx^.ren);
     delete_dynamic_array(ctx^.queue.windows);
     delete_dynamic_array(ctx^.queue.commands);
     free(ctx);
