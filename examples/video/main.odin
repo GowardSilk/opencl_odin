@@ -14,29 +14,43 @@ main :: proc() {
 
     ok: runtime.Allocator_Error;
     context.user_ptr, ok = ui_init();
+    defer ui_destroy();
     assert(ok == .None && context.user_ptr != nil);
 
-    assert(ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen));
-    ui_draw();
+    err := ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
+    log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err)
 
-    ui_destroy();
+    ui_draw();
 }
 
 OPTIONS_WINDOW_OPENED := false;
 
 draw_main_screen :: proc(w: Window) {
     ui_set_button_size({100, 50});
-    if      ui_draw_button("img1") do load_image("img1.png");
-    else if ui_draw_button("img2") do load_image("img2.png");
-    else if ui_draw_button("img3") do load_image("img3.png");
-    else if ui_draw_button("options") {
+
+    @(static)
+    active_img := "img1.png";
+
+    if ui_draw_button("img1") {
+        active_img = "img1.png";
+    }
+    if ui_draw_button("img2") {
+        active_img = "img2.png";
+    }
+    if ui_draw_button("img3") {
+        active_img = "img3.png";
+    }
+    if ui_draw_button("options") {
         if !OPTIONS_WINDOW_OPENED {
-            if !ui_register_window({512, 512}, "Image Settings", draw_options) {
+            err := ui_register_window({512, 512}, "Image Settings", draw_options);
+            if err != nil {
                 log.errorf("Failed to open auxiliary option window!");
                 glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
             } else do OPTIONS_WINDOW_OPENED = true;
         }
     }
+
+    ui_draw_image(active_img);
 }
 
 draw_options :: proc(w: Window) {

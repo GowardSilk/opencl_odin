@@ -24,7 +24,7 @@ Draw_Proc :: #type proc "odin" (w: Window);
 Draw_Cursor :: struct {
     pos: [2]c.int, /**< current active position*/
     button_size: [2]c.int, /**< default button size*/
-    font_size: c.double,
+    font_size: i32,
 }
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
     return Draw_Cursor { {0, 0}, {20, 20}, 10 };
@@ -47,20 +47,16 @@ Window_Index :: distinct uint;
 
 Draw_Command_Text :: struct {
     text: string,
-    size: c.double,
+    pos: [2]i32, /**< top left corner*/
+    size: i32,
 }
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
     rect: Rect,
 }
-Draw_Command_Image :: struct {
-    img: u32,
-    rect: Rect,
-}
 Draw_Command :: union {
     Draw_Command_Button,
     Draw_Command_Text,
-    Draw_Command_Image,
 }
 Draw_Command_Queue :: struct {
     commands: [dynamic]Draw_Command,
@@ -137,22 +133,20 @@ ui_destroy_window :: #force_inline proc(w: Window) {
     glfw.DestroyWindow(w.handle);
 }
 
-ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> bool {
+ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> General_Error {
     w := ui_prepare_window(size, name);
-    if w.handle == nil do return false;
+    if w.handle == nil do return nil;
     w.draw_proc = draw;
     
     // deferred batch renderer initialization
     ctx := get_context();
-    if ctx^.ren.ps == 0 && ctx^.ren.vs == 0 {
-        err: runtime.Allocator_Error;
-        ctx^.ren, err = batch_renderer_new();
-        if err != .None do return false;
+    if ctx^.ren.rects.ps == 0 && ctx^.ren.rects.vs == 0{
+        ctx^.ren = batch_renderer_new() or_return;
     }
 
     append(&ctx^.queue.windows, w);
 
-    return true;
+    return nil;
 }
 
 @(private="file")
@@ -212,7 +206,6 @@ ui_set_button_size :: #force_inline proc(size: [2]c.int) {
     active_window^.cursor.button_size = size;
 }
 
-@(private="file")
 ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     queue := get_context()^.queue;
     active_window := queue.windows[queue.active_window];
@@ -225,7 +218,6 @@ ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
 }
 
-@(private="file")
 ui_create_rect :: #force_inline proc(pos: [2]f32, sz: [2]f32) -> Rect {
     return Rect {
         pos.x, pos.y,
@@ -233,7 +225,6 @@ ui_create_rect :: #force_inline proc(pos: [2]f32, sz: [2]f32) -> Rect {
     };
 }
 
-@(private="file")
 ui_create_rect64 :: proc(pos: [2]c.double, sz: [2]c.double) -> Rect64 {
     return Rect64 {
         pos.x, pos.y,
@@ -261,7 +252,7 @@ ui_draw_button :: proc(name: string) -> bool {
         ),
     );
     ui_register_draw_command(Draw_Command_Button {
-        Draw_Command_Text { name, active_window.cursor.font_size },
+        Draw_Command_Text { name, button_pos, active_window.cursor.font_size, },
         r_ndc,
     });
 
@@ -281,24 +272,12 @@ ui_draw_button :: proc(name: string) -> bool {
     return false;
 }
 
-ui_draw_image :: #force_inline proc(img: Image) {
-    draw_cmd := Draw_Command_Image {};
-
+ui_draw_image :: #force_inline proc(img_path: string) {
     img_pos  := ui_draw_cursor_current();
-    img_size := [2]f32 { cast(f32)img.width, cast(f32)img.height };
-    draw_cmd.rect = ui_create_rect(
-        [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y },
-        img_size,
-    );
     defer ui_draw_cursor_button_next(); // move to the next "slot"
 
-    gl.GenTextures(1, &draw_cmd.img);
-    gl.BindTexture(gl.TEXTURE_2D, draw_cmd.img);
-    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
-        cast(i32)img.width, cast(i32)img.height, 0,
-        gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
-
-    ui_register_draw_command(draw_cmd);
+    // we cannot batch images properly, so they are loaded "in-place"
+    batch_renderer_register_image(&get_context()^.ren, img_pos, {0, 0, 1, 1}, img_path);
 }
 
 @(private="file")
@@ -316,7 +295,6 @@ ui_execute_draw_commands :: proc() {
         switch c in cmd {
             case Draw_Command_Button:  batch_renderer_add(ren, c);
             case Draw_Command_Text:    batch_renderer_add(ren, c);
-            case Draw_Command_Image:   batch_renderer_add(ren, c);
         }
     }
 
@@ -324,7 +302,8 @@ ui_execute_draw_commands :: proc() {
 }
 
 ui_draw :: proc() {
-    queue := &get_context()^.queue;
+    ctx := get_context();
+    queue := &ctx^.queue;
 
     for len(queue^.windows) > 0 {
         l := len(queue^.windows);
@@ -351,6 +330,7 @@ ui_draw :: proc() {
                 l -= 1;
             }
         }
+        batch_renderer_reset(&ctx^.ren);
     }
 }
 

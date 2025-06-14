@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-### [Basic outline of image rendering]
+### [Image and font rendering]
+
+#### Added
+- `error.odin` for unified error handling (better than just `bool` returns)
+- `img_*.glsl` separate shaders for image rendering
+
+#### Changed
+- `main.odin` to adhere `ui_*.odin` defs; also changed the idea behind image rendering by actively changing the file path of which image should be actually rendered (the inherent problem in this strategy is apparent in the fact if we are going to massively change the image buffer's data; I suggest we should create an Image View of some sort which will allow custom operations - defined in `image.odin` to be performed on the GPU data; CPU upload of this data could be one of them, if we plan on doing CPU-to-GPU comparisons)
+- `ui.odin` adding per frame resetting of Batch renderer; eliminating illicit code of ui_draw_image
+- `ui_fnt.odin` removing useless error returns
+- `ui_fnt_test.odin` adding tracking allocator to the unit tests (TODO: THIS IS YET TO BE TESTED PROPERLY)
+- `ui_batch.odin` attempting to add image rendering (and consequently font rendering); rendering textures cannot be batched (to some extent they can be, though not very friendly nor efficient), so we just try to defined a quad and OpenGL texture ID along with dirty bit flag which is being reset every frame and consequently (on the descending frame) is erased altogether if not "touched" (aka registered) again. This way we can internally manage image lifetimes (this deletions happens per frame, not per window, viz. batch_renderer_reset) without the pain of actually managing it externally.
+
+#### Added
+- `ui_batch.odin` now contains batch renderer (moved from `ui.odin`)
+- `ui_fnt.odin` contains Angel font specification structures along with basic text reader
+- `ui_fnt_test.odin` contains basic unit tests for Angel font reading
+
+### [Angel font reading]
 
 #### Added
 - `ui_batch.odin` now contains batch renderer (moved from `ui.odin`)

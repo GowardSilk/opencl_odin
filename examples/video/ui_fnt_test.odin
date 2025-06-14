@@ -1,12 +1,35 @@
 package video;
 
 import "core:testing"
+import "core:mem"
 
 @(test)
 test_info :: proc(t: ^testing.T) {
+    backing := context.allocator;
+    track: mem.Tracking_Allocator;
+    mem.tracking_allocator_init(&track, backing);
+    context.allocator = mem.tracking_allocator(&track);
+
     file, ok := angel_read("video/font.fnt");
     assert(ok, "Failed to load font!");
-    defer angel_delete(&file);
+    defer {
+        angel_delete(&file);
+
+        if len(track.allocation_map) > 0 {
+            fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map));
+            for _, entry in track.allocation_map {
+                fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location);
+            }
+        }
+        if len(track.bad_free_array) > 0 {
+            fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array));
+            for entry in track.bad_free_array {
+                fmt.eprintf("- %p @ %v\n", entry.memory, entry.location);
+            }
+        }
+        mem.tracking_allocator_destroy(&track);
+        context.allocator = backing;
+    }
 
     // INFO
     testing.expect_value(t, file.info.font_name, "Mikado Medium");

@@ -155,15 +155,15 @@ angel_read :: proc(fname: string) -> (file: AngelFNT_File, ok: bool) {
         word, offset = read_word(data, offset);
         switch word {
             case "info":
-                offset = angel_read_info(&file.info, data, offset) or_return;
+                offset = angel_read_info(&file.info, data, offset);
 
             case "common":
-                offset = angel_read_common(&file.common, data, offset) or_return;
+                offset = angel_read_common(&file.common, data, offset);
                 assert(file.common.pages > 0, "At least one page has to be present! (hint: are you missing pages=* key in `common`?)");
                 file.pages = make(AngelBlock_Pages, file.common.pages);
 
             case "page":
-                offset = angel_read_page(file.pages, data, offset) or_return;
+                offset = angel_read_page(file.pages, data, offset);
 
             case "chars":
                 word, offset = read_word(data, offset);
@@ -171,7 +171,7 @@ angel_read :: proc(fname: string) -> (file: AngelFNT_File, ok: bool) {
                 file.chars = make(AngelBlock_Chars, count);
             case "char":
                 assert(file.chars != nil, "We do not support adaptive reordering, `chars` has to be before the first `char`");
-                offset = angel_read_char(file.chars[:], char_index, data, offset) or_return;
+                offset = angel_read_char(file.chars[:], char_index, data, offset);
                 char_index += 1;
 
             case "kernings":
@@ -179,7 +179,7 @@ angel_read :: proc(fname: string) -> (file: AngelFNT_File, ok: bool) {
                 count := extract_intvalue(word, "count");
                 file.kernings = make(AngelBlock_Kernings, count);
             case "kerning": 
-                offset = angel_read_kerning(file.kernings, data, offset) or_return;
+                offset = angel_read_kerning(file.kernings, data, offset);
         }
     }
     
@@ -326,7 +326,7 @@ read_words :: proc(data: []byte, offset: uint) -> ([dynamic]string, uint) {
 }
 
 @(private="file")
-angel_read_info :: proc(info: ^AngelBlock_Info, data: []byte, offset: uint) -> (new_offset: uint, ok: bool) {
+angel_read_info :: proc(info: ^AngelBlock_Info, data: []byte, offset: uint) -> (new_offset: uint) {
     words: [dynamic]string;
     words, new_offset = read_words(data, offset);
     defer delete(words);
@@ -372,11 +372,11 @@ angel_read_info :: proc(info: ^AngelBlock_Info, data: []byte, offset: uint) -> (
         }
     }
 
-    return new_offset, true;
+    return new_offset;
 }
 
 @(private="file")
-angel_read_common :: proc(common: ^AngelBlock_Common, data: []byte, offset: uint) -> (new_offset: uint, ok: bool) {
+angel_read_common :: proc(common: ^AngelBlock_Common, data: []byte, offset: uint) -> (new_offset: uint) {
     words: [dynamic]string;
     words, new_offset = read_words(data, offset);
     defer delete(words);
@@ -412,11 +412,11 @@ angel_read_common :: proc(common: ^AngelBlock_Common, data: []byte, offset: uint
         }
     }
 
-    return new_offset, true;
+    return new_offset;
 }
 
 @(private="file")
-angel_read_page :: proc(pages: AngelBlock_Pages, data: []byte, offset: uint) -> (new_offset: uint, ok: bool) {
+angel_read_page :: proc(pages: AngelBlock_Pages, data: []byte, offset: uint) -> (new_offset: uint) {
     words: [dynamic]string;
     words, new_offset = read_words(data, offset);
     defer delete(words);
@@ -435,11 +435,11 @@ angel_read_page :: proc(pages: AngelBlock_Pages, data: []byte, offset: uint) -> 
         }
     }
 
-    return new_offset, true;
+    return new_offset;
 }
 
 @(private="file")
-angel_read_char :: proc(chars: AngelBlock_Chars, char_index: uint, data: []byte, offset: uint) -> (new_offset: uint, ok: bool) {
+angel_read_char :: proc(chars: AngelBlock_Chars, char_index: uint, data: []byte, offset: uint) -> (new_offset: uint) {
     words: [dynamic]string;
     words, new_offset = read_words(data, offset);
     defer delete(words);
@@ -471,11 +471,11 @@ angel_read_char :: proc(chars: AngelBlock_Chars, char_index: uint, data: []byte,
         }
     }
 
-    return new_offset, true;
+    return new_offset;
 }
 
 @(private="file")
-angel_read_kerning :: proc(kernings: AngelBlock_Kernings, data: []byte, offset: uint) -> (new_offset: uint, ok: bool) {
+angel_read_kerning :: proc(kernings: AngelBlock_Kernings, data: []byte, offset: uint) -> (new_offset: uint) {
     assert(false, "TODO: kernings not supported!");
-    return 0, false;
+    return 0;
 }
