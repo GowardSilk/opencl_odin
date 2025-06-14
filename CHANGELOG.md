@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### [Basic outline of image rendering]
 
+#### Added
+- `ui_batch.odin` now contains batch renderer (moved from `ui.odin`)
+- `ui_fnt.odin` contains Angel font specification structures along with basic text reader
+- `ui_fnt_test.odin` contains basic unit tests for Angel font reading
+
+#### Changed
+- `ui.odin` removed batch renderer references to `ui_batch.odin`
+
+### [Basic outline of image rendering]
+
 #### Changed
 - `image.odin` to support (or rather "alias" at this point) image loading; will be much proliferative in the future when we will have image manipulation functions
 - `ui.odin` outlining basic image rendering; todo: maybe some fix for batching? we could use PBO and then waitsync on actual render

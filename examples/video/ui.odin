@@ -4,7 +4,7 @@
  * @brief contains basic UI facilities for displaying images/picking from options etc. in OpenGL/glfw.
  *  Rendering techniques is inspired by Dear ImGui
  *
- * @ingroup video
+ * @defgroup video
  *
  * @author GowardSilk
  */
@@ -68,169 +68,18 @@ Draw_Command_Queue :: struct {
     active_window: Window_Index,
 }
 
-@(private="file")
-Vertex_Buffer_Constructor :: struct {
-    vao: u32,
-    vbo: u32,
-    vertices: [dynamic]f32,
-
-    ibo: u32,
-    indexes: [dynamic]u32,
-}
-@(private="file")
-Image_Buffer_Constructor :: struct {
-    images: [dynamic]u32,
-}
-@(private="file")
-Shader_Program_Constructor :: struct {
-    vs: u32,
-    ps: u32,
-    program: u32,
-}
-@(private="file")
-Font_Atlas_Constructor :: struct {
-    font_buf: ^u32, /**< view to the (first) image in the Image_Buffer_Constructor */
-}
-/** @brief contains all batched buffers for one Window render */
-@(private="file")
-Batch_Renderer :: struct {
-    using vertex_ctor: Vertex_Buffer_Constructor,
-    using shader_ctor: Shader_Program_Constructor,
-    using image_ctor:  Image_Buffer_Constructor,
-    using font_ctor:   Font_Atlas_Constructor,
-}
-
 Draw_Context :: struct {
     queue: Draw_Command_Queue,
     ren: Batch_Renderer,
 }
 
+Rect32 :: struct { x1, y1: f32, x2, y2: f32 }
+Rect :: Rect32;
+Rect64 :: struct { x1, y1: c.double, x2, y2: c.double }
+
 @(private="file")
 get_context :: #force_inline proc() -> ^Draw_Context {
     return cast(^Draw_Context)context.user_ptr;
-}
-
-@(private="file")
-batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: runtime.Allocator_Error) {
-    // vertices/indexes
-    gl.GenVertexArrays(1, &ren.vao);
-
-    gl.GenBuffers(1, &ren.vbo);
-    ren.vertices = make([dynamic]f32) or_return;
-
-    gl.GenBuffers(1, &ren.ibo);
-    ren.indexes = make([dynamic]u32) or_return;
-
-    vertex_src := #load("vert.glsl", cstring);
-    pixel_src  := #load("pix.glsl", cstring);
-
-    // shaders
-    ok: bool;
-    ren.vs, ok = shader_compile(&vertex_src, gl.VERTEX_SHADER);
-    if !ok do return ren, .Invalid_Argument;
-    ren.ps, ok = shader_compile(&pixel_src, gl.FRAGMENT_SHADER);
-    if !ok do return ren, .Invalid_Argument;
-    ren.program, ok = shader_link(ren.vs, ren.ps);
-    if !ok do return ren, .Invalid_Argument;
-
-    // images
-    ren.images = make([dynamic]u32) or_return;
-
-    // font atlas
-    /*
-    img, imgerr := load_image("font.bmp");
-    if imgerr != nil do return ren, .Invalid_Argument;
-    gl.GenTextures(1, &ren.images[0]);
-    gl.BindTexture(gl.TEXTURE_2D, ren.images[0]);
-    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
-        cast(i32)img.width, cast(i32)img.height, 0,
-        gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
-    ren.font_buf = &ren.images[0];
-    */
-
-    return ren, err;
-}
-
-@(private="file")
-_batch_renderer_add_rect :: proc(ren: ^Batch_Renderer, r: Rect) {
-    base_index := cast(u32)len(ren^.vertices) / 2;
-
-    // CCW
-    append(&ren^.vertices,
-        r.x1, r.y1, // Bottom-left
-        r.x2, r.y1, // Bottom-right
-        r.x2, r.y2, // Top-right
-        r.x1, r.y2, // Top-left
-    );
-    append(&ren^.indexes,
-        base_index + 0, base_index + 1, base_index + 2,
-        base_index + 2, base_index + 3, base_index + 0,
-    );
-}
-
-@(private="file")
-batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
-    _batch_renderer_add_rect(ren, cmd.rect);
-    batch_renderer_add_text(ren, cmd.text);
-}
-
-@(private="file")
-batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
-    // todo: we need to grab for each character its appropriate offset
-    // then load it sequentially (via glTexSubImage2D??)
-    // for c in cmd.text {
-    // }
-}
-
-@(private="file")
-batch_renderer_add_image :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Image) {
-    _batch_renderer_add_rect(ren, cmd.rect);
-    // note: image data must have been passed preemptively
-}
-
-@(private="file")
-batch_renderer_add :: proc { batch_renderer_add_button, batch_renderer_add_text, batch_renderer_add_image }
-
-@(private="file")
-batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
-    gl.UseProgram(ren^.program);
-
-    gl.BindVertexArray(ren^.vao);
-
-    gl.BindBuffer(gl.ARRAY_BUFFER, ren^.vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, len(ren^.vertices) * size_of(f32), raw_data(ren^.vertices), gl.DYNAMIC_DRAW);
-
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ren^.ibo);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(ren^.indexes) * size_of(u32), raw_data(ren^.indexes), gl.DYNAMIC_DRAW);
-
-    gl.EnableVertexAttribArray(0);
-    gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * size_of(f32), 0);
-
-    gl.DrawElements(gl.TRIANGLES, cast(i32)len(ren^.indexes), gl.UNSIGNED_INT, nil);
-}
-
-@(private="file")
-batch_renderer_clear :: proc(ren: ^Batch_Renderer) {
-    clear(&ren^.vertices);
-    clear(&ren^.indexes);
-}
-
-@(private="file")
-batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
-    // vertex buffer constructor
-    delete(ren^.vertices);
-    delete(ren^.indexes);
-    buffers := [2]u32 { ren^.vbo, ren^.ibo };
-    gl.DeleteBuffers(2, &buffers[0]);
-    gl.DeleteVertexArrays(1, &ren^.vao);
-
-    // image buffer constructor + font atlas constructor
-    gl.DeleteTextures(cast(i32)len(ren^.images), raw_data(ren^.images));
-    delete(ren^.images);
-    ren^.font_buf = nil;
-
-    // shader program constructor
-    gl.DeleteProgram(ren^.program);
 }
 
 @(private="file")
@@ -307,38 +156,6 @@ ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> bo
 }
 
 @(private="file")
-shader_compile :: proc(src: ^cstring, kind: u32) -> (id: u32, ok: bool) {
-    shader := gl.CreateShader(kind);
-    gl.ShaderSource(shader, 1, src, nil);
-    gl.CompileShader(shader);
-
-    success: i32;
-    gl.GetShaderiv(shader, gl.COMPILE_STATUS, cast([^]i32)&success);
-    if success == 0 {
-        log.error("Failed to compile shader!");
-        return 0, false;
-    }
-    return shader, true;
-};
-
-@(private="file")
-shader_link :: proc(vs: u32, fs: u32) -> (program: u32, ok: bool) {
-    program = gl.CreateProgram();
-    gl.AttachShader(program, vs);
-    gl.AttachShader(program, fs);
-    gl.LinkProgram(program);
-    if program == 0 {
-        info: [512]u8;
-        gl.GetProgramInfoLog(program, 512, nil, &info[0]);
-        log.errorf("Linker error: %s", info);
-        return 0, false;
-    }
-    gl.DeleteShader(vs);
-    gl.DeleteShader(fs);
-    return program, true;
-};
-
-@(private="file")
 ui_glfw_error_callback :: proc "cdecl" (error: c.int, description: cstring) {
     context = runtime.default_context();
     log.errorf("Error encountered (%d): %s", error, description);
@@ -396,17 +213,6 @@ ui_set_button_size :: #force_inline proc(size: [2]c.int) {
 }
 
 @(private="file")
-Rect32 :: struct { x1, y1: f32, x2, y2: f32 }
-@(private="file")
-Rect :: Rect32;
-@(private="file")
-Rect64 :: struct { x1, y1: c.double, x2, y2: c.double }
-@(private="file")
-ui_is_inside_widget :: #force_inline proc(r: Rect64, point: [2]c.double) -> bool{
-    return point.x >= r.x1 && point.y >= r.y1 && point.x <= r.x2 && point.y <= r.y2;
-}
-
-@(private="file")
 ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     queue := get_context()^.queue;
     active_window := queue.windows[queue.active_window];
@@ -433,6 +239,11 @@ ui_create_rect64 :: proc(pos: [2]c.double, sz: [2]c.double) -> Rect64 {
         pos.x, pos.y,
         pos.x + sz.x, pos.y + sz.y,
     };
+}
+
+@(private="file")
+ui_is_inside_widget :: #force_inline proc(r: Rect64, point: [2]c.double) -> bool{
+    return point.x >= r.x1 && point.y >= r.y1 && point.x <= r.x2 && point.y <= r.y2;
 }
 
 ui_draw_button :: proc(name: string) -> bool {
