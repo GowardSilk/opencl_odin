@@ -2,6 +2,7 @@ package video;
 
 import "core:testing"
 import "core:mem"
+import "core:fmt"
 
 @(test)
 test_info :: proc(t: ^testing.T) {
@@ -10,7 +11,7 @@ test_info :: proc(t: ^testing.T) {
     mem.tracking_allocator_init(&track, backing);
     context.allocator = mem.tracking_allocator(&track);
 
-    file, ok := angel_read("video/font.fnt");
+    file, ok := angel_read("video/resources/fonts/font.fnt");
     assert(ok, "Failed to load font!");
     defer {
         angel_delete(&file);
@@ -42,7 +43,7 @@ test_info :: proc(t: ^testing.T) {
 
 @(test)
 test_common :: proc(t: ^testing.T) {
-    file, ok := angel_read("video/font.fnt");
+    file, ok := angel_read("video/resources/fonts/font.fnt");
     assert(ok, "Failed to load font!");
     defer angel_delete(&file);
 
@@ -57,7 +58,7 @@ test_common :: proc(t: ^testing.T) {
 
 @(test)
 test_pages :: proc(t: ^testing.T) {
-    file, ok := angel_read("video/font.fnt");
+    file, ok := angel_read("video/resources/fonts/font.fnt");
     assert(ok, "Failed to load font!");
     defer angel_delete(&file);
 
@@ -68,7 +69,7 @@ test_pages :: proc(t: ^testing.T) {
 
 @(test)
 test_characters :: proc(t: ^testing.T) {
-    file, ok := angel_read("video/font.fnt");
+    file, ok := angel_read("video/resources/fonts/font.fnt");
     assert(ok, "Failed to load font!");
     defer angel_delete(&file);
 
@@ -123,7 +124,7 @@ test_characters :: proc(t: ^testing.T) {
 
 @(test)
 test_kernings :: proc(t: ^testing.T) {
-    file, ok := angel_read("video/font.fnt");
+    file, ok := angel_read("video/resources/fonts/font.fnt");
     assert(ok, "Failed to load font!");
     defer angel_delete(&file);
 

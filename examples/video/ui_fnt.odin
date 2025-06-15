@@ -191,7 +191,12 @@ angel_delete :: proc(file: ^AngelFNT_File) {
     if len(file^.info.font_name) > 0 do delete(file^.info.font_name);
     if len(file^.info.char_set) > 0 do delete(file^.info.char_set);
     if len(file^.kernings) > 0 do delete(file^.kernings);
-    if len(file^.pages) > 0 do delete(file^.pages);
+    if len(file^.pages) > 0 {
+        for page in file^.pages {
+            if len(page.file_name) > 0 do delete(page.file_name);
+        }
+        delete(file^.pages);
+    }
     if len(file^.chars) > 0 do delete(file^.chars);
 }
 
