@@ -42,8 +42,7 @@ Window :: struct {
     signal: Window_Signal,
 }
 
-@(private="file")
-Window_Index :: distinct uint;
+Window_Index :: distinct u32;
 
 Draw_Command_Text :: struct {
     text: string,
@@ -59,9 +58,9 @@ Draw_Command :: union {
     Draw_Command_Text,
 }
 Draw_Command_Queue :: struct {
+    active_window: Window_Index,
     commands: [dynamic]Draw_Command,
     windows: [dynamic]Window,
-    active_window: Window_Index,
 }
 
 Draw_Context :: struct {
@@ -94,7 +93,8 @@ ui_prepare_window :: proc(size: [2]c.int, name: cstring) -> Window {
     when ODIN_DEBUG do glfw.WindowHint(glfw.OPENGL_DEBUG_CONTEXT, glfw.TRUE);
 	
     ctx := get_context();
-    window_share := len(ctx.queue.windows) > 0 ? ctx.queue.windows[0].handle : nil;
+    window_share: glfw.WindowHandle = nil;
+    if len(ctx.queue.windows) > 0 do window_share = ctx.queue.windows[0].handle;
 	window_handle := glfw.CreateWindow(size.x, size.y, name, nil, window_share);
 
 	if window_handle == nil {
@@ -137,13 +137,15 @@ ui_destroy_window :: #force_inline proc(w: Window) {
 
 ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> General_Error {
     w := ui_prepare_window(size, name);
-    if w.handle == nil do return nil;
+    if w.handle == nil do return .Window_Creation;
     w.draw_proc = draw;
     
     // deferred batch renderer initialization
     ctx := get_context();
-    if ctx^.ren.rects.ps == 0 && ctx^.ren.rects.vs == 0{
+    if ctx^.ren.rects.shaders == nil {
         ctx^.ren = batch_renderer_new() or_return;
+    } else {
+        batch_renderer_clone(&ctx^.ren) or_return;
     }
 
     append(&ctx^.queue.windows, w);
@@ -278,8 +280,9 @@ ui_draw_image :: #force_inline proc(img_path: string) -> (err: General_Error) {
     img_pos  := ui_draw_cursor_current();
     defer ui_draw_cursor_button_next(); // move to the next "slot"
 
+    ctx := get_context();
     // we cannot batch images properly, so they are loaded "in-place"
-    return batch_renderer_register_image(&get_context()^.ren, img_pos, {1, 1, 0, 0}, img_path);
+    return batch_renderer_register_image(&ctx^.ren,ctx^. queue.active_window, img_pos, {1, 1, 0, 0}, img_path);
 }
 
 @(private="file")
@@ -300,7 +303,7 @@ ui_execute_draw_commands :: proc() {
         }
     }
 
-    batch_renderer_construct(ren);
+    batch_renderer_construct(ren, ctx^.queue.active_window);
 }
 
 ui_draw :: proc() {
@@ -342,6 +345,8 @@ ui_reset_state :: proc() {
 
     ui_draw_cursor_reset();
     clear(&ctx^.queue.commands);
+
+    batch_renderer_clear(&ctx^.ren);
 }
 
 ui_destroy :: proc() {

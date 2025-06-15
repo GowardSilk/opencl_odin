@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-### [Image and font rendering]
+### [Multiple screens fix]
+
+#### Changed
+- `ui_batch.odin` to support multiple screens, we had to additinally define multiple VAOs (per window), for that reason we added `batch_renderer_clone` function which copies the state and rebuilds shaders (not very effective but also marginally slow in the end)
+- `image.odin` has to contain "core:image/png" which will automatically register PNG loader ?
+- `ui.odin` to support active window indexing passes into batch renderer
+
+### [Image rendering]
 
 #### Added
 - `*.png` test files

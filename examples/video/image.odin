@@ -4,6 +4,7 @@ import "core:os"
 import "core:io"
 import "core:log"
 import "core:image"
+import "core:image/png" // this has to be here for some reason ?
 
 import "vendor:glfw"
 

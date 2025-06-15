@@ -9,6 +9,7 @@ UI_Error :: enum byte {
     Shader_Compile,
     Shader_Program_Link,
     Angel_Read,
+    Window_Creation,
 }
 
 General_Error :: union #shared_nil {
