@@ -93,7 +93,9 @@ ui_prepare_window :: proc(size: [2]c.int, name: cstring) -> Window {
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, 6);
     when ODIN_DEBUG do glfw.WindowHint(glfw.OPENGL_DEBUG_CONTEXT, glfw.TRUE);
 	
-	window_handle := glfw.CreateWindow(size.x, size.y, name, nil, nil);
+    ctx := get_context();
+    window_share := len(ctx.queue.windows) > 0 ? ctx.queue.windows[0].handle : nil;
+	window_handle := glfw.CreateWindow(size.x, size.y, name, nil, window_share);
 
 	if window_handle == nil {
         log.error("Error: failed to initialize window!");
@@ -272,12 +274,12 @@ ui_draw_button :: proc(name: string) -> bool {
     return false;
 }
 
-ui_draw_image :: #force_inline proc(img_path: string) {
+ui_draw_image :: #force_inline proc(img_path: string) -> (err: General_Error) {
     img_pos  := ui_draw_cursor_current();
     defer ui_draw_cursor_button_next(); // move to the next "slot"
 
     // we cannot batch images properly, so they are loaded "in-place"
-    batch_renderer_register_image(&get_context()^.ren, img_pos, {0, 0, 1, 1}, img_path);
+    return batch_renderer_register_image(&get_context()^.ren, img_pos, {1, 1, 0, 0}, img_path);
 }
 
 @(private="file")
@@ -293,8 +295,8 @@ ui_execute_draw_commands :: proc() {
 
     for cmd in ctx^.queue.commands {
         switch c in cmd {
-            case Draw_Command_Button:  batch_renderer_add(ren, c);
-            case Draw_Command_Text:    batch_renderer_add(ren, c);
+            case Draw_Command_Button:  batch_renderer_add_button(ren, c);
+            case Draw_Command_Text:    batch_renderer_add_text(ren, c);
         }
     }
 
@@ -326,6 +328,7 @@ ui_draw :: proc() {
                 // signal to the draw function that the window is being closed
                 w.signal = .SHOULD_CLOSE;
                 w->draw_proc();
+                glfw.DestroyWindow(w.handle);
                 ordered_remove(&queue^.windows, index);
                 l -= 1;
             }

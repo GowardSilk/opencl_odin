@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### [Image and font rendering]
 
 #### Added
+- `*.png` test files
+
+##### Changed
+- `ui_batch.odin` now supports image rendering (font atlas is not done yet properly, seems that the offsetting is a bit... off); images are not batched nor indexed, though font atlas is for the convenience since we may render a lot of the same data over and over again (same characters)
+- `ui.odin` fixing additional windows not being destroyed; for some reason OpenGL is complaining about data not being shared across windows (needs fixing!!)
+
+#### Added
 - `error.odin` for unified error handling (better than just `bool` returns)
 - `img_*.glsl` separate shaders for image rendering
 

@@ -18,7 +18,7 @@ import stbi "vendor:stb/image"
 
 FONT_DIR :: "video/resources/fonts";
 
-Vertex_Buffer_Constructor :: struct {
+Vertex_Buffer :: struct {
     vao: u32,
     vbo: u32,
     vertices: [dynamic]f32,
@@ -32,39 +32,54 @@ Image_Vertex :: struct {
     pos: [2]f32,
     uv: [2]f32,
 }
-Image_Vertex_Buffer_Constructor :: struct {
+Image_Vertex_Buffer :: struct {
     vbo: u32,
     texture: u32,              /**< OpenGL texture ID */
     // note: this will be convenient to store because we will not
     // hold the whole CPU image for the entire runtime
-    width: f32,               /**< width of the font atlas (in pixels) */
-    height: f32,              /**< height of the font atlas (in pixels) */
+    width: f32,               /**< width of the (whole) texture (in pixels) */
+    height: f32,              /**< height of the (whole) texture (in pixels) */
     dirty_flag: bool,         /**< marks this image to be rendered */
 }
-Image_Buffer_Constructor :: struct {
+Image_Buffer :: struct {
     vao: u32,
-    image_vertices: map[string]Image_Vertex_Buffer_Constructor,
+    image_vertices: map[string]Image_Vertex_Buffer,
 }
 
-Shader_Program_Constructor :: struct {
+Shader_Program :: struct {
     vs: u32,
     ps: u32,
     program: u32,
 }
 
-Font_Atlas_Constructor :: struct {
+Font_Atlas_Vertex_Buffer :: struct {
+    vao: u32,
+    vbo: u32,
+    vertices: [dynamic]Image_Vertex,
+
+    ibo: u32,
+    indexes: [dynamic]u32,
+}
+Font_Atlas_Buffer :: struct {
+    batch: Font_Atlas_Vertex_Buffer, /**< batch of all `vertices' */
+    texture: u32,         /**< OpenGL texture ID */
+    width: f32,           /**< width of the (whole) texture (in pixels) */
+    height: f32,          /**< height of the (whole) texture (in pixels) */
+}
+Font_Atlas :: struct {
     angel_spec: AngelFNT_File,
+    font_atlas: Font_Atlas_Buffer,
 }
 
 Vertex_Batch :: struct {
-    using vertex_ctor: Vertex_Buffer_Constructor,
-    using shader_ctor: Shader_Program_Constructor,
+    using vertex: Vertex_Buffer,
+    using shader: Shader_Program,
 }
 
 Image_Batch :: struct {
-    using image_ctor: Image_Buffer_Constructor,
-    using font_ctor: Font_Atlas_Constructor,
-    using shader_ctor: Shader_Program_Constructor,
+    using image: Image_Buffer,
+    using font: Font_Atlas,
+    using shader: Shader_Program,
 }
 
 /** @brief contains all batched buffers for one Window render */
@@ -106,7 +121,7 @@ shader_link :: proc(vs: u32, fs: u32) -> (program: u32, err: General_Error) {
 }
 
 @(private="file")
-shader_assemble :: #force_inline proc(vertex_src: ^cstring, pixel_src: ^cstring) -> (prg: Shader_Program_Constructor, err: General_Error) {
+shader_assemble :: #force_inline proc(vertex_src: ^cstring, pixel_src: ^cstring) -> (prg: Shader_Program, err: General_Error) {
     prg.vs = shader_compile(vertex_src, gl.VERTEX_SHADER) or_return;
     prg.ps = shader_compile(pixel_src, gl.FRAGMENT_SHADER) or_return;
     prg.program = shader_link(prg.vs, prg.ps) or_return;
@@ -126,14 +141,14 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
     // shaders
     img_vertex_src := #load("resources/shaders/img_vert.glsl", cstring);
     img_pixel_src  := #load("resources/shaders/img_pix.glsl", cstring);
-    ren.images.shader_ctor = shader_assemble(&img_vertex_src, &img_pixel_src) or_return;
+    ren.images.shader = shader_assemble(&img_vertex_src, &img_pixel_src) or_return;
     rect_vertex_src := #load("resources/shaders/rect_vert.glsl", cstring);
     rect_pixel_src  := #load("resources/shaders/rect_pix.glsl", cstring);
-    ren.rects.shader_ctor = shader_assemble(&rect_vertex_src, &rect_pixel_src) or_return;
+    ren.rects.shader = shader_assemble(&rect_vertex_src, &rect_pixel_src) or_return;
 
     // images
     gl.GenVertexArrays(1, &ren.images.vao);
-    ren.images.image_vertices = make(map[string]Image_Vertex_Buffer_Constructor) or_return;
+    ren.images.image_vertices = make(map[string]Image_Vertex_Buffer) or_return;
 
     // font atlas
     ok: bool;
@@ -148,36 +163,32 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
     img_path[len(FONT_DIR)] = '/';
     copy_from_string(img_path[len(FONT_DIR) + 1:], ren.images.angel_spec.pages[0].file_name);
     x, y: libc.int;
+    stbi.set_flip_vertically_on_load(1);
     img := stbi.load(strings.clone_to_cstring(cast(string)img_path, context.temp_allocator), &x, &y, nil, 4);
-    // log.warnf("File: %s", img_path);
-    // img := load_image(string(img_path)) or_return;
     delete(img_path);
-    // defer delete_image(img);
     defer libc.free(img);
 
-    e := map_insert(
-        &ren.images.image_vertices,
-        ren.images.angel_spec.pages[0].file_name,
-        Image_Vertex_Buffer_Constructor{});
-    e^.width  = cast(f32)x//img.width;
-    e^.height = cast(f32)y//img.height;
-
-    gl.GenTextures(1, &e^.texture);
-    gl.BindTexture(gl.TEXTURE_2D, e^.texture);
+    gl.GenTextures(1, &ren.images.font_atlas.texture);
+    gl.BindTexture(gl.TEXTURE_2D, ren.images.font_atlas.texture);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
-        // cast(i32)img.width, cast(i32)img.height, 0,
         x, y, 0,
-        // gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
         gl.RGBA, gl.UNSIGNED_BYTE, img);
+    
+    gl.GenVertexArrays(1, &ren.images.font_atlas.batch.vao);
+    gl.GenBuffers(1, &ren.images.font_atlas.batch.vbo);
+    gl.GenBuffers(1, &ren.images.font_atlas.batch.ibo);
+    ren.images.font_atlas.batch.vertices = make([dynamic]Image_Vertex);
+    ren.images.font_atlas.batch.indexes = make([dynamic]u32);
+    ren.images.font_atlas.width = cast(f32)x;
+    ren.images.font_atlas.height = cast(f32)y;
 
     return ren, err;
 }
 
-@(private="file")
 batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
     // add rect
     {
@@ -198,12 +209,10 @@ batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button
     batch_renderer_add_text(ren, cmd.text);
 }
 
-@(private="file")
 batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
     pos := cmd.pos;
 
-    e, ok := ren.images.image_vertices[ren.images.angel_spec.pages[0].file_name]; // assuming ONE PAGE!!
-    assert(ok);
+    width, height := ren^.images.font_atlas.width, ren^.images.font_atlas.height;
     for c in cmd.text {
         angel_char: ^AngelBlock_Char = nil;
         for &ac in ren^.images.angel_spec.chars {
@@ -214,34 +223,43 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
         }
         assert(angel_char != nil);
 
-        r := Rect {
-            x1 = cast(f32)angel_char.x_offset / e.width,
-            y1 = cast(f32)angel_char.y_offset / e.height,
-            x2 = (cast(f32)angel_char.x_offset + cast(f32)angel_char.width) / e.width,
-            y2 = (cast(f32)angel_char.y_offset + cast(f32)angel_char.height) / e.height,
-        };
-        assert(false, "TODO: We cannot do this since font atlas does not really have an active VBO. Also we should not bind copies of the font atlas for every char instance. There should only be one atlas instance and multiple vertex buffer clippings!")
-        batch_renderer_register_image(
-            ren,
-            pos,
-            r,
-            ren.images.angel_spec.pages[angel_char^.page-1].file_name);
+        // register crop
+        {
+            angel_char_width, angel_char_height := cast(f32)angel_char.width, cast(f32)angel_char.height;
+            pos_x, pos_y := cast(f32)pos.x, cast(f32)pos.y;
+            uv_rect := Rect {
+                x1 = cast(f32)angel_char.x / width,
+                y1 = 1 - cast(f32)angel_char.y / height, // image is flipped, thx OpenGL
+                x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / width,
+                y2 = 1 - (cast(f32)angel_char.y + cast(f32)angel_char.height) / height,
+            };
+            r_ndc := ui_pos_to_ndc(ui_create_rect({ pos_x, pos_y }, { angel_char_width, angel_char_height }));
+            base_index := cast(u32)len(ren^.images.font_atlas.batch.vertices);
+            append(&ren^.images.font_atlas.batch.vertices,
+                Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
+                Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }, // Bottom-right
+                Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }, // Top-right
+                Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }, // Top-left
+            );
+            append(&ren^.images.font_atlas.batch.indexes,
+                base_index + 0, base_index + 1, base_index + 2,
+                base_index + 2, base_index + 3, base_index + 0,
+            );
+        }
 
         pos.x += cmd.size;
     }
 }
 
-batch_renderer_add :: proc { batch_renderer_add_button, batch_renderer_add_text }
-
 /**
  * @brief images registered via file path (cached) such that every already registered image is going to be re-rendered
  *      and every new one is going to be loaded, cropped, and GPU-registered
  * @param img_pos is a position of the top left corner where the image should be located (window coords)
- * @param clip_rect is a UV rectangle, marking area which is going to be displayed on the screen
+ * @param uv_rect is a UV rectangle, marking area which is going to be displayed on the screen
  * @param img_path is path to the image desired to (re)load
  * @note if the function finds already existing image with the img_path, it will still update vertices and crop the image anew
  */
-batch_renderer_register_image :: proc(ren: ^Batch_Renderer, img_pos: [2]i32, clip_rect: Rect, img_path: string) -> (err: General_Error) {
+batch_renderer_register_image :: proc(ren: ^Batch_Renderer, img_pos: [2]i32, uv_rect: Rect, img_path: string) -> (err: General_Error) {
     e, ok := &ren^.images.image_vertices[img_path];
     if !ok {
         img := load_image(img_path) or_return;
@@ -250,17 +268,20 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, img_pos: [2]i32, cli
         // add texture
         texture: u32;
         gl.GenTextures(1, &texture);
+        e = map_insert(&ren^.images.image_vertices, img_path, Image_Vertex_Buffer {});
         e^.texture = texture;
         gl.BindTexture(gl.TEXTURE_2D, texture);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA,
+        assert(img.channels >= 3);
+        format: i32;
+        if img.channels == 3 do format = gl.RGB;
+        else if img.channels == 4 do format = gl.RGBA;
+        gl.TexImage2D(gl.TEXTURE_2D, 0, format,
             cast(i32)img.width, cast(i32)img.height, 0,
-            gl.RGBA, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
-
-        e = map_insert(&ren^.images.image_vertices, img_path, Image_Vertex_Buffer_Constructor {});
+            cast(u32)format, gl.UNSIGNED_BYTE, raw_data(img.pixels.buf));
 
         e^.width = cast(f32)img.width;
         e^.height = cast(f32)img.height;
@@ -271,27 +292,20 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, img_pos: [2]i32, cli
     {
         img_size := [2]f32 { cast(f32)e^.width, cast(f32)e^.height, };
         img_fpos := [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y, };
-        r := ui_pos_to_ndc(ui_create_rect(img_fpos, img_size));
-        // x_delta := r.x2 - r.x1;
-        // y_delta := r.y2 - r.y1;
-        // r.x1 += clip_rect.x1 * x_delta;
-        // r.x2 -= (1 - clip_rect.x2) * x_delta;
-        // r.y1 -= (1 - clip_rect.y1) * y_delta;
-        // r.y2 += clip_rect.y2 * y_delta;
+        r_ndc := ui_pos_to_ndc(ui_create_rect(img_fpos, img_size));
 
-        // CCW
         vertices: [6]Image_Vertex;
-        vertices[0] = { { r.x1, r.y1 }, { clip_rect.x1, clip_rect.y1 }, }; // Bottom-left
-        vertices[1] = { { r.x2, r.y1 }, { clip_rect.x2, clip_rect.y2 }, }; // Bottom-right
-        vertices[2] = { { r.x1, r.y2 }, { clip_rect.x1, clip_rect.y1 }, }; // Top-left
+        vertices[0] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left
+        vertices[1] = { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }; // Bottom-right
+        vertices[2] = { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }; // Top-right
 
-        vertices[3] = { { r.x1, r.y2 }, { clip_rect.x1, clip_rect.y1 }, }; // Top-left
-        vertices[4] = { { r.x2, r.y1 }, { clip_rect.x2, clip_rect.y2 }, }; // Bottom-right
-        vertices[5] = { { r.x2, r.y2 }, { clip_rect.x2, clip_rect.y1 }, }; // Top-right
+        vertices[3] = { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }; // Top-right
+        vertices[4] = { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }; // Top-left
+        vertices[5] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left
 
         if !ok do gl.GenBuffers(1, &e^.vbo); // only generate buffer if entry does not yet exist
         gl.BindBuffer(gl.ARRAY_BUFFER, e^.vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, len(vertices) * size_of(Image_Vertex), raw_data(vertices[:]), gl.STATIC_DRAW);
+        gl.BufferData(gl.ARRAY_BUFFER, len(vertices) * size_of(Image_Vertex), &vertices[0], gl.DYNAMIC_DRAW);
     }
 
     return nil;
@@ -321,7 +335,35 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
         gl.UseProgram(ren^.images.program);
 
         gl.BindVertexArray(ren^.images.vao);
-        gl.EnableVertexAttribArray(0);
+
+        for k, v in ren^.images.image_vertices {
+            gl.BindTexture(gl.TEXTURE_2D, v.texture);
+            gl.BindBuffer(gl.ARRAY_BUFFER, v.vbo);
+
+            gl.VertexAttribPointer(0, 2, gl.FLOAT, false, size_of(Image_Vertex), offset_of(Image_Vertex, pos));
+            gl.EnableVertexAttribArray(0);
+
+            gl.VertexAttribPointer(1, 2, gl.FLOAT, false, size_of(Image_Vertex), offset_of(Image_Vertex, uv));
+            gl.EnableVertexAttribArray(1);
+
+            gl.DrawArrays(gl.TRIANGLES, 0, 6); // quad
+        }
+    }
+
+    // render text
+    {
+        // note: text rendering does not use its own program, uses image's
+
+        font_atlas := ren^.images.font_atlas;
+        gl.BindVertexArray(font_atlas.batch.vao);
+
+        gl.BindTexture(gl.TEXTURE_2D, font_atlas.texture);
+
+        gl.BindBuffer(gl.ARRAY_BUFFER, font_atlas.batch.vbo);
+        gl.BufferData(gl.ARRAY_BUFFER, len(font_atlas.batch.vertices) * size_of(Image_Vertex), raw_data(font_atlas.batch.vertices), gl.DYNAMIC_DRAW);
+
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, font_atlas.batch.ibo);
+        gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(font_atlas.batch.indexes) * size_of(u32), raw_data(font_atlas.batch.indexes), gl.DYNAMIC_DRAW);
 
         gl.VertexAttribPointer(0, 2, gl.FLOAT, false, size_of(Image_Vertex), offset_of(Image_Vertex, pos));
         gl.EnableVertexAttribArray(0);
@@ -329,11 +371,7 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
         gl.VertexAttribPointer(1, 2, gl.FLOAT, false, size_of(Image_Vertex), offset_of(Image_Vertex, uv));
         gl.EnableVertexAttribArray(1);
 
-        for k, v in ren^.images.image_vertices {
-            if k == ren^.images.angel_spec.pages[0].file_name do continue; // skip the font atlas
-            gl.BindBuffer(gl.ARRAY_BUFFER, v.texture);
-            gl.DrawArrays(gl.TRIANGLES, 0, 6); // quad
-        }
+        gl.DrawElements(gl.TRIANGLES, cast(i32)len(font_atlas.batch.indexes), gl.UNSIGNED_INT, nil);
     }
 }
 
@@ -341,6 +379,9 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer) {
 batch_renderer_clear :: proc(ren: ^Batch_Renderer) {
     clear(&ren^.rects.vertices);
     clear(&ren^.rects.indexes);
+
+    clear(&ren^.images.font_atlas.batch.vertices);
+    clear(&ren^.images.font_atlas.batch.indexes);
 }
 
 /** @brief reset called every FRAME */
@@ -370,10 +411,17 @@ batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
     gl.DeleteVertexArrays(1, &ren^.rects.vao);
     gl.DeleteProgram(ren^.rects.program);
 
-    // image buffer constructor + font atlas constructor
+    // image buffer(s)
     for k in ren^.images.image_vertices do batch_renderer_delete_texture(ren, k);
-    angel_delete(&ren^.images.angel_spec);
     gl.DeleteVertexArrays(1, &ren^.images.vao);
     gl.DeleteProgram(ren^.images.program);
     delete(ren^.images.image_vertices);
+
+    // font atlas
+    buffers.xy = { ren^.images.font_atlas.batch.vbo, ren^.images.font_atlas.batch.ibo };
+    gl.DeleteBuffers(2, &buffers[0]);
+    delete(ren^.images.font_atlas.batch.vertices);
+    delete(ren^.images.font_atlas.batch.indexes);
+    gl.DeleteTextures(1, &ren^.images.font_atlas.texture);
+    angel_delete(&ren^.images.angel_spec);
 }
