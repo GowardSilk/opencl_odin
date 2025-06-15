@@ -3,6 +3,8 @@
  *
  * @brief contains Batch renderer facilities for enqueuing draw calls and then their subsequent construction (aka batched render)
  *
+ * @todo consider "concatenating" `shaders' and `vaos' members with one allocator with views bound to the respective structures so that we avoid this incremental need for multiple dynarrays
+ *
  * @ingroup video
  *
  * @author GowardSilk
@@ -11,6 +13,7 @@ package video;
 
 import "core:log"
 import "core:strings"
+import "core:c"
 import "core:c/libc"
 
 import gl "vendor:OpenGL"
@@ -66,17 +69,18 @@ Font_Atlas :: struct {
     font_atlas: Font_Atlas_Buffer,
 }
 
-Vertex_Buffer :: struct {
+Rect_Vertex :: f32;
+Rect_Vertex_Buffer :: struct {
     vaos: [dynamic]u32, /**< VAO per window */
 
     // shared across windows:
     vbo: u32,
-    vertices: [dynamic]f32,
+    vertices: [dynamic]Rect_Vertex,
     ibo: u32,
     indexes: [dynamic]u32,
 }
-Vertex_Batch :: struct {
-    using vertex: Vertex_Buffer,
+Rect_Batch :: struct {
+    using vertex: Rect_Vertex_Buffer,
     shaders: [dynamic]Shader_Program,
 }
 
@@ -88,7 +92,7 @@ Image_Batch :: struct {
 
 /** @brief contains all batched buffers for one Window render */
 Batch_Renderer :: struct {
-    rects: Vertex_Batch,
+    rects: Rect_Batch,
     images: Image_Batch,
 }
 
@@ -101,7 +105,12 @@ shader_compile :: proc(src: ^cstring, kind: u32) -> (id: u32, err: General_Error
     success: i32;
     gl.GetShaderiv(shader, gl.COMPILE_STATUS, cast([^]i32)&success);
     if success == 0 {
-        log.error("Failed to compile shader!");
+        length: i32;
+        gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &length);
+        info_log := make([]byte, length + 1);
+        defer delete(info_log);
+        gl.GetShaderInfoLog(shader, length, nil, &info_log[0]);
+        log.errorf("Failed to compile shader! Log: %s", cast(string)info_log);
         return 0, .Shader_Compile;
     }
     return shader, nil; 
@@ -142,14 +151,14 @@ RECT_VERTEX_SRC := #load("resources/shaders/rect_vert.glsl", cstring);
 RECT_PIXEL_SRC  := #load("resources/shaders/rect_pix.glsl", cstring);
 
 batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
-    // rect vertices/indexes
+    // rects
     vao: u32;
     gl.GenVertexArrays(1, &vao);
-    ren.rects.vaos = make([dynamic]u32);
+    ren.rects.vaos = make([dynamic]u32) or_return;
     append(&ren.rects.vaos, vao);
 
     gl.GenBuffers(1, &ren.rects.vbo);
-    ren.rects.vertices = make([dynamic]f32) or_return;
+    ren.rects.vertices = make([dynamic]Rect_Vertex) or_return;
 
     gl.GenBuffers(1, &ren.rects.ibo);
     ren.rects.indexes = make([dynamic]u32) or_return;
@@ -238,6 +247,17 @@ batch_renderer_clone :: proc(ren: ^Batch_Renderer) -> (err: General_Error) {
     }
 
     return nil;
+}
+
+batch_renderer_unload_index :: proc(ren: ^Batch_Renderer, index: int) {
+    vaos := [3]u32{ ren.rects.vaos[index], ren.images.vaos[index], ren.images.font_atlas.batch.vaos[index] };
+    gl.DeleteVertexArrays(3, &vaos[0]);
+    ordered_remove(&ren.rects.vaos, index);
+    ordered_remove(&ren.images.vaos, index);
+    ordered_remove(&ren.images.font_atlas.batch.vaos, index);
+
+    gl.DeleteProgram(ren.images.shaders[index].program);
+    ordered_remove(&ren.images.shaders, index);
 }
 
 batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
@@ -366,14 +386,15 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, active_index: Window
 }
 
 batch_renderer_construct :: proc(ren: ^Batch_Renderer, index: Window_Index) {
-    // render button(s)
+    // render rect(s)
     {
-        gl.UseProgram(ren^.rects.shaders[index].program);
+        program := ren^.rects.shaders[index].program;
+        gl.UseProgram(program);
 
         gl.BindVertexArray(ren^.rects.vaos[index]);
 
         gl.BindBuffer(gl.ARRAY_BUFFER, ren^.rects.vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, len(ren^.rects.vertices) * size_of(f32), raw_data(ren^.rects.vertices), gl.DYNAMIC_DRAW);
+        gl.BufferData(gl.ARRAY_BUFFER, len(ren^.rects.vertices) * size_of(Rect_Vertex), raw_data(ren^.rects.vertices), gl.DYNAMIC_DRAW);
 
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ren^.rects.ibo);
         gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(ren^.rects.indexes) * size_of(u32), raw_data(ren^.rects.indexes), gl.DYNAMIC_DRAW);

@@ -24,10 +24,15 @@ Draw_Proc :: #type proc "odin" (w: Window);
 Draw_Cursor :: struct {
     pos: [2]c.int, /**< current active position*/
     button_size: [2]c.int, /**< default button size*/
+    button_color: [4]c.int, /**< default button color */
     font_size: i32,
 }
+WHITE :: [4]c.int { 255, 255, 255, 255 };
+RED :: [4]c.int { 255, 0, 0, 255 };
+GREEN :: [4]c.int { 0, 255, 0, 255 };
+BLUE :: [4]c.int { 0, 0, 255, 255 };
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
-    return Draw_Cursor { {0, 0}, {20, 20}, 10 };
+    return Draw_Cursor { {0, 0}, {20, 20}, WHITE, 10 };
 }
 Window_Signal :: enum {
     NONE = 0,
@@ -52,6 +57,7 @@ Draw_Command_Text :: struct {
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
     rect: Rect,
+    color: [4]c.int,
 }
 Draw_Command :: union {
     Draw_Command_Button,
@@ -210,6 +216,12 @@ ui_set_button_size :: #force_inline proc(size: [2]c.int) {
     active_window^.cursor.button_size = size;
 }
 
+ui_set_button_color :: #force_inline proc(color: [4]c.int) {
+    queue := get_context()^.queue;
+    active_window := &queue.windows[queue.active_window];
+    active_window^.cursor.button_color = color;
+}
+
 ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     queue := get_context()^.queue;
     active_window := queue.windows[queue.active_window];
@@ -257,7 +269,7 @@ ui_draw_button :: proc(name: string) -> bool {
     );
     ui_register_draw_command(Draw_Command_Button {
         Draw_Command_Text { name, button_pos, active_window.cursor.font_size, },
-        r_ndc,
+        r_ndc, active_window.cursor.button_color,
     });
 
     button_pos64  := [2]c.double { cast(c.double)button_pos.x, cast(c.double)button_pos.y };
@@ -333,6 +345,7 @@ ui_draw :: proc() {
                 w->draw_proc();
                 glfw.DestroyWindow(w.handle);
                 ordered_remove(&queue^.windows, index);
+                batch_renderer_unload_index(&ctx^.ren, cast(int)index);
                 l -= 1;
             }
         }
