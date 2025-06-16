@@ -26,11 +26,11 @@ Draw_Cursor :: struct {
     pos: [2]c.int, /**< current active position*/
     last_line_max_height: c.int,
     button_size: [2]c.int, /**< default button size*/
-    font_size: i32,
+    font_size: f32, /**< default font size*/
 }
 
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
-    return Draw_Cursor { {0, 0}, 0, {20, 20}, 10 };
+    return Draw_Cursor { {0, 0}, 0, {20, 20}, 30 };
 }
 
 draw_cursor_reset :: #force_inline proc() {

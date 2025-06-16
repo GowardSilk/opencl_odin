@@ -39,6 +39,7 @@ draw_main_screen :: proc(w: ui.Window) {
     @(static)
     active_img := images[0].path;
 
+    ui.set_font_size(40);
     ui.set_button_size({200, 50});
     for img in images {
         if ui.draw_button(img.display_name) do active_img = img.path;

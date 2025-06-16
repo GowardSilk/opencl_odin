@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Upadting font render]
+
+#### Added
+- `font.*.glsl` as part of font rendering pipeline to support better font rendering (we can now ignore the black background)
+- `spirvgen.py` which is general script for generating .spv (aka SPIR-V binary) out of *.glsl shaders for easier management
+
+#### Changed
+- `ui.odin` to support font sizing and its customary setting via `set_font_size`
+- `batch_renderer.odin` now supports (better, though seems still a bit buggy) font rendering; the issue is that some of the characters seem to be rendering with completely arbitrary base (the font.fnt file's baselines look suspicious to say the least for the letters affected); but the issue can also stem from wrong math... whatever the reason, the font rendering should suffice for now
+
 ### [UI cleanup]
 
 #### Changed

@@ -35,7 +35,7 @@ Window :: struct {
 Draw_Command_Text :: struct {
     text: string,
     pos: [2]i32, /**< top left corner*/
-    size: i32, // TODO(GowardSilk): actually make use of this
+    size: [2]f32,
 }
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
@@ -100,10 +100,12 @@ init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
     return ctx, .None;
 }
 
+set_font_size :: #force_inline proc(size: f32) {
+    get_context()^.queue.active_window^.cursor.font_size = size;
+}
+
 set_button_size :: #force_inline proc(size: [2]c.int) {
-    queue := get_context()^.queue;
-    active_window := queue.active_window;
-    active_window^.cursor.button_size = size;
+    get_context()^.queue.active_window^.cursor.button_size = size;
 }
 
 draw_button :: proc(name: string) -> bool {
@@ -126,7 +128,11 @@ draw_button :: proc(name: string) -> bool {
         ),
     );
     register_draw_command(Draw_Command_Button {
-        Draw_Command_Text { name, button_pos, active_window.cursor.font_size, },
+        Draw_Command_Text {
+            name,
+            button_pos,
+            active_window.cursor.font_size,
+        },
         r_ndc,
     });
 

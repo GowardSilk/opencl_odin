@@ -82,6 +82,7 @@ PERWINDOW_VAO_FONT_ATLAS_IDX :: 2;
 Batch_Renderer_PerWindow_Memory :: struct {
     vaos: [3]u32,
 
+    font_program: u32,
     image_program: u32,
     rect_program: u32,
 }
@@ -140,6 +141,10 @@ shader_assemble :: #force_inline proc(vertex_src: []c.uint32_t, pixel_src: []c.u
 }
 
 @(private="file")
+FONT_VERTEX_SRC  :: #load("../resources/shaders/font.vert.spv", []c.uint32_t);
+@(private="file")
+FONT_PIXEL_SRC   :: #load("../resources/shaders/font.frag.spv", []c.uint32_t);
+@(private="file")
 IMG_VERTEX_SRC  :: #load("../resources/shaders/img.vert.spv", []c.uint32_t);
 @(private="file")
 IMG_PIXEL_SRC   :: #load("../resources/shaders/img.frag.spv", []c.uint32_t);
@@ -159,6 +164,7 @@ batch_renderer_new :: proc(id: Batch_Renderer_Window_ID) -> (ren: Batch_Renderer
     // perwindow mem
     ren.perwindow = make(map[Batch_Renderer_Window_ID]Batch_Renderer_PerWindow_Memory);
     perwindow: Batch_Renderer_PerWindow_Memory;
+    perwindow.font_program = shader_assemble(FONT_VERTEX_SRC, FONT_PIXEL_SRC) or_return;
     perwindow.image_program = shader_assemble(IMG_VERTEX_SRC, IMG_PIXEL_SRC) or_return;
     perwindow.rect_program = shader_assemble(RECT_VERTEX_SRC, RECT_PIXEL_SRC) or_return;
     gl.GenVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
@@ -216,6 +222,7 @@ batch_renderer_clone :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID)
     gl.GenVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
 
     // shaders
+    perwindow.font_program = shader_assemble(FONT_VERTEX_SRC, FONT_PIXEL_SRC) or_return;
     perwindow.image_program = shader_assemble(IMG_VERTEX_SRC, IMG_PIXEL_SRC) or_return;
     perwindow.rect_program = shader_assemble(RECT_VERTEX_SRC, RECT_PIXEL_SRC) or_return;
 
@@ -232,6 +239,7 @@ batch_renderer_unload :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID
 
     gl.DeleteProgram(e.image_program);
     gl.DeleteProgram(e.rect_program);
+    gl.DeleteProgram(e.font_program);
 }
 
 batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
@@ -256,8 +264,9 @@ batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button
 
 batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
     pos := cmd.pos;
+    scale := cmd.size.y / cast(f32)ren^.images.angel_spec.common.line_height;
+    atlas_width, atlas_height := ren^.images.font_atlas.width, ren^.images.font_atlas.height;
 
-    width, height := ren^.images.font_atlas.width, ren^.images.font_atlas.height;
     for c in cmd.text {
         angel_char: ^AngelBlock_Char = nil;
         for &ac in ren^.images.angel_spec.chars {
@@ -268,31 +277,34 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
         }
         assert(angel_char != nil);
 
-        // register crop
-        {
-            angel_char_width, angel_char_height := cast(f32)angel_char.width, cast(f32)angel_char.height;
-            pos_x, pos_y := cast(f32)pos.x, cast(f32)pos.y;
-            uv_rect := Rect {
-                x1 = cast(f32)angel_char.x / width,
-                y1 = 1 - cast(f32)angel_char.y / height, // image is flipped, thx OpenGL
-                x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / width,
-                y2 = 1 - (cast(f32)angel_char.y + cast(f32)angel_char.height) / height,
-            };
-            r_ndc := pos_to_ndc(create_rect({ pos_x, pos_y }, { angel_char_width, angel_char_height }));
-            base_index := cast(u32)len(ren^.images.font_atlas.batch.vertices);
-            append(&ren^.images.font_atlas.batch.vertices,
-                Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
-                Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y1 }, }, // Bottom-right
-                Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y2 }, }, // Top-right
-                Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y2 }, }, // Top-left
-            );
-            append(&ren^.images.font_atlas.batch.indexes,
-                base_index + 0, base_index + 1, base_index + 2,
-                base_index + 2, base_index + 3, base_index + 0,
-            );
-        }
+        glyph_w := cast(f32)angel_char.width * scale;
+        glyph_h := cast(f32)angel_char.height * scale;
 
-        pos.x += cast(i32)angel_char.width;
+        xpos := cast(f32)pos.x + angel_char.x_offset * scale;
+        ypos := cast(f32)pos.y + (ren^.images.angel_spec.common.base - angel_char.y_offset) * scale;
+
+        uv_rect := Rect {
+            x1 = cast(f32)angel_char.x / atlas_width,
+            y1 = 1 - cast(f32)angel_char.y / atlas_height,
+            x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / atlas_width,
+            y2 = 1 - (cast(f32)angel_char.y + cast(f32)angel_char.height) / atlas_height,
+        };
+
+        r_ndc := pos_to_ndc(create_rect({xpos, ypos}, {glyph_w, glyph_h}));
+
+        base_index := cast(u32)len(ren^.images.font_atlas.batch.vertices);
+        append(&ren^.images.font_atlas.batch.vertices,
+            Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
+            Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y1 }, }, // Bottom-right
+            Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y2 }, }, // Top-right
+            Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y2 }, }, // Top-left
+        );
+        append(&ren^.images.font_atlas.batch.indexes,
+            base_index + 0, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index + 0,
+        );
+
+        pos.x += cast(i32)(angel_char.x_advance * scale);
     }
 }
 
@@ -405,7 +417,7 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window
 
     // render text
     {
-        // note: text rendering does not use its own program, uses image's
+        gl.UseProgram(perwindow.font_program);
 
         font_atlas := ren^.images.font_atlas;
         gl.BindVertexArray(perwindow.vaos[PERWINDOW_VAO_FONT_ATLAS_IDX]);
@@ -459,6 +471,7 @@ batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
     // perwindow memory
     for _, &perwindow in ren^.perwindow {
         gl.DeleteVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
+        gl.DeleteProgram(perwindow.font_program);
         gl.DeleteProgram(perwindow.image_program);
         gl.DeleteProgram(perwindow.rect_program);
     }
