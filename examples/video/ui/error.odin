@@ -1,10 +1,10 @@
-package video;
+package ui;
 
 import "base:runtime"
 
 import "core:image"
 
-UI_Error :: enum byte {
+Error :: enum byte {
     None = 0,
     Shader_Compile,
     Shader_Program_Link,
@@ -13,7 +13,7 @@ UI_Error :: enum byte {
 }
 
 General_Error :: union #shared_nil {
-    UI_Error,
+    Error,
     runtime.Allocator_Error,
     image.Error,
 }

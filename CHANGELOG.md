@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [UI cleanup]
+
+#### Changed
+- added `everything of UI matter` into separate submodule of `video` -> `ui`
+
 ### [Object rendering on overflow]
 
 #### Changed

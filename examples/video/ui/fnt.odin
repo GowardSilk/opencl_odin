@@ -7,11 +7,11 @@
  *  member name (of all AngelBlock_* structs) to that specific line; it would be definitely easier and perhaps more
  *  readable than this
  *
- * @defgroup video_fnt
+ * @defgroup fnt
  *
  * @author GowardSilk
  */
-package video;
+package ui;
 
 import "base:runtime"
 

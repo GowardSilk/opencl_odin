@@ -7,26 +7,28 @@ import "core:log"
 
 import gl "vendor:OpenGL"
 import "vendor:glfw"
+
+import "ui"
 import "shared:opencl"
 
 main :: proc() {
     context.logger = log.create_console_logger();
 
     ok: runtime.Allocator_Error;
-    context.user_ptr, ok = ui_init();
-    defer ui_destroy();
+    context.user_ptr, ok = ui.init();
+    defer ui.destroy();
     assert(ok == .None && context.user_ptr != nil);
 
-    err := ui_register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
+    err := ui.register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
     log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err)
 
-    ui_draw();
+    ui.draw();
 }
 
 OPTIONS_WINDOW_OPENED := false;
 
-draw_main_screen :: proc(w: Window) {
-    if w.signal == .SHOULD_CLOSE do return;
+draw_main_screen :: proc(w: ui.Window) {
+    if w.signal == .Should_Close do return;
 
     Image_Descriptor :: struct { path, display_name: string };
     images :: [?]Image_Descriptor {
@@ -37,36 +39,36 @@ draw_main_screen :: proc(w: Window) {
     @(static)
     active_img := images[0].path;
 
-    ui_set_button_size({200, 50});
+    ui.set_button_size({200, 50});
     for img in images {
-        if ui_draw_button(img.display_name) do active_img = img.path;
+        if ui.draw_button(img.display_name) do active_img = img.path;
     }
 
-    if ui_draw_button("options") {
+    if ui.draw_button("options") {
         if !OPTIONS_WINDOW_OPENED {
-            if err := ui_register_window({512, 512}, "Image Settings", draw_options); err != nil {
+            if err := ui.register_window({512, 512}, "Image Settings", draw_options); err != nil {
                 log.errorf("Failed to open auxiliary option window! (err: %v)", err);
                 glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
             } else do OPTIONS_WINDOW_OPENED = true;
         }
     }
 
-    if err := ui_draw_image({512, 512}, active_img); err != nil {
+    if err := ui.draw_image({512, 512}, active_img); err != nil {
         log.errorf("Failed to open image with path: %s; (err: %v)", active_img, err);
         glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
     }
 }
 
-draw_options :: proc(w: Window) {
-    if w.signal == .SHOULD_CLOSE {
+draw_options :: proc(w: ui.Window) {
+    if w.signal == .Should_Close {
         OPTIONS_WINDOW_OPENED = false;
         return;
     }
 
-    ui_set_button_size({300, 50});
-    if ui_draw_button("Do something #1") do nothing();
-    if ui_draw_button("Do something #2") do nothing();
-    if ui_draw_button("Do something #3") do nothing();
+    ui.set_button_size({300, 50});
+    if ui.draw_button("Do something #1") do nothing();
+    if ui.draw_button("Do something #2") do nothing();
+    if ui.draw_button("Do something #3") do nothing();
 }
 
 nothing :: proc() {}

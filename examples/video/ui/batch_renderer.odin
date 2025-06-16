@@ -5,16 +5,16 @@
  *
  * @todo consider "concatenating" `shaders' and `vaos' members with one allocator with views bound to the respective structures so that we avoid this incremental need for multiple dynarrays
  *
- * @ingroup video
+ * @ingroup ui
  *
  * @author GowardSilk
  */
-package video;
+package ui;
 
-import "core:log"
-import "core:strings"
 import "core:c"
 import "core:c/libc"
+import "core:log"
+import "core:strings"
 
 import gl "vendor:OpenGL"
 import stbi "vendor:stb/image"
@@ -140,13 +140,13 @@ shader_assemble :: #force_inline proc(vertex_src: []c.uint32_t, pixel_src: []c.u
 }
 
 @(private="file")
-IMG_VERTEX_SRC  :: #load("resources/shaders/img.vert.spv", []c.uint32_t);
+IMG_VERTEX_SRC  :: #load("../resources/shaders/img.vert.spv", []c.uint32_t);
 @(private="file")
-IMG_PIXEL_SRC   :: #load("resources/shaders/img.frag.spv", []c.uint32_t);
+IMG_PIXEL_SRC   :: #load("../resources/shaders/img.frag.spv", []c.uint32_t);
 @(private="file")
-RECT_VERTEX_SRC :: #load("resources/shaders/rect.vert.spv", []c.uint32_t);
+RECT_VERTEX_SRC :: #load("../resources/shaders/rect.vert.spv", []c.uint32_t);
 @(private="file")
-RECT_PIXEL_SRC  :: #load("resources/shaders/rect.frag.spv", []c.uint32_t);
+RECT_PIXEL_SRC  :: #load("../resources/shaders/rect.frag.spv", []c.uint32_t);
 
 batch_renderer_new :: proc(id: Batch_Renderer_Window_ID) -> (ren: Batch_Renderer, err: General_Error) {
     // rects
@@ -278,7 +278,7 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
                 x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / width,
                 y2 = 1 - (cast(f32)angel_char.y + cast(f32)angel_char.height) / height,
             };
-            r_ndc := ui_pos_to_ndc(ui_create_rect({ pos_x, pos_y }, { angel_char_width, angel_char_height }));
+            r_ndc := pos_to_ndc(create_rect({ pos_x, pos_y }, { angel_char_width, angel_char_height }));
             base_index := cast(u32)len(ren^.images.font_atlas.batch.vertices);
             append(&ren^.images.font_atlas.batch.vertices,
                 Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
@@ -340,7 +340,7 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_W
     {
         img_size := [2]f32 { cast(f32)e^.width, cast(f32)e^.height, };
         img_fpos := [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y, };
-        r_ndc := ui_pos_to_ndc(ui_create_rect(img_fpos, img_size));
+        r_ndc := pos_to_ndc(create_rect(img_fpos, img_size));
 
         vertices: [6]Image_Vertex;
         vertices[0] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left

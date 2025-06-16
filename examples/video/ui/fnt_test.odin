@@ -1,4 +1,4 @@
-package video;
+package ui;
 
 import "core:testing"
 import "core:mem"
