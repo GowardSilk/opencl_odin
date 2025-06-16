@@ -38,10 +38,7 @@ draw_main_screen :: proc(w: Window) {
     active_img := images[0].path;
 
     ui_set_button_size({100, 50});
-    base := BLUE;
     for img in images {
-        ui_set_button_color(base);
-        base.g += 40;
         if ui_draw_button(img.display_name) do active_img = img.path;
     }
 

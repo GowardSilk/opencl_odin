@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Proper deletion out of Batch renderer]
+
+#### Changed
+- `ui_batch.odin` "batched" all Window non-shareable data into Batch_Renderer_PerWindow_Memory, that way we can eliminate a lot of local VAOs inits. In addition we now support SPIR-V which is directly loaded via `#load` as constant so we do not have to load and recompile shaders for each pipeline/window. With this in place, the deletion itself came as consequence of this design.
+- `ui.odin` fixed OpenGL context not being set for a window that was marked for deletion (closure); that caused us to accidently delete the correct VAOs but at incorrect moment (aka wrong selected context)
+
 ### [Multiple screens fix]
 
 #### Changed

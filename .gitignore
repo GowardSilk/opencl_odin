@@ -1,2 +1,5 @@
 CL/__pycache__/*
 CL/out/*
+
+*.spv
+*.exe

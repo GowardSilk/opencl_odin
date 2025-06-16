@@ -21,6 +21,8 @@ import stbi "vendor:stb/image"
 
 FONT_DIR :: "video/resources/fonts";
 
+Batch_Renderer_Window_ID :: distinct uintptr;
+
 @(private="file")
 Image_Vertex :: struct {
     pos: [2]f32,
@@ -33,25 +35,18 @@ Image_Vertex_Buffer :: struct {
     // hold the whole CPU image for the entire runtime
     width: f32,               /**< width of the (whole) texture (in pixels) */
     height: f32,              /**< height of the (whole) texture (in pixels) */
-    index: Window_Index,      /**< index at which the image was registered (since images are rendered per-frame and not per window, we need to remember its origin) */
+    window_id: Batch_Renderer_Window_ID, /**< index at which the image was registered (since images are rendered per-frame and not per window, we need to remember its origin) */
     dirty_flag: bool,         /**< marks this image to be rendered */
 }
 Image_Buffer :: struct {
-    vaos: [dynamic]u32, /**< VAO per window */
-
-    // shared across windows:
     image_vertices: map[string]Image_Vertex_Buffer,
 }
-
-Shader_Program :: struct {
-    vs: u32,
-    ps: u32,
-    program: u32,
+Image_Batch :: struct {
+    using image: Image_Buffer,
+    using font: Font_Atlas,
 }
 
 Font_Atlas_Vertex_Buffer :: struct {
-    vaos: [dynamic]u32, /**< VAO per window */
-
     // shared across windows
     vbo: u32,
     vertices: [dynamic]Image_Vertex,
@@ -71,8 +66,6 @@ Font_Atlas :: struct {
 
 Rect_Vertex :: f32;
 Rect_Vertex_Buffer :: struct {
-    vaos: [dynamic]u32, /**< VAO per window */
-
     // shared across windows:
     vbo: u32,
     vertices: [dynamic]Rect_Vertex,
@@ -81,26 +74,31 @@ Rect_Vertex_Buffer :: struct {
 }
 Rect_Batch :: struct {
     using vertex: Rect_Vertex_Buffer,
-    shaders: [dynamic]Shader_Program,
 }
 
-Image_Batch :: struct {
-    using image: Image_Buffer,
-    using font: Font_Atlas,
-    shaders: [dynamic]Shader_Program,
+PERWINDOW_VAO_RECT_IDX       :: 0;
+PERWINDOW_VAO_IMAGE_IDX      :: 1;
+PERWINDOW_VAO_FONT_ATLAS_IDX :: 2;
+Batch_Renderer_PerWindow_Memory :: struct {
+    vaos: [3]u32,
+
+    image_program: u32,
+    rect_program: u32,
 }
 
 /** @brief contains all batched buffers for one Window render */
 Batch_Renderer :: struct {
-    rects: Rect_Batch,
-    images: Image_Batch,
+    rects: Rect_Batch, /**< batch for rectangular objects (aka Quads) */
+    images: Image_Batch, /**< batch for image objects (+ fonts since we use texture fonts) */
+    perwindow: map[Batch_Renderer_Window_ID]Batch_Renderer_PerWindow_Memory, /**< perwindow data that cannot be shared among OpenGL contexts */
 }
 
 @(private="file")
-shader_compile :: proc(src: ^cstring, kind: u32) -> (id: u32, err: General_Error) {
+shader_load :: proc(src: []c.uint32_t, kind: u32) -> (id: u32, err: General_Error) {
     shader := gl.CreateShader(kind);
-    gl.ShaderSource(shader, 1, src, nil);
-    gl.CompileShader(shader);
+    gl.ShaderBinary(1, &shader, gl.SHADER_BINARY_FORMAT_SPIR_V, 
+                raw_data(src), cast(i32)len(src) * size_of(c.uint32_t));
+    gl.SpecializeShader(shader, "main", 0, nil, nil);
 
     success: i32;
     gl.GetShaderiv(shader, gl.COMPILE_STATUS, cast([^]i32)&success);
@@ -111,6 +109,7 @@ shader_compile :: proc(src: ^cstring, kind: u32) -> (id: u32, err: General_Error
         defer delete(info_log);
         gl.GetShaderInfoLog(shader, length, nil, &info_log[0]);
         log.errorf("Failed to compile shader! Log: %s", cast(string)info_log);
+        gl.DeleteShader(shader);
         return 0, .Shader_Compile;
     }
     return shader, nil; 
@@ -134,47 +133,39 @@ shader_link :: proc(vs: u32, fs: u32) -> (program: u32, err: General_Error) {
 }
 
 @(private="file")
-shader_assemble :: #force_inline proc(vertex_src: ^cstring, pixel_src: ^cstring) -> (prg: Shader_Program, err: General_Error) {
-    prg.vs = shader_compile(vertex_src, gl.VERTEX_SHADER) or_return;
-    prg.ps = shader_compile(pixel_src, gl.FRAGMENT_SHADER) or_return;
-    prg.program = shader_link(prg.vs, prg.ps) or_return;
-    return prg, nil;
+shader_assemble :: #force_inline proc(vertex_src: []c.uint32_t, pixel_src: []c.uint32_t) -> (prg: u32, err: General_Error) {
+    vs := shader_load(vertex_src, gl.VERTEX_SHADER) or_return;
+    fs := shader_load(pixel_src, gl.FRAGMENT_SHADER) or_return;
+    return shader_link(vs, fs);
 }
 
 @(private="file")
-IMG_VERTEX_SRC  := #load("resources/shaders/img_vert.glsl", cstring);
+IMG_VERTEX_SRC  :: #load("resources/shaders/img.vert.spv", []c.uint32_t);
 @(private="file")
-IMG_PIXEL_SRC   := #load("resources/shaders/img_pix.glsl", cstring);
+IMG_PIXEL_SRC   :: #load("resources/shaders/img.frag.spv", []c.uint32_t);
 @(private="file")
-RECT_VERTEX_SRC := #load("resources/shaders/rect_vert.glsl", cstring);
+RECT_VERTEX_SRC :: #load("resources/shaders/rect.vert.spv", []c.uint32_t);
 @(private="file")
-RECT_PIXEL_SRC  := #load("resources/shaders/rect_pix.glsl", cstring);
+RECT_PIXEL_SRC  :: #load("resources/shaders/rect.frag.spv", []c.uint32_t);
 
-batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
+batch_renderer_new :: proc(id: Batch_Renderer_Window_ID) -> (ren: Batch_Renderer, err: General_Error) {
     // rects
-    vao: u32;
-    gl.GenVertexArrays(1, &vao);
-    ren.rects.vaos = make([dynamic]u32) or_return;
-    append(&ren.rects.vaos, vao);
-
     gl.GenBuffers(1, &ren.rects.vbo);
     ren.rects.vertices = make([dynamic]Rect_Vertex) or_return;
 
     gl.GenBuffers(1, &ren.rects.ibo);
     ren.rects.indexes = make([dynamic]u32) or_return;
 
-    // shaders
-    ren.images.shaders = make([dynamic]Shader_Program);
-    shader := shader_assemble(&IMG_VERTEX_SRC, &IMG_PIXEL_SRC) or_return;
-    append(&ren.images.shaders, shader);
-    shader = shader_assemble(&RECT_VERTEX_SRC, &RECT_PIXEL_SRC) or_return;
-    append(&ren.rects.shaders, shader);
+    // perwindow mem
+    ren.perwindow = make(map[Batch_Renderer_Window_ID]Batch_Renderer_PerWindow_Memory);
+    perwindow: Batch_Renderer_PerWindow_Memory;
+    perwindow.image_program = shader_assemble(IMG_VERTEX_SRC, IMG_PIXEL_SRC) or_return;
+    perwindow.rect_program = shader_assemble(RECT_VERTEX_SRC, RECT_PIXEL_SRC) or_return;
+    gl.GenVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
+    map_insert(&ren.perwindow, id, perwindow);
 
     // images
-    gl.GenVertexArrays(1, &vao);
-    ren.images.vaos = make([dynamic]u32);
-    append(&ren.images.vaos, vao);
-    ren.images.image_vertices = make(map[string]Image_Vertex_Buffer) or_return;
+    ren.images.image_vertices = make(map[string]Image_Vertex_Buffer);
 
     // font atlas
     ok: bool;
@@ -184,6 +175,7 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
         log.error("Angel fnt contains MORE than ONE page (now not supported)!");
         return ren, .Angel_Read;
     }
+    // TODO cleanup: either STBI or core:image/png
     img_path := make([]byte, len(FONT_DIR) + 1 + len(ren.images.angel_spec.pages[0].file_name));
     copy_from_string(img_path, FONT_DIR);
     img_path[len(FONT_DIR)] = '/';
@@ -204,9 +196,6 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
         x, y, 0,
         gl.RGBA, gl.UNSIGNED_BYTE, img);
     
-    gl.GenVertexArrays(1, &vao);
-    ren.images.font_atlas.batch.vaos = make([dynamic]u32);
-    append(&ren.images.font_atlas.batch.vaos, vao);
     gl.GenBuffers(1, &ren.images.font_atlas.batch.vbo);
     gl.GenBuffers(1, &ren.images.font_atlas.batch.ibo);
     ren.images.font_atlas.batch.vertices = make([dynamic]Image_Vertex);
@@ -218,46 +207,31 @@ batch_renderer_new :: proc() -> (ren: Batch_Renderer, err: General_Error) {
 }
 
 /** @brief generates new pipeline for a new window, but keeps all other objects intact (shared) across them */
-batch_renderer_clone :: proc(ren: ^Batch_Renderer) -> (err: General_Error) {
-    vao: u32;
-    // rects
-    {
-        gl.GenVertexArrays(1, &vao);
-        append(&ren.rects.vaos, vao);
-    }
+batch_renderer_clone :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID) -> (err: General_Error) {
+    assert(!(id in ren^.perwindow));
+
+    perwindow: Batch_Renderer_PerWindow_Memory;
+
+    // VAOs
+    gl.GenVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
 
     // shaders
-    {
-        shader := shader_assemble(&IMG_VERTEX_SRC, &IMG_PIXEL_SRC) or_return;
-        append(&ren.images.shaders, shader);
-        shader = shader_assemble(&RECT_VERTEX_SRC, &RECT_PIXEL_SRC) or_return;
-        append(&ren.rects.shaders, shader);
-    }
+    perwindow.image_program = shader_assemble(IMG_VERTEX_SRC, IMG_PIXEL_SRC) or_return;
+    perwindow.rect_program = shader_assemble(RECT_VERTEX_SRC, RECT_PIXEL_SRC) or_return;
 
-    // images
-    {
-        gl.GenVertexArrays(1, &vao);
-        append(&ren.images.vaos, vao);
-    }
-
-    // font atlas
-    {
-        gl.GenVertexArrays(1, &vao);
-        append(&ren.images.font_atlas.batch.vaos, vao);
-    }
+    map_insert(&ren^.perwindow, id, perwindow);
 
     return nil;
 }
 
-batch_renderer_unload_index :: proc(ren: ^Batch_Renderer, index: int) {
-    vaos := [3]u32{ ren.rects.vaos[index], ren.images.vaos[index], ren.images.font_atlas.batch.vaos[index] };
-    gl.DeleteVertexArrays(3, &vaos[0]);
-    ordered_remove(&ren.rects.vaos, index);
-    ordered_remove(&ren.images.vaos, index);
-    ordered_remove(&ren.images.font_atlas.batch.vaos, index);
+batch_renderer_unload :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID) {
+    e, ok := ren^.perwindow[id];
+    log.assertf(ok, "Trying to unload resource with window id: %d; which does not exist!", id);
 
-    gl.DeleteProgram(ren.images.shaders[index].program);
-    ordered_remove(&ren.images.shaders, index);
+    gl.DeleteVertexArrays(len(e.vaos), &e.vaos[0]);
+
+    gl.DeleteProgram(e.image_program);
+    gl.DeleteProgram(e.rect_program);
 }
 
 batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button) {
@@ -331,7 +305,7 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
  * @param img_path is path to the image desired to (re)load
  * @note if the function finds already existing image with the img_path, it will still update vertices and crop the image anew
  */
-batch_renderer_register_image :: proc(ren: ^Batch_Renderer, active_index: Window_Index, img_pos: [2]i32, uv_rect: Rect, img_path: string) -> (err: General_Error) {
+batch_renderer_register_image :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID, img_pos: [2]i32, uv_rect: Rect, img_path: string) -> (err: General_Error) {
     e, ok := &ren^.images.image_vertices[img_path];
     if !ok {
         img := load_image(img_path) or_return;
@@ -357,12 +331,12 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, active_index: Window
         e^.width = cast(f32)img.width;
         e^.height = cast(f32)img.height;
         e^.texture = texture;
-        e^.index = active_index;
+        e^.window_id = id;
     }
     e^.dirty_flag = true;
 
     // add image rectangle
-    log.assertf(e^.index == active_index, "Image was created in a window: %d; but is updated through: %d. TODO: Do we consider this an issue?", e^.index, active_index);
+    log.assertf(e^.window_id == id, "Image was created in a window: %d; but is updated through: %d. TODO: Do we consider this an issue?", e^.window_id, id);
     {
         img_size := [2]f32 { cast(f32)e^.width, cast(f32)e^.height, };
         img_fpos := [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y, };
@@ -385,13 +359,15 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, active_index: Window
     return nil;
 }
 
-batch_renderer_construct :: proc(ren: ^Batch_Renderer, index: Window_Index) {
+batch_renderer_construct :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID) {
+    perwindow, ok := ren^.perwindow[id];
+    log.assertf(ok, "Window of ID: %d is not registered!", id);
+
     // render rect(s)
     {
-        program := ren^.rects.shaders[index].program;
-        gl.UseProgram(program);
+        gl.UseProgram(perwindow.rect_program);
 
-        gl.BindVertexArray(ren^.rects.vaos[index]);
+        gl.BindVertexArray(perwindow.vaos[PERWINDOW_VAO_RECT_IDX]);
 
         gl.BindBuffer(gl.ARRAY_BUFFER, ren^.rects.vbo);
         gl.BufferData(gl.ARRAY_BUFFER, len(ren^.rects.vertices) * size_of(Rect_Vertex), raw_data(ren^.rects.vertices), gl.DYNAMIC_DRAW);
@@ -407,12 +383,12 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer, index: Window_Index) {
 
     // render image(s)
     {
-        gl.UseProgram(ren^.images.shaders[index].program);
+        gl.UseProgram(perwindow.image_program);
 
-        gl.BindVertexArray(ren^.images.vaos[index]);
+        gl.BindVertexArray(perwindow.vaos[PERWINDOW_VAO_IMAGE_IDX]);
 
         for k, v in ren^.images.image_vertices {
-            if v.index == index { // only render images originally created in the window
+            if v.window_id == id { // only render images originally created in the window
                 gl.BindTexture(gl.TEXTURE_2D, v.texture);
                 gl.BindBuffer(gl.ARRAY_BUFFER, v.vbo);
 
@@ -432,7 +408,7 @@ batch_renderer_construct :: proc(ren: ^Batch_Renderer, index: Window_Index) {
         // note: text rendering does not use its own program, uses image's
 
         font_atlas := ren^.images.font_atlas;
-        gl.BindVertexArray(font_atlas.batch.vaos[index]);
+        gl.BindVertexArray(perwindow.vaos[PERWINDOW_VAO_FONT_ATLAS_IDX]);
 
         gl.BindTexture(gl.TEXTURE_2D, font_atlas.texture);
 
@@ -480,23 +456,26 @@ batch_renderer_delete_texture :: proc(ren: ^Batch_Renderer, k: string) {
 }
 
 batch_renderer_delete :: proc(ren: ^Batch_Renderer) {
+    // perwindow memory
+    for _, &perwindow in ren^.perwindow {
+        gl.DeleteVertexArrays(len(perwindow.vaos), &perwindow.vaos[0]);
+        gl.DeleteProgram(perwindow.image_program);
+        gl.DeleteProgram(perwindow.rect_program);
+    }
+    delete(ren^.perwindow);
+
     // vertex buffer constructor
     delete(ren^.rects.vertices);
     delete(ren^.rects.indexes);
     buffers := [2]u32 { ren^.rects.vbo, ren^.rects.ibo };
     gl.DeleteBuffers(2, &buffers[0]);
-    gl.DeleteVertexArrays(cast(i32)len(ren^.rects.vaos), raw_data(ren^.rects.vaos));
-    for shader in ren^.rects.shaders do gl.DeleteProgram(shader.program);
 
     // image buffer(s)
     for k in ren^.images.image_vertices do batch_renderer_delete_texture(ren, k);
-    gl.DeleteVertexArrays(cast(i32)len(ren^.images.vaos), raw_data(ren^.images.vaos));
-    for shader in ren^.images.shaders do gl.DeleteProgram(shader.program);
     delete(ren^.images.image_vertices);
 
     // font atlas
     buffers.xy = { ren^.images.font_atlas.batch.vbo, ren^.images.font_atlas.batch.ibo };
-    gl.DeleteVertexArrays(cast(i32)len(ren^.images.font_atlas.batch.vaos), raw_data(ren^.images.font_atlas.batch.vaos));
     gl.DeleteBuffers(2, &buffers[0]);
     delete(ren^.images.font_atlas.batch.vertices);
     delete(ren^.images.font_atlas.batch.indexes);

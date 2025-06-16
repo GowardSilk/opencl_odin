@@ -24,15 +24,10 @@ Draw_Proc :: #type proc "odin" (w: Window);
 Draw_Cursor :: struct {
     pos: [2]c.int, /**< current active position*/
     button_size: [2]c.int, /**< default button size*/
-    button_color: [4]c.int, /**< default button color */
     font_size: i32,
 }
-WHITE :: [4]c.int { 255, 255, 255, 255 };
-RED :: [4]c.int { 255, 0, 0, 255 };
-GREEN :: [4]c.int { 0, 255, 0, 255 };
-BLUE :: [4]c.int { 0, 0, 255, 255 };
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
-    return Draw_Cursor { {0, 0}, {20, 20}, WHITE, 10 };
+    return Draw_Cursor { {0, 0}, {20, 20}, 10 };
 }
 Window_Signal :: enum {
     NONE = 0,
@@ -47,8 +42,6 @@ Window :: struct {
     signal: Window_Signal,
 }
 
-Window_Index :: distinct u32;
-
 Draw_Command_Text :: struct {
     text: string,
     pos: [2]i32, /**< top left corner*/
@@ -57,14 +50,13 @@ Draw_Command_Text :: struct {
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
     rect: Rect,
-    color: [4]c.int,
 }
 Draw_Command :: union {
     Draw_Command_Button,
     Draw_Command_Text,
 }
 Draw_Command_Queue :: struct {
-    active_window: Window_Index,
+    active_window: ^Window,
     commands: [dynamic]Draw_Command,
     windows: [dynamic]Window,
 }
@@ -148,10 +140,10 @@ ui_register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> Ge
     
     // deferred batch renderer initialization
     ctx := get_context();
-    if ctx^.ren.rects.shaders == nil {
-        ctx^.ren = batch_renderer_new() or_return;
+    if ctx^.ren.perwindow == nil {
+        ctx^.ren = batch_renderer_new(cast(Batch_Renderer_Window_ID)w.handle) or_return;
     } else {
-        batch_renderer_clone(&ctx^.ren) or_return;
+        batch_renderer_clone(&ctx^.ren, cast(Batch_Renderer_Window_ID)w.handle) or_return;
     }
 
     append(&ctx^.queue.windows, w);
@@ -189,19 +181,19 @@ ui_init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
 @(private="file")
 ui_draw_cursor_reset :: #force_inline proc() {
     queue := get_context()^.queue;
-    queue.windows[queue.active_window].cursor = DRAW_CURSOR_DEFAULT();
+    queue.active_window.cursor = DRAW_CURSOR_DEFAULT();
 }
 
 @(private="file")
 ui_draw_cursor_current :: #force_inline proc() -> [2]c.int {
     queue := get_context()^.queue;
-    return queue.windows[queue.active_window].cursor.pos.xy;
+    return queue.active_window.cursor.pos.xy;
 }
 
 @(private="file")
 ui_draw_cursor_button_next :: #force_inline proc() {
     queue := get_context()^.queue;
-    active_window := &queue.windows[queue.active_window];
+    active_window := queue.active_window;
     active_window^.cursor.pos.x += active_window^.cursor.button_size.x;
     width, _ := glfw.GetWindowSize(active_window^.handle);
     if active_window^.cursor.pos.x >= width {
@@ -212,19 +204,13 @@ ui_draw_cursor_button_next :: #force_inline proc() {
 
 ui_set_button_size :: #force_inline proc(size: [2]c.int) {
     queue := get_context()^.queue;
-    active_window := &queue.windows[queue.active_window];
+    active_window := queue.active_window;
     active_window^.cursor.button_size = size;
-}
-
-ui_set_button_color :: #force_inline proc(color: [4]c.int) {
-    queue := get_context()^.queue;
-    active_window := &queue.windows[queue.active_window];
-    active_window^.cursor.button_color = color;
 }
 
 ui_pos_to_ndc :: proc(r: Rect) -> Rect {
     queue := get_context()^.queue;
-    active_window := queue.windows[queue.active_window];
+    active_window := queue.active_window;
     
     width, height := glfw.GetWindowSize(active_window.handle);
     x1_ndc := (2.0 * r.x1 / cast(f32)width) - 1.0;
@@ -255,7 +241,7 @@ ui_is_inside_widget :: #force_inline proc(r: Rect64, point: [2]c.double) -> bool
 
 ui_draw_button :: proc(name: string) -> bool {
     queue := get_context()^.queue;
-    active_window := queue.windows[queue.active_window];
+    active_window := queue.active_window;
 
     button_pos  := ui_draw_cursor_current();
     button_size := active_window.cursor.button_size;
@@ -269,7 +255,7 @@ ui_draw_button :: proc(name: string) -> bool {
     );
     ui_register_draw_command(Draw_Command_Button {
         Draw_Command_Text { name, button_pos, active_window.cursor.font_size, },
-        r_ndc, active_window.cursor.button_color,
+        r_ndc,
     });
 
     button_pos64  := [2]c.double { cast(c.double)button_pos.x, cast(c.double)button_pos.y };
@@ -294,7 +280,13 @@ ui_draw_image :: #force_inline proc(img_path: string) -> (err: General_Error) {
 
     ctx := get_context();
     // we cannot batch images properly, so they are loaded "in-place"
-    return batch_renderer_register_image(&ctx^.ren,ctx^. queue.active_window, img_pos, {1, 1, 0, 0}, img_path);
+    return batch_renderer_register_image(
+        &ctx^.ren,
+        cast(Batch_Renderer_Window_ID)ctx^.queue.active_window^.handle,
+        img_pos,
+        {1, 1, 0, 0},
+        img_path
+    );
 }
 
 @(private="file")
@@ -315,7 +307,7 @@ ui_execute_draw_commands :: proc() {
         }
     }
 
-    batch_renderer_construct(ren, ctx^.queue.active_window);
+    batch_renderer_construct(ren, cast(Batch_Renderer_Window_ID)ctx^.queue.active_window^.handle);
 }
 
 ui_draw :: proc() {
@@ -324,13 +316,13 @@ ui_draw :: proc() {
 
     for len(queue^.windows) > 0 {
         l := len(queue^.windows);
-        for index := 0; index < l; index += 1 {
-            w := queue^.windows[index];
+        for i := 0; i < l; i += 1 {
+            w := queue^.windows[i];
+            glfw.MakeContextCurrent(w.handle);
             glfw.PollEvents();
 
             if (!glfw.WindowShouldClose(w.handle)) {
-                queue^.active_window = cast(Window_Index)index;
-                glfw.MakeContextCurrent(w.handle);
+                queue^.active_window = &w;
 
                 gl.ClearColor(0.1, 0.1, 0.1, 1.0);
                 gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -343,9 +335,9 @@ ui_draw :: proc() {
                 // signal to the draw function that the window is being closed
                 w.signal = .SHOULD_CLOSE;
                 w->draw_proc();
+                batch_renderer_unload(&ctx^.ren, cast(Batch_Renderer_Window_ID)w.handle);
                 glfw.DestroyWindow(w.handle);
-                ordered_remove(&queue^.windows, index);
-                batch_renderer_unload_index(&ctx^.ren, cast(int)index);
+                ordered_remove(&queue^.windows, i);
                 l -= 1;
             }
         }
