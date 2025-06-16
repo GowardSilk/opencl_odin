@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Object rendering on overflow]
+
+#### Changed
+- `ui.odin` fixing objects not being rendered on a separate line when overflowing the screen; this has the unfortunate disatvantage (as of this commit) that we need to specify the img size beforehand; which is not technically a big problem since we can either move the Image loading into ui and then just accept the img object inside the ui_batch or just leave it as is since we will always know the sizes
+
 ### [Proper deletion out of Batch renderer]
 
 #### Changed

@@ -23,11 +23,12 @@ import gl "vendor:OpenGL"
 Draw_Proc :: #type proc "odin" (w: Window);
 Draw_Cursor :: struct {
     pos: [2]c.int, /**< current active position*/
+    last_line_max_height: c.int,
     button_size: [2]c.int, /**< default button size*/
     font_size: i32,
 }
 DRAW_CURSOR_DEFAULT :: #force_inline proc() -> Draw_Cursor {
-    return Draw_Cursor { {0, 0}, {20, 20}, 10 };
+    return Draw_Cursor { {0, 0}, 0, {20, 20}, 10 };
 }
 Window_Signal :: enum {
     NONE = 0,
@@ -45,7 +46,7 @@ Window :: struct {
 Draw_Command_Text :: struct {
     text: string,
     pos: [2]i32, /**< top left corner*/
-    size: i32,
+    size: i32, // TODO(GowardSilk): actually make use of this
 }
 Draw_Command_Button :: struct {
     text: Draw_Command_Text,
@@ -191,15 +192,29 @@ ui_draw_cursor_current :: #force_inline proc() -> [2]c.int {
 }
 
 @(private="file")
-ui_draw_cursor_button_next :: #force_inline proc() {
+ui_draw_cursor_descend :: proc() -> [2]c.int {
+    active_window := get_context()^.queue.active_window;
+    height := active_window^.cursor.last_line_max_height;
+    active_window^.cursor.pos.y += height;
+    active_window^.cursor.pos.x = 0;
+    active_window^.cursor.last_line_max_height = 0;
+    return active_window^.cursor.pos;
+}
+
+@(private="file")
+ui_draw_cursor_next :: proc(size: [2]c.int) {
     queue := get_context()^.queue;
     active_window := queue.active_window;
-    active_window^.cursor.pos.x += active_window^.cursor.button_size.x;
+    active_window^.cursor.pos.x += size.x;
     width, _ := glfw.GetWindowSize(active_window^.handle);
-    if active_window^.cursor.pos.x >= width {
-        active_window^.cursor.pos.x = 0;
-        active_window^.cursor.pos.y += active_window^.cursor.button_size.y;
+    if active_window^.cursor.last_line_max_height < size.y {
+        active_window^.cursor.last_line_max_height = size.y;
     }
+}
+
+@(private="file")
+ui_draw_cursor_button_next :: #force_inline proc() {
+    ui_draw_cursor_next(get_context()^.queue.active_window^.cursor.button_size);
 }
 
 ui_set_button_size :: #force_inline proc(size: [2]c.int) {
@@ -247,6 +262,11 @@ ui_draw_button :: proc(name: string) -> bool {
     button_size := active_window.cursor.button_size;
     defer ui_draw_cursor_button_next(); // move to the next "slot"
 
+    window_width, _ := glfw.GetWindowSize(active_window^.handle);
+    if button_pos.x + button_size.x > window_width {
+        button_pos = ui_draw_cursor_descend();
+    }
+
     r_ndc := ui_pos_to_ndc(
         ui_create_rect(
             [2]f32 { cast(f32)button_pos.x, cast(f32)button_pos.y },
@@ -274,9 +294,14 @@ ui_draw_button :: proc(name: string) -> bool {
     return false;
 }
 
-ui_draw_image :: #force_inline proc(img_path: string) -> (err: General_Error) {
+ui_draw_image :: proc(size_hint: [2]c.int, img_path: string) -> (err: General_Error) {
     img_pos  := ui_draw_cursor_current();
-    defer ui_draw_cursor_button_next(); // move to the next "slot"
+    window_width, _ := glfw.GetWindowSize(get_context()^.queue.active_window^.handle);
+    if img_pos.x + size_hint.x > window_width {
+        img_pos = ui_draw_cursor_descend();
+    }
+    
+    defer ui_draw_cursor_next(size_hint); // move to the next "slot"
 
     ctx := get_context();
     // we cannot batch images properly, so they are loaded "in-place"

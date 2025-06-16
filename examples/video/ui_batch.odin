@@ -282,9 +282,9 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
             base_index := cast(u32)len(ren^.images.font_atlas.batch.vertices);
             append(&ren^.images.font_atlas.batch.vertices,
                 Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
-                Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }, // Bottom-right
-                Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }, // Top-right
-                Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }, // Top-left
+                Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y1 }, }, // Bottom-right
+                Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y2 }, }, // Top-right
+                Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y2 }, }, // Top-left
             );
             append(&ren^.images.font_atlas.batch.indexes,
                 base_index + 0, base_index + 1, base_index + 2,
@@ -292,7 +292,7 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
             );
         }
 
-        pos.x += cmd.size;
+        pos.x += cast(i32)angel_char.width;
     }
 }
 

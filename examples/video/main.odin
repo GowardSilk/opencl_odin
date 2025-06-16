@@ -37,7 +37,7 @@ draw_main_screen :: proc(w: Window) {
     @(static)
     active_img := images[0].path;
 
-    ui_set_button_size({100, 50});
+    ui_set_button_size({200, 50});
     for img in images {
         if ui_draw_button(img.display_name) do active_img = img.path;
     }
@@ -51,7 +51,7 @@ draw_main_screen :: proc(w: Window) {
         }
     }
 
-    if err := ui_draw_image(active_img); err != nil {
+    if err := ui_draw_image({512, 512}, active_img); err != nil {
         log.errorf("Failed to open image with path: %s; (err: %v)", active_img, err);
         glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
     }
@@ -63,10 +63,10 @@ draw_options :: proc(w: Window) {
         return;
     }
 
-    ui_set_button_size({200, 50});
-    if      ui_draw_button("Do something #1") do nothing();
-    else if ui_draw_button("Do something #2") do nothing();
-    else if ui_draw_button("Do something #3") do nothing();
+    ui_set_button_size({300, 50});
+    if ui_draw_button("Do something #1") do nothing();
+    if ui_draw_button("Do something #2") do nothing();
+    if ui_draw_button("Do something #3") do nothing();
 }
 
 nothing :: proc() {}
