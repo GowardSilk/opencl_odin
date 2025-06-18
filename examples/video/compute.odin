@@ -52,7 +52,109 @@ generate_gauss_kernel :: proc(sigma: f64, allocator := context.allocator) -> []f
 }
 
 CF_GAUSSIAN_BLUR: cstring: `
-    
+__kernel void cf_gaussian_blur_horizontal(
+    __global read_only image2d_t input,
+    __global write_only image2d_t output,
+    __constant double* gauss_kernel,
+    const int gauss_kernel_size,
+    __local float* local_tile)
+{
+    const int radius = gauss_kernel_size / 2;
+
+    const int gid_x = get_global_id(0);
+    const int gid_y = get_global_id(1);
+    const int lid_x = get_local_id(0);
+    const int lid_y = get_local_id(1);
+    const int lsize_x = get_local_size(0);
+    const int lsize_y = get_local_size(1);
+
+    const int tile_width = lsize_x + gauss_kernel_size;
+
+    const int lx = lid_x + radius;
+    const int ly = lid_y;
+
+    int local_index = ly * tile_width + lx;
+
+    int2 coord = (int2)(gid_x, gid_y);
+    float4 pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, coord);
+    local_tile[local_index] = pixel.x;
+
+    // left "halo"
+    if (lid_x - radius < 0) {
+        int2 left_coord = (int2)(clamp(gid_x - radius, 0, get_image_width(input)-1), gid_y);
+        float4 left_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, left_coord);
+        local_tile[local_index] = left_pixel.x;
+    }
+
+    // right "halo"
+    if (lid_x >= lsize_x - radius) {
+        int2 right_coord = (int2)(clamp(global_x + radius, 0, get_image_width(input)-1), global_y);
+        float4 right_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, right_coord);
+        local_tile[local_index] = right_pixel.x;
+    }
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // multiply one row by gauss_kernel
+    float result = 0.0f;
+    for (int k = -radius; k <= radius; k++) {
+        result += gauss_kernel[k + radius] * local_tile[local_index + k];
+    }
+
+    write_imagef(output, (int2)(global_x, global_y), (float4)(result, result, result, 1.0f));
+}
+
+__kernel void cf_gaussian_blur_vertical(
+    __read_only image2d_t input,
+    __write_only image2d_t output,
+    __constant double* gauss_kernel,
+    const int gauss_kernel_size,
+    __local float* local_tile)
+{
+    const int radius = gauss_kernel_size / 2;
+
+    const int gid_x = get_global_id(0);
+    const int gid_y = get_global_id(1);
+    const int lid_x = get_local_id(0);
+    const int lid_y = get_local_id(1);
+    const int lsize_x = get_local_size(0);
+    const int lsize_y = get_local_size(1);
+
+    const int tile_height = lsize_y + gauss_kernel_size;
+
+    const int lx = lid_x;
+    const int ly = lid_y + radius;
+
+    int local_index = ly * lsize_x + lx;
+
+    int2 coord = (int2)(gid_x, gid_y);
+    float4 pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, coord);
+    local_tile[local_index] = pixel.x;
+
+    // top "halo"
+    if (lid_y < radius) {
+        int2 top_coord = (int2)(gid_x, clamp(gid_y - radius, 0, get_image_height(input)-1));
+        float4 top_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, top_coord);
+        local_tile[(lid_y) * lsize_x + lx] = top_pixel.x;
+    }
+
+    // bottom "halo"
+    if (lid_y >= lsize_y - radius) {
+        int2 bottom_coord = (int2)(gid_x, clamp(gid_y + radius, 0, get_image_height(input)-1));
+        float4 bottom_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, bottom_coord);
+        local_tile[(ly + radius) * lsize_x + lx] = bottom_pixel.x;
+    }
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // vertical convolution
+    float result = 0.0f;
+    for (int k = -radius; k <= radius; k++) {
+        result += gauss_kernel[k + radius] * local_tile[(ly + k) * lsize_x + lx];
+    }
+
+    write_imagef(output, (int2)(gid_x, gid_y), (float4)(result, result, result, 1.0f));
+}
 `;
 CF_GAUSSIAN_BLUR_SIZE: uint: len(CF_GAUSSIAN_BLUR);
 CF_GAUSSIAN_BLUR_KERNEL_NAME: cstring: "";
