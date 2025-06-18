@@ -20,7 +20,11 @@ main :: proc() {
     assert(ok == .None && context.user_ptr != nil);
 
     err := ui.register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
-    log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err)
+    log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err);
+
+    m, merr := cl_context_manager_init();
+    log.assertf(merr == nil, "Fatal error: %v", merr);
+    defer cl_context_manager_delete(&m);
 
     ui.draw();
 }
