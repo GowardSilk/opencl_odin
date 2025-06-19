@@ -22,9 +22,14 @@ main :: proc() {
     err := ui.register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
     log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err);
 
-    m, merr := cl_context_manager_init();
+    m, merr := cl_context_init();
     log.assertf(merr == nil, "Fatal error: %v", merr);
-    defer cl_context_manager_delete(&m);
+    defer cl_context_delete(&m);
+    when ODIN_DEBUG {
+        log_str := cl_context_log(&m);
+        log.info(log_str);
+        delete(log_str);
+    }
 
     ui.draw();
 }

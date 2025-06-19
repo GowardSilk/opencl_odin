@@ -17,7 +17,8 @@ import "core:math"
 //      Opening / Closing
 
 Compute_Operation :: enum {
-    Convolution_Filter_Gauss_Op,
+    Convolution_Filter_Gauss_Horizontal_Op,
+    Convolution_Filter_Gauss_Vertical_Op,
     Convolution_Filter_Sobel_Op,
     Convolution_Filter_Unsharp_Op,
 }
@@ -34,7 +35,7 @@ Compute_Operation :: enum {
  */
 generate_gauss_kernel :: proc(sigma: f64, allocator := context.allocator) -> []f64 {
     gauss_function :: proc(x: int, sigma: f64) -> f64 {
-        frac := 1.0/(math.sqrt(2.0*math.PI)*sigma);
+        frac := 1.0/(math.sqrt_f64(2.0*math.PI)*sigma);
         xf := cast(f64)x;
         return frac * math.pow(math.E, -(xf*xf)/(2*sigma*sigma));
     }
@@ -43,18 +44,19 @@ generate_gauss_kernel :: proc(sigma: f64, allocator := context.allocator) -> []f
     // but since that is always symmetric, we can just produce
     // size*1 matrix and multiply it by its transposition (1*size matrix)
     // to get the same result
-    size := math.ceil(2 * sigma + 1);
-    gauss = make([]f64, size, allocator);
+    size := cast(int)math.ceil(2 * sigma + 1);
+    gauss := make([]f64, size, allocator);
 
-    for i in size do gauss[i] = gauss_function(i, sigma);
+    for i in 0..<size do gauss[i] = gauss_function(i, sigma);
 
     return gauss;
 }
 
 CF_GAUSSIAN_BLUR: cstring: `
+// note: image2d_t are always __global
 __kernel void cf_gaussian_blur_horizontal(
-    __global read_only image2d_t input,
-    __global write_only image2d_t output,
+    read_only image2d_t input,
+    write_only image2d_t output,
     __constant double* gauss_kernel,
     const int gauss_kernel_size,
     __local float* local_tile)
@@ -88,7 +90,7 @@ __kernel void cf_gaussian_blur_horizontal(
 
     // right "halo"
     if (lid_x >= lsize_x - radius) {
-        int2 right_coord = (int2)(clamp(global_x + radius, 0, get_image_width(input)-1), global_y);
+        int2 right_coord = (int2)(clamp(gid_x + radius, 0, get_image_width(input)-1), gid_y);
         float4 right_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, right_coord);
         local_tile[local_index] = right_pixel.x;
     }
@@ -101,7 +103,7 @@ __kernel void cf_gaussian_blur_horizontal(
         result += gauss_kernel[k + radius] * local_tile[local_index + k];
     }
 
-    write_imagef(output, (int2)(global_x, global_y), (float4)(result, result, result, 1.0f));
+    write_imagef(output, (int2)(gid_x, gid_y), (float4)(result, result, result, 1.0f));
 }
 
 __kernel void cf_gaussian_blur_vertical(
@@ -157,7 +159,8 @@ __kernel void cf_gaussian_blur_vertical(
 }
 `;
 CF_GAUSSIAN_BLUR_SIZE: uint: len(CF_GAUSSIAN_BLUR);
-CF_GAUSSIAN_BLUR_KERNEL_NAME: cstring: "";
+CF_GAUSSIAN_BLUR_KERNEL1_NAME: cstring: "cf_gaussian_blur_horizontal";
+CF_GAUSSIAN_BLUR_KERNEL2_NAME: cstring: "cf_gaussian_blur_vertical";
 
 CF_SOBEL_FILTER: cstring: ``;
 CF_SOBEL_FILTER_SIZE: uint: len(CF_SOBEL_FILTER);
