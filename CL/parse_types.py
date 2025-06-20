@@ -2,15 +2,28 @@ from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
 from fmt import strip_cl_prefix, format_param, format
+import re
 
 Type = str
 File_Origin = str
 
 
+@dataclass
+class Expression:
+    val: str
+    _type: Type
+
+
 class Definition:
     def into_odin(self) -> str:
-        return f"{format(self.key)} :: {format(self.value)}"
+        # if we are calling a "macro", it cannot be compile time constant
+        # todo: is not it possible with my_fn :: proc($I: int) -> int ????
+        if re.match(r"^\s*[A-Z_][A-Z0-9_]*\s*\(", self.value):
+            return f"{format(self.key)} := {self.value if self.is_fn else format(self.value)}"
+        else:
+            return f"{format(self.key)} :: {self.value if self.is_fn else format(self.value)}"
 
+    is_fn: bool
     key: str
     value: str
     file: str
@@ -25,9 +38,7 @@ class Function:
     def into_odin(self, *, typed: bool = False) -> str:
         attr = '"stdcall"' if self.attr == Attribute.STDCALL else ""
 
-        param_parts = [
-            format_param(name, type_) for type_, name in self.params
-        ]
+        param_parts = [format_param(name, type_) for type_, name in self.params]
         single_line_params = ", ".join(param_parts)
 
         base: str = ""

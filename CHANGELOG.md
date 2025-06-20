@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Parsing changes]
+
+#### Changed
+- `fmt.py` added support for abbreviations as well as macro function formatting
+- `parsegen.py` fixing minor bugs (invalid SRV_DIMENSION c-to-odin alias; blank typedefs not being read properly); Minor restructure of macro parsing, now we can at least differentiate between function-like macros and definitions; For function-like macros, we can use `#force_inline` with `$T` compile time generics, but we still cannot evaluate types of macro expressions, therefore everything is just a `c.int`. Also added `MACRO_IGNORES` global to ignore some really painful macros. Even though it is just a binding, we paste everything inside the file we took the information from (XX.h -> XX.odin). Maybe we can make this optional in the future.
+- `parse_types.py` fixing some #define(s) not being Odin constants (:= vs ::) 
+
 ### [Upadting font render]
 
 #### Added

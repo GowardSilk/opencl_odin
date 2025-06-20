@@ -8,720 +8,6 @@ import win32 "core:sys/windows"
 foreign import opencl "OpenCL.lib"
 
 /* =========================================
-*               cl_platform.h
-* ========================================= */
-
-CHAR_BIT :: 8
-SCHAR_MAX :: 127
-SCHAR_MIN :: (-127 - 1)
-CHAR_MAX :: SCHAR_MAX
-CHAR_MIN :: SCHAR_MIN
-UCHAR_MAX :: 255
-SHRT_MAX :: 32767
-SHRT_MIN :: (-32767 - 1)
-USHRT_MAX :: 65535
-INT_MAX :: 2147483647
-INT_MIN :: (-2147483647 - 1)
-UINT_MAX :: 0xffffffff
-LONG_MAX :: (cast(Long)0x7FFFFFFFFFFFFFFF)
-LONG_MIN :: (cast(Long)(- 0x7FFFFFFFFFFFFFFF - 1))
-ULONG_MAX :: (cast(Ulong)0xFFFFFFFFFFFFFFFF)
-FLT_DIG :: 6
-FLT_MANT_DIG :: 24
-FLT_MAX_10_EXP :: +38
-FLT_MAX_EXP :: +128
-FLT_MIN_10_EXP :: -37
-FLT_MIN_EXP :: -125
-FLT_RADIX :: 2
-FLT_MAX :: 340282346638528859811704183484516925440.0
-FLT_MIN :: 1.175494350822287507969e-38
-FLT_EPSILON :: 1.1920928955078125e-7
-HALF_DIG :: 3
-HALF_MANT_DIG :: 11
-HALF_MAX_10_EXP :: +4
-HALF_MAX_EXP :: +16
-HALF_MIN_10_EXP :: -4
-HALF_MIN_EXP :: -13
-HALF_RADIX :: 2
-HALF_MAX :: 65504.0
-HALF_MIN :: 6.103515625e-05
-HALF_EPSILON :: 9.765625e-04
-DBL_DIG :: 15
-DBL_MANT_DIG :: 53
-DBL_MAX_10_EXP :: +308
-DBL_MAX_EXP :: +1024
-DBL_MIN_10_EXP :: -307
-DBL_MIN_EXP :: -1021
-DBL_RADIX :: 2
-DBL_MAX :: 1.7976931348623158e+308
-DBL_MIN :: 2.225073858507201383090e-308
-DBL_EPSILON :: 2.220446049250313080847e-16
-M_E :: 2.7182818284590452354
-M_LOG2E :: 1.4426950408889634074
-M_LOG10E :: 0.43429448190325182765
-M_LN2 :: 0.69314718055994530942
-M_LN10 :: 2.30258509299404568402
-M_PI :: 3.14159265358979323846
-M_PI_2 :: 1.57079632679489661923
-M_PI_4 :: 0.78539816339744830962
-M_1_PI :: 0.31830988618379067154
-M_2_PI :: 0.63661977236758134308
-M_2_SQRTPI :: 1.12837916709551257390
-M_SQRT2 :: 1.41421356237309504880
-M_SQRT1_2 :: 0.70710678118654752440
-M_E_F :: 2.718281828
-M_LOG2E_F :: 1.442695041
-M_LOG10E_F :: 0.434294482
-M_LN2_F :: 0.693147181
-M_LN10_F :: 2.302585093
-M_PI_F :: 3.141592654
-M_PI_2_F :: 1.570796327
-M_PI_4_F :: 0.785398163
-M_1_PI_F :: 0.318309886
-M_2_PI_F :: 0.636619772
-M_2_SQRTPI_F :: 1.128379167
-M_SQRT2_F :: 1.414213562
-M_SQRT1_2_F :: 0.707106781
-NAN :: (INFINITY - INFINITY)
-HUGE_VALF :: (cast(Float)1e50)
-HUGE_VAL :: (cast(Double)1e500)
-MAXFLOAT :: FLT_MAX
-INFINITY :: HUGE_VALF
-
-Char :: c.int8_t
-Uchar :: c.uint8_t
-Short :: c.int16_t
-Ushort :: c.uint16_t
-Int :: c.int32_t
-Uint :: c.uint32_t
-Long :: c.int64_t
-Ulong :: c.uint64_t
-Half :: c.uint16_t
-Float :: c.float
-Double :: c.double
-__cl_float4 :: #simd[4]c.float
-__cl_uchar16 :: #simd[4]c.int32_t
-__cl_char16 :: #simd[4]c.int32_t
-__cl_ushort8 :: #simd[4]c.int32_t
-__cl_short8 :: #simd[4]c.int32_t
-__cl_uint4 :: #simd[4]c.int32_t
-__cl_int4 :: #simd[4]c.int32_t
-__cl_ulong2 :: #simd[4]c.int32_t
-__cl_long2 :: #simd[4]c.int32_t
-__cl_double2 :: #simd[2]c.double
-__cl_uchar8 :: #simd[2]c.int32_t
-__cl_char8 :: #simd[2]c.int32_t
-__cl_ushort4 :: #simd[2]c.int32_t
-__cl_short4 :: #simd[2]c.int32_t
-__cl_uint2 :: #simd[2]c.int32_t
-__cl_int2 :: #simd[2]c.int32_t
-__cl_ulong1 :: #simd[2]c.int32_t
-__cl_long1 :: #simd[2]c.int32_t
-__cl_float2 :: #simd[2]c.int32_t
-Char2 :: struct #raw_union {
-	using _: struct{
-		x,y: Char,
-	},
-	using _: struct{
-		s0,s1: Char,
-	},
-	using _: struct{
-		lo,hi: Char,
-	},
-	s: [2]Char,
-}
-Char4 :: struct #raw_union {
-	s: [4]Char,
-	using _: struct{
-		x,y,z,w: Char,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Char,
-	},
-	using _: struct{
-		lo,hi: Char2,
-	},
-}
-Char3 :: Char4
-Char8 :: struct #raw_union {
-	s: [8]Char,
-	using _: struct{
-		x,y,z,w: Char,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Char,
-	},
-	using _: struct{
-		lo,hi: Char4,
-	},
-	v8: __cl_char8,
-}
-Char16 :: struct #raw_union {
-	s: [16]Char,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Char,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Char,
-	},
-	using _: struct{
-		lo,hi: Char8,
-	},
-	v8: [2]__cl_char8,
-	v16: __cl_char16,
-}
-Uchar2 :: struct #raw_union {
-	s: [2]Uchar,
-	using _: struct{
-		x,y: Uchar,
-	},
-	using _: struct{
-		s0,s1: Uchar,
-	},
-	using _: struct{
-		lo,hi: Uchar,
-	},
-}
-Uchar4 :: struct #raw_union {
-	s: [4]Uchar,
-	using _: struct{
-		x,y,z,w: Uchar,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Uchar,
-	},
-	using _: struct{
-		lo,hi: Uchar2,
-	},
-}
-Uchar3 :: Uchar4
-Uchar8 :: struct #raw_union {
-	s: [8]Uchar,
-	using _: struct{
-		x,y,z,w: Uchar,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Uchar,
-	},
-	using _: struct{
-		lo,hi: Uchar4,
-	},
-	v8: __cl_uchar8,
-}
-Uchar16 :: struct #raw_union {
-	s: [16]Uchar,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Uchar,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Uchar,
-	},
-	using _: struct{
-		lo,hi: Uchar8,
-	},
-	v8: [2]__cl_uchar8,
-	v16: __cl_uchar16,
-}
-Short2 :: struct #raw_union {
-	s: [2]Short,
-	using _: struct{
-		x,y: Short,
-	},
-	using _: struct{
-		s0,s1: Short,
-	},
-	using _: struct{
-		lo,hi: Short,
-	},
-}
-Short4 :: struct #raw_union {
-	s: [4]Short,
-	using _: struct{
-		x,y,z,w: Short,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Short,
-	},
-	using _: struct{
-		lo,hi: Short2,
-	},
-	v4: __cl_short4,
-}
-Short3 :: Short4
-Short8 :: struct #raw_union {
-	s: [8]Short,
-	using _: struct{
-		x,y,z,w: Short,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Short,
-	},
-	using _: struct{
-		lo,hi: Short4,
-	},
-	v4: [2]__cl_short4,
-	v8: __cl_short8,
-}
-Short16 :: struct #raw_union {
-	s: [16]Short,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Short,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Short,
-	},
-	using _: struct{
-		lo,hi: Short8,
-	},
-	v4: [4]__cl_short4,
-	v8: [2]__cl_short8,
-}
-Ushort2 :: struct #raw_union {
-	s: [2]Ushort,
-	using _: struct{
-		x,y: Ushort,
-	},
-	using _: struct{
-		s0,s1: Ushort,
-	},
-	using _: struct{
-		lo,hi: Ushort,
-	},
-}
-Ushort4 :: struct #raw_union {
-	s: [4]Ushort,
-	using _: struct{
-		x,y,z,w: Ushort,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Ushort,
-	},
-	using _: struct{
-		lo,hi: Ushort2,
-	},
-	v4: __cl_ushort4,
-}
-Ushort3 :: Ushort4
-Ushort8 :: struct #raw_union {
-	s: [8]Ushort,
-	using _: struct{
-		x,y,z,w: Ushort,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Ushort,
-	},
-	using _: struct{
-		lo,hi: Ushort4,
-	},
-	v4: [2]__cl_ushort4,
-	v8: __cl_ushort8,
-}
-Ushort16 :: struct #raw_union {
-	s: [16]Ushort,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Ushort,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Ushort,
-	},
-	using _: struct{
-		lo,hi: Ushort8,
-	},
-	v4: [4]__cl_ushort4,
-	v8: [2]__cl_ushort8,
-}
-Half2 :: struct #raw_union {
-	s: [2]Half,
-	using _: struct{
-		x,y: Half,
-	},
-	using _: struct{
-		s0,s1: Half,
-	},
-	using _: struct{
-		lo,hi: Half,
-	},
-}
-Half4 :: struct #raw_union {
-	s: [4]Half,
-	using _: struct{
-		x,y,z,w: Half,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Half,
-	},
-	using _: struct{
-		lo,hi: Half2,
-	},
-}
-Half3 :: Half4
-Half8 :: struct #raw_union {
-	s: [8]Half,
-	using _: struct{
-		x,y,z,w: Half,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Half,
-	},
-	using _: struct{
-		lo,hi: Half4,
-	},
-}
-Half16 :: struct #raw_union {
-	s: [16]Half,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Half,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Half,
-	},
-	using _: struct{
-		lo,hi: Half8,
-	},
-}
-Int2 :: struct #raw_union {
-	s: [2]Int,
-	using _: struct{
-		x,y: Int,
-	},
-	using _: struct{
-		s0,s1: Int,
-	},
-	using _: struct{
-		lo,hi: Int,
-	},
-	v2: __cl_int2,
-}
-Int4 :: struct #raw_union {
-	s: [4]Int,
-	using _: struct{
-		x,y,z,w: Int,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Int,
-	},
-	using _: struct{
-		lo,hi: Int2,
-	},
-	v2: [2]__cl_int2,
-	v4: __cl_int4,
-}
-Int3 :: Int4
-Int8 :: struct #raw_union {
-	s: [8]Int,
-	using _: struct{
-		x,y,z,w: Int,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Int,
-	},
-	using _: struct{
-		lo,hi: Int4,
-	},
-	v2: [4]__cl_int2,
-	v4: [2]__cl_int4,
-}
-Int16 :: struct #raw_union {
-	s: [16]Int,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Int,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Int,
-	},
-	using _: struct{
-		lo,hi: Int8,
-	},
-	v2: [8]__cl_int2,
-	v4: [4]__cl_int4,
-}
-Uint2 :: struct #raw_union {
-	s: [2]Uint,
-	using _: struct{
-		x,y: Uint,
-	},
-	using _: struct{
-		s0,s1: Uint,
-	},
-	using _: struct{
-		lo,hi: Uint,
-	},
-	v2: __cl_uint2,
-}
-Uint4 :: struct #raw_union {
-	s: [4]Uint,
-	using _: struct{
-		x,y,z,w: Uint,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Uint,
-	},
-	using _: struct{
-		lo,hi: Uint2,
-	},
-	v2: [2]__cl_uint2,
-	v4: __cl_uint4,
-}
-Uint3 :: Uint4
-Uint8 :: struct #raw_union {
-	s: [8]Uint,
-	using _: struct{
-		x,y,z,w: Uint,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Uint,
-	},
-	using _: struct{
-		lo,hi: Uint4,
-	},
-	v2: [4]__cl_uint2,
-	v4: [2]__cl_uint4,
-}
-Uint16 :: struct #raw_union {
-	s: [16]Uint,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Uint,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Uint,
-	},
-	using _: struct{
-		lo,hi: Uint8,
-	},
-	v2: [8]__cl_uint2,
-	v4: [4]__cl_uint4,
-}
-Long2 :: struct #raw_union {
-	s: [2]Long,
-	using _: struct{
-		x,y: Long,
-	},
-	using _: struct{
-		s0,s1: Long,
-	},
-	using _: struct{
-		lo,hi: Long,
-	},
-	v2: __cl_long2,
-}
-Long4 :: struct #raw_union {
-	s: [4]Long,
-	using _: struct{
-		x,y,z,w: Long,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Long,
-	},
-	using _: struct{
-		lo,hi: Long2,
-	},
-	v2: [2]__cl_long2,
-}
-Long3 :: Long4
-Long8 :: struct #raw_union {
-	s: [8]Long,
-	using _: struct{
-		x,y,z,w: Long,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Long,
-	},
-	using _: struct{
-		lo,hi: Long4,
-	},
-	v2: [4]__cl_long2,
-}
-Long16 :: struct #raw_union {
-	s: [16]Long,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Long,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Long,
-	},
-	using _: struct{
-		lo,hi: Long8,
-	},
-	v2: [8]__cl_long2,
-}
-Ulong2 :: struct #raw_union {
-	s: [2]Ulong,
-	using _: struct{
-		x,y: Ulong,
-	},
-	using _: struct{
-		s0,s1: Ulong,
-	},
-	using _: struct{
-		lo,hi: Ulong,
-	},
-	v2: __cl_ulong2,
-}
-Ulong4 :: struct #raw_union {
-	s: [4]Ulong,
-	using _: struct{
-		x,y,z,w: Ulong,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Ulong,
-	},
-	using _: struct{
-		lo,hi: Ulong2,
-	},
-	v2: [2]__cl_ulong2,
-}
-Ulong3 :: Ulong4
-Ulong8 :: struct #raw_union {
-	s: [8]Ulong,
-	using _: struct{
-		x,y,z,w: Ulong,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Ulong,
-	},
-	using _: struct{
-		lo,hi: Ulong4,
-	},
-	v2: [4]__cl_ulong2,
-}
-Ulong16 :: struct #raw_union {
-	s: [16]Ulong,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Ulong,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Ulong,
-	},
-	using _: struct{
-		lo,hi: Ulong8,
-	},
-	v2: [8]__cl_ulong2,
-}
-Float2 :: struct #raw_union {
-	s: [2]Float,
-	using _: struct{
-		x,y: Float,
-	},
-	using _: struct{
-		s0,s1: Float,
-	},
-	using _: struct{
-		lo,hi: Float,
-	},
-	v2: __cl_float2,
-}
-Float4 :: struct #raw_union {
-	s: [4]Float,
-	using _: struct{
-		x,y,z,w: Float,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Float,
-	},
-	using _: struct{
-		lo,hi: Float2,
-	},
-	v2: [2]__cl_float2,
-	v4: __cl_float4,
-}
-Float3 :: Float4
-Float8 :: struct #raw_union {
-	s: [8]Float,
-	using _: struct{
-		x,y,z,w: Float,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Float,
-	},
-	using _: struct{
-		lo,hi: Float4,
-	},
-	v2: [4]__cl_float2,
-	v4: [2]__cl_float4,
-}
-Float16 :: struct #raw_union {
-	s: [16]Float,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Float,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Float,
-	},
-	using _: struct{
-		lo,hi: Float8,
-	},
-	v2: [8]__cl_float2,
-	v4: [4]__cl_float4,
-}
-Double2 :: struct #raw_union {
-	s: [2]Double,
-	using _: struct{
-		x,y: Double,
-	},
-	using _: struct{
-		s0,s1: Double,
-	},
-	using _: struct{
-		lo,hi: Double,
-	},
-	v2: __cl_double2,
-}
-Double4 :: struct #raw_union {
-	s: [4]Double,
-	using _: struct{
-		x,y,z,w: Double,
-	},
-	using _: struct{
-		s0,s1,s2,s3: Double,
-	},
-	using _: struct{
-		lo,hi: Double2,
-	},
-	v2: [2]__cl_double2,
-}
-Double3 :: Double4
-Double8 :: struct #raw_union {
-	s: [8]Double,
-	using _: struct{
-		x,y,z,w: Double,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7: Double,
-	},
-	using _: struct{
-		lo,hi: Double4,
-	},
-	v2: [4]__cl_double2,
-}
-Double16 :: struct #raw_union {
-	s: [16]Double,
-	using _: struct{
-		x,y,z,w,__spacer4,__spacer5,__spacer6,__spacer7,__spacer8,__spacer9,sa,sb,sc,sd,se,sf: Double,
-	},
-	using _: struct{
-		s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,sA,sB,sC,sD,sE,sF: Double,
-	},
-	using _: struct{
-		lo,hi: Double8,
-	},
-	v2: [8]__cl_double2,
-}
-
-/* =========================================
-*               cl_version.h
-* ========================================= */
-
-TARGET_OPENVERSION :: 300
-VERSION_3_0 :: 1
-VERSION_2_2 :: 1
-VERSION_2_1 :: 1
-VERSION_2_0 :: 1
-VERSION_1_2 :: 1
-VERSION_1_1 :: 1
-VERSION_1_0 :: 1
-
-
-/* =========================================
 *               cl.h
 * ========================================= */
 
@@ -868,7 +154,7 @@ DEVICE_NATIVE_VECTOR_WIDTH_LONG :: 0x1039
 DEVICE_NATIVE_VECTOR_WIDTH_FLOAT :: 0x103A
 DEVICE_NATIVE_VECTOR_WIDTH_DOUBLE :: 0x103B
 DEVICE_NATIVE_VECTOR_WIDTH_HALF :: 0x103C
-DEVICE_OPENC_VERSION :: 0x103D
+DEVICE_OPENCL_C_VERSION :: 0x103D
 DEVICE_LINKER_AVAILABLE :: 0x103E
 DEVICE_BUILT_IN_KERNELS :: 0x103F
 DEVICE_IMAGE_MAX_BUFFER_SIZE :: 0x1040
@@ -908,11 +194,11 @@ DEVICE_BUILT_IN_KERNELS_WITH_VERSION :: 0x1062
 DEVICE_ATOMIC_MEMORY_CAPABILITIES :: 0x1063
 DEVICE_ATOMIC_FENCE_CAPABILITIES :: 0x1064
 DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT :: 0x1065
-DEVICE_OPENC_ALL_VERSIONS :: 0x1066
+DEVICE_OPENCL_C_ALL_VERSIONS :: 0x1066
 DEVICE_PREFERRED_WORK_GROUP_SIZE_MULTIPLE :: 0x1067
 DEVICE_WORK_GROUP_COLLECTIVE_FUNCTIONS_SUPPORT :: 0x1068
 DEVICE_GENERIC_ADDRESS_SPACE_SUPPORT :: 0x1069
-DEVICE_OPENC_FEATURES :: 0x106F
+DEVICE_OPENCL_C_FEATURES :: 0x106F
 DEVICE_DEVICE_ENQUEUE_CAPABILITIES :: 0x1070
 DEVICE_PIPE_SUPPORT :: 0x1071
 DEVICE_LATEST_CONFORMANCE_VERSION_PASSED :: 0x1072
@@ -1181,21 +467,19 @@ DEVICE_ATOMIC_SCOPE_ALL_DEVICES :: (1 << 6)
 DEVICE_QUEUE_SUPPORTED :: (1 << 0)
 DEVICE_QUEUE_REPLACEABLE_DEFAULT :: (1 << 1)
 KHRONOS_VENDOR_ID_CODEPLAY :: 0x10004
-VERSION_MAJOR_BITS :: (10)
-VERSION_MINOR_BITS :: (10)
-VERSION_PATCH_BITS :: (12)
+VERSION_MAJOR_BITS :: 10
+VERSION_MINOR_BITS :: 10
+VERSION_PATCH_BITS :: 12
 VERSION_MAJOR_MASK :: ((1 << VERSION_MAJOR_BITS) - 1)
 VERSION_MINOR_MASK :: ((1 << VERSION_MINOR_BITS) - 1)
 VERSION_PATCH_MASK :: ((1 << VERSION_PATCH_BITS) - 1)
-VERSION_MAJOR :: #force_inline proc(#any_int version: u64) -> u64 { return ((version) >> (VERSION_MINOR_BITS + VERSION_PATCH_BITS)); }
-VERSION_MINOR :: #force_inline proc(#any_int version: u64) -> u64 { return (((version) >> VERSION_PATCH_BITS) & VERSION_MINOR_MASK); }
-VERSION_PATCH :: #force_inline proc(#any_int version: u64) -> u64 { return ((version) & VERSION_PATCH_MASK); }
-MAKE_VERSION :: #force_inline proc(#any_int major, minor, patch: u64) -> u64 {
-    return ((((major) & VERSION_MAJOR_MASK) << (VERSION_MINOR_BITS + VERSION_PATCH_BITS)) | (((minor) & VERSION_MINOR_MASK) << VERSION_PATCH_BITS) | ((patch) & VERSION_PATCH_MASK));
-}
+VERSION_MAJOR :: #force_inline proc(version: $A) -> c.int { return ((version) >> (VERSION_MINOR_BITS + VERSION_PATCH_BITS)); }
+VERSION_MINOR :: #force_inline proc(version: $A) -> c.int { return (((version) >> VERSION_PATCH_BITS) & VERSION_MINOR_MASK); }
+VERSION_PATCH :: #force_inline proc(version: $A) -> c.int { return ((version) & VERSION_PATCH_MASK); }
+MAKE_VERSION :: #force_inline proc(major: $A, minor: $B, patch: $C) -> int { return ((((major) & VERSION_MAJOR_MASK) << (VERSION_MINOR_BITS + VERSION_PATCH_BITS)) | (((minor) & VERSION_MINOR_MASK) << VERSION_PATCH_BITS) | ((patch) & VERSION_PATCH_MASK)); }
 
-Platform_Id :: distinct rawptr
-Device_Id :: distinct rawptr
+Platform_ID :: distinct rawptr
+Device_ID :: distinct rawptr
 Context :: distinct rawptr
 Command_Queue :: distinct rawptr
 Mem :: distinct rawptr
@@ -1213,7 +497,7 @@ Device_Fp_Config :: Bitfield
 Device_Mem_Cache_Type :: Uint
 Device_Local_Mem_Type :: Uint
 Device_Exec_Capabilities :: Bitfield
-Device_Svm_Capabilities :: Bitfield
+Device_SVM_Capabilities :: Bitfield
 Command_Queue_Properties :: Bitfield
 Device_Partition_Property :: c.intptr_t
 Device_Affinity_Domain :: Bitfield
@@ -1224,7 +508,7 @@ Command_Queue_Info :: Uint
 Channel_Order :: Uint
 Channel_Type :: Uint
 Mem_Flags :: Bitfield
-Svm_Mem_Flags :: Bitfield
+SVM_Mem_Flags :: Bitfield
 Mem_Object_Type :: Uint
 Mem_Info :: Uint
 Mem_Migration_Flags :: Bitfield
@@ -1254,7 +538,7 @@ Sampler_Properties :: Properties
 Kernel_Exec_Info :: Uint
 Device_Atomic_Capabilities :: Bitfield
 Device_Device_Enqueue_Capabilities :: Bitfield
-Khronos_Vendor_Id :: Uint
+Khronos_Vendor_ID :: Uint
 Mem_Properties :: Properties
 Version :: Uint
 Image_Format :: struct{
@@ -1287,46 +571,46 @@ Name_Version :: struct{
 
 @(link_prefix="cl")
 foreign opencl {
-	GetPlatformIDs :: proc  (num_entries: Uint, platforms: ^Platform_Id, num_platforms: ^Uint) -> Int ---
+	GetPlatformIDs :: proc  (num_entries: Uint, platforms: ^Platform_ID, num_platforms: ^Uint) -> Int ---
 	GetPlatformInfo :: proc  (
-                          platform: Platform_Id,
+                          platform: Platform_ID,
                           param_name: Platform_Info,
                           param_value_size: c.size_t,
                           param_value: rawptr,
                           param_value_size_ret: ^c.size_t) -> Int ---
 	GetDeviceIDs :: proc  (
-                       platform: Platform_Id,
+                       platform: Platform_ID,
                        device_type: Device_Type,
                        num_entries: Uint,
-                       devices: ^Device_Id,
+                       devices: ^Device_ID,
                        num_devices: ^Uint) -> Int ---
 	GetDeviceInfo :: proc  (
-                        device: Device_Id,
+                        device: Device_ID,
                         param_name: Device_Info,
                         param_value_size: c.size_t,
                         param_value: rawptr,
                         param_value_size_ret: ^c.size_t) -> Int ---
 	CreateSubDevices :: proc  (
-                           in_device: Device_Id,
+                           in_device: Device_ID,
                            properties: ^Device_Partition_Property,
                            num_devices: Uint,
-                           out_devices: ^Device_Id,
+                           out_devices: ^Device_ID,
                            num_devices_ret: ^Uint) -> Int ---
-	RetainDevice :: proc  (device: Device_Id) -> Int ---
-	ReleaseDevice :: proc  (device: Device_Id) -> Int ---
+	RetainDevice :: proc  (device: Device_ID) -> Int ---
+	ReleaseDevice :: proc  (device: Device_ID) -> Int ---
 	SetDefaultDeviceCommandQueue :: proc  (
                                        _context: Context,
-                                       device: Device_Id,
+                                       device: Device_ID,
                                        command_queue: Command_Queue) -> Int ---
 	GetDeviceAndHostTimer :: proc  (
-                                device: Device_Id,
+                                device: Device_ID,
                                 device_timestamp: ^Ulong,
                                 host_timestamp: ^Ulong) -> Int ---
-	GetHostTimer :: proc  (device: Device_Id, host_timestamp: ^Ulong) -> Int ---
+	GetHostTimer :: proc  (device: Device_ID, host_timestamp: ^Ulong) -> Int ---
 	CreateContext :: proc  (
                         properties: ^Context_Properties,
                         num_devices: Uint,
-                        devices: ^Device_Id,
+                        devices: ^Device_ID,
                         pfn_notify: #type proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr),
                         user_data: rawptr,
                         errcode_ret: ^Int) -> Context ---
@@ -1350,7 +634,7 @@ foreign opencl {
                                        user_data: rawptr) -> Int ---
 	CreateCommandQueueWithProperties :: proc  (
                                            _context: Context,
-                                           device: Device_Id,
+                                           device: Device_ID,
                                            properties: ^Queue_Properties,
                                            errcode_ret: ^Int) -> Command_Queue ---
 	RetainCommandQueue :: proc  (command_queue: Command_Queue) -> Int ---
@@ -1435,7 +719,7 @@ foreign opencl {
                                          user_data: rawptr) -> Int ---
 	SVMAlloc :: proc  (
                    _context: Context,
-                   flags: Svm_Mem_Flags,
+                   flags: SVM_Mem_Flags,
                    size: c.size_t,
                    alignment: Uint) -> rawptr ---
 	SVMFree :: proc  (_context: Context, svm_pointer: rawptr) ---
@@ -1460,7 +744,7 @@ foreign opencl {
 	CreateProgramWithBinary :: proc  (
                                   _context: Context,
                                   num_devices: Uint,
-                                  device_list: ^Device_Id,
+                                  device_list: ^Device_ID,
                                   lengths: ^c.size_t,
                                   binaries: ^^c.char,
                                   binary_status: ^Int,
@@ -1468,7 +752,7 @@ foreign opencl {
 	CreateProgramWithBuiltInKernels :: proc  (
                                           _context: Context,
                                           num_devices: Uint,
-                                          device_list: ^Device_Id,
+                                          device_list: ^Device_ID,
                                           kernel_names: cstring,
                                           errcode_ret: ^Int) -> Program ---
 	CreateProgramWithIL :: proc  (
@@ -1481,14 +765,14 @@ foreign opencl {
 	BuildProgram :: proc  (
                        program: Program,
                        num_devices: Uint,
-                       device_list: ^Device_Id,
+                       device_list: ^Device_ID,
                        options: cstring,
                        pfn_notify: #type proc "stdcall" (program: Program, user_data: rawptr),
                        user_data: rawptr) -> Int ---
 	CompileProgram :: proc  (
                          program: Program,
                          num_devices: Uint,
-                         device_list: ^Device_Id,
+                         device_list: ^Device_ID,
                          options: cstring,
                          num_input_headers: Uint,
                          input_headers: ^Program,
@@ -1498,7 +782,7 @@ foreign opencl {
 	LinkProgram :: proc  (
                       _context: Context,
                       num_devices: Uint,
-                      device_list: ^Device_Id,
+                      device_list: ^Device_ID,
                       options: cstring,
                       num_input_programs: Uint,
                       input_programs: ^Program,
@@ -1514,7 +798,7 @@ foreign opencl {
                                            spec_id: Uint,
                                            spec_size: c.size_t,
                                            spec_value: rawptr) -> Int ---
-	UnloadPlatformCompiler :: proc  (platform: Platform_Id) -> Int ---
+	UnloadPlatformCompiler :: proc  (platform: Platform_ID) -> Int ---
 	GetProgramInfo :: proc  (
                          program: Program,
                          param_name: Program_Info,
@@ -1523,7 +807,7 @@ foreign opencl {
                          param_value_size_ret: ^c.size_t) -> Int ---
 	GetProgramBuildInfo :: proc  (
                               program: Program,
-                              device: Device_Id,
+                              device: Device_ID,
                               param_name: Program_Build_Info,
                               param_value_size: c.size_t,
                               param_value: rawptr,
@@ -1563,14 +847,14 @@ foreign opencl {
                            param_value_size_ret: ^c.size_t) -> Int ---
 	GetKernelWorkGroupInfo :: proc  (
                                  kernel: Kernel,
-                                 device: Device_Id,
+                                 device: Device_ID,
                                  param_name: Kernel_Work_Group_Info,
                                  param_value_size: c.size_t,
                                  param_value: rawptr,
                                  param_value_size_ret: ^c.size_t) -> Int ---
 	GetKernelSubGroupInfo :: proc  (
                                 kernel: Kernel,
-                                device: Device_Id,
+                                device: Device_ID,
                                 param_name: Kernel_Sub_Group_Info,
                                 input_value_size: c.size_t,
                                 input_value: rawptr,
@@ -1870,7 +1154,7 @@ foreign opencl {
                                event_wait_list: ^Event,
                                event: ^Event) -> Int ---
 	GetExtensionFunctionAddressForPlatform :: proc  (
-                                                 platform: Platform_Id,
+                                                 platform: Platform_ID,
                                                  func_name: cstring) -> rawptr ---
 	CreateImage2D :: proc  (
                         _context: Context,
@@ -1902,7 +1186,7 @@ foreign opencl {
 	GetExtensionFunctionAddress :: proc  (func_name: cstring) -> rawptr ---
 	CreateCommandQueue :: proc  (
                              _context: Context,
-                             device: Device_Id,
+                             device: Device_ID,
                              properties: Command_Queue_Properties,
                              errcode_ret: ^Int) -> Command_Queue ---
 	CreateSampler :: proc  (
@@ -1918,725 +1202,3 @@ foreign opencl {
                       event_wait_list: ^Event,
                       event: ^Event) -> Int ---
 }
-/* =========================================
-*               cl_function_types.h
-* ========================================= */
-
-Get_Platform_I_Ds_T :: #type proc  (num_entries: Uint, platforms: ^Platform_Id, num_platforms: ^Uint) -> Int
-Get_Platform_I_Ds_Fn :: ^Get_Platform_I_Ds_T
-Get_Platform_Info_T :: #type proc  (
-             platform: Platform_Id,
-             param_name: Platform_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Platform_Info_Fn :: ^Get_Platform_Info_T
-Get_Device_I_Ds_T :: #type proc  (
-             platform: Platform_Id,
-             device_type: Device_Type,
-             num_entries: Uint,
-             devices: ^Device_Id,
-             num_devices: ^Uint) -> Int
-Get_Device_I_Ds_Fn :: ^Get_Device_I_Ds_T
-Get_Device_Info_T :: #type proc  (
-             device: Device_Id,
-             param_name: Device_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Device_Info_Fn :: ^Get_Device_Info_T
-Create_Context_T :: #type proc  (
-             properties: ^Context_Properties,
-             num_devices: Uint,
-             devices: ^Device_Id,
-             pfn_notify: #type proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr),
-             user_data: rawptr,
-             errcode_ret: ^Int) -> Context
-Create_Context_Fn :: ^Create_Context_T
-Create_Context_From_Type_T :: #type proc  (
-             properties: ^Context_Properties,
-             device_type: Device_Type,
-             pfn_notify: #type proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr),
-             user_data: rawptr,
-             errcode_ret: ^Int) -> Context
-Create_Context_From_Type_Fn :: ^Create_Context_From_Type_T
-Retain_Context_T :: #type proc  (_context: Context) -> Int
-Retain_Context_Fn :: ^Retain_Context_T
-Release_Context_T :: #type proc  (_context: Context) -> Int
-Release_Context_Fn :: ^Release_Context_T
-Get_Context_Info_T :: #type proc  (
-             _context: Context,
-             param_name: Context_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Context_Info_Fn :: ^Get_Context_Info_T
-Retain_Command_Queue_T :: #type proc  (command_queue: Command_Queue) -> Int
-Retain_Command_Queue_Fn :: ^Retain_Command_Queue_T
-Release_Command_Queue_T :: #type proc  (command_queue: Command_Queue) -> Int
-Release_Command_Queue_Fn :: ^Release_Command_Queue_T
-Get_Command_Queue_Info_T :: #type proc  (
-             command_queue: Command_Queue,
-             param_name: Command_Queue_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Command_Queue_Info_Fn :: ^Get_Command_Queue_Info_T
-Create_Buffer_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             size: c.size_t,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Buffer_Fn :: ^Create_Buffer_T
-Retain_Mem_Object_T :: #type proc  (memobj: Mem) -> Int
-Retain_Mem_Object_Fn :: ^Retain_Mem_Object_T
-Release_Mem_Object_T :: #type proc  (memobj: Mem) -> Int
-Release_Mem_Object_Fn :: ^Release_Mem_Object_T
-Get_Supported_Image_Formats_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             image_type: Mem_Object_Type,
-             num_entries: Uint,
-             image_formats: ^Image_Format,
-             num_image_formats: ^Uint) -> Int
-Get_Supported_Image_Formats_Fn :: ^Get_Supported_Image_Formats_T
-Get_Mem_Object_Info_T :: #type proc  (
-             memobj: Mem,
-             param_name: Mem_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Mem_Object_Info_Fn :: ^Get_Mem_Object_Info_T
-Get_Image_Info_T :: #type proc  (
-             image: Mem,
-             param_name: Image_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Image_Info_Fn :: ^Get_Image_Info_T
-Retain_Sampler_T :: #type proc  (sampler: Sampler) -> Int
-Retain_Sampler_Fn :: ^Retain_Sampler_T
-Release_Sampler_T :: #type proc  (sampler: Sampler) -> Int
-Release_Sampler_Fn :: ^Release_Sampler_T
-Get_Sampler_Info_T :: #type proc  (
-             sampler: Sampler,
-             param_name: Sampler_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Sampler_Info_Fn :: ^Get_Sampler_Info_T
-Create_Program_With_Source_T :: #type proc  (
-             _context: Context,
-             count: Uint,
-             strings: ^cstring,
-             lengths: ^c.size_t,
-             errcode_ret: ^Int) -> Program
-Create_Program_With_Source_Fn :: ^Create_Program_With_Source_T
-Create_Program_With_Binary_T :: #type proc  (
-             _context: Context,
-             num_devices: Uint,
-             device_list: ^Device_Id,
-             lengths: ^c.size_t,
-             binaries: ^^c.char,
-             binary_status: ^Int,
-             errcode_ret: ^Int) -> Program
-Create_Program_With_Binary_Fn :: ^Create_Program_With_Binary_T
-Retain_Program_T :: #type proc  (program: Program) -> Int
-Retain_Program_Fn :: ^Retain_Program_T
-Release_Program_T :: #type proc  (program: Program) -> Int
-Release_Program_Fn :: ^Release_Program_T
-Build_Program_T :: #type proc  (
-             program: Program,
-             num_devices: Uint,
-             device_list: ^Device_Id,
-             options: cstring,
-             pfn_notify: #type proc "stdcall" (program: Program, user_data: rawptr),
-             user_data: rawptr) -> Int
-Build_Program_Fn :: ^Build_Program_T
-Get_Program_Info_T :: #type proc  (
-             program: Program,
-             param_name: Program_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Program_Info_Fn :: ^Get_Program_Info_T
-Get_Program_Build_Info_T :: #type proc  (
-             program: Program,
-             device: Device_Id,
-             param_name: Program_Build_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Program_Build_Info_Fn :: ^Get_Program_Build_Info_T
-Create_Kernel_T :: #type proc  (program: Program, kernel_name: cstring, errcode_ret: ^Int) -> Kernel
-Create_Kernel_Fn :: ^Create_Kernel_T
-Create_Kernels_In_Program_T :: #type proc  (program: Program, num_kernels: Uint, kernels: ^Kernel, num_kernels_ret: ^Uint) -> Int
-Create_Kernels_In_Program_Fn :: ^Create_Kernels_In_Program_T
-Retain_Kernel_T :: #type proc  (kernel: Kernel) -> Int
-Retain_Kernel_Fn :: ^Retain_Kernel_T
-Release_Kernel_T :: #type proc  (kernel: Kernel) -> Int
-Release_Kernel_Fn :: ^Release_Kernel_T
-Set_Kernel_Arg_T :: #type proc  (kernel: Kernel, arg_index: Uint, arg_size: c.size_t, arg_value: rawptr) -> Int
-Set_Kernel_Arg_Fn :: ^Set_Kernel_Arg_T
-Get_Kernel_Info_T :: #type proc  (
-             kernel: Kernel,
-             param_name: Kernel_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Kernel_Info_Fn :: ^Get_Kernel_Info_T
-Get_Kernel_Work_Group_Info_T :: #type proc  (
-             kernel: Kernel,
-             device: Device_Id,
-             param_name: Kernel_Work_Group_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Kernel_Work_Group_Info_Fn :: ^Get_Kernel_Work_Group_Info_T
-Wait_For_Events_T :: #type proc  (num_events: Uint, event_list: ^Event) -> Int
-Wait_For_Events_Fn :: ^Wait_For_Events_T
-Get_Event_Info_T :: #type proc  (
-             event: Event,
-             param_name: Event_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Event_Info_Fn :: ^Get_Event_Info_T
-Retain_Event_T :: #type proc  (event: Event) -> Int
-Retain_Event_Fn :: ^Retain_Event_T
-Release_Event_T :: #type proc  (event: Event) -> Int
-Release_Event_Fn :: ^Release_Event_T
-Get_Event_Profiling_Info_T :: #type proc  (
-             event: Event,
-             param_name: Profiling_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Event_Profiling_Info_Fn :: ^Get_Event_Profiling_Info_T
-Flush_T :: #type proc  (command_queue: Command_Queue) -> Int
-Flush_Fn :: ^Flush_T
-Finish_T :: #type proc  (command_queue: Command_Queue) -> Int
-Finish_Fn :: ^Finish_T
-Enqueue_Read_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             blocking_read: Bool,
-             offset: c.size_t,
-             size: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Read_Buffer_Fn :: ^Enqueue_Read_Buffer_T
-Enqueue_Write_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             blocking_write: Bool,
-             offset: c.size_t,
-             size: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Write_Buffer_Fn :: ^Enqueue_Write_Buffer_T
-Enqueue_Copy_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             src_buffer: Mem,
-             dst_buffer: Mem,
-             src_offset: c.size_t,
-             dst_offset: c.size_t,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Copy_Buffer_Fn :: ^Enqueue_Copy_Buffer_T
-Enqueue_Read_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             image: Mem,
-             blocking_read: Bool,
-             origin: ^c.size_t,
-             region: ^c.size_t,
-             row_pitch: c.size_t,
-             slice_pitch: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Read_Image_Fn :: ^Enqueue_Read_Image_T
-Enqueue_Write_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             image: Mem,
-             blocking_write: Bool,
-             origin: ^c.size_t,
-             region: ^c.size_t,
-             input_row_pitch: c.size_t,
-             input_slice_pitch: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Write_Image_Fn :: ^Enqueue_Write_Image_T
-Enqueue_Copy_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             src_image: Mem,
-             dst_image: Mem,
-             src_origin: ^c.size_t,
-             dst_origin: ^c.size_t,
-             region: ^c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Copy_Image_Fn :: ^Enqueue_Copy_Image_T
-Enqueue_Copy_Image_To_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             src_image: Mem,
-             dst_buffer: Mem,
-             src_origin: ^c.size_t,
-             region: ^c.size_t,
-             dst_offset: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Copy_Image_To_Buffer_Fn :: ^Enqueue_Copy_Image_To_Buffer_T
-Enqueue_Copy_Buffer_To_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             src_buffer: Mem,
-             dst_image: Mem,
-             src_offset: c.size_t,
-             dst_origin: ^c.size_t,
-             region: ^c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Copy_Buffer_To_Image_Fn :: ^Enqueue_Copy_Buffer_To_Image_T
-Enqueue_Map_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             blocking_map: Bool,
-             map_flags: Map_Flags,
-             offset: c.size_t,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event,
-             errcode_ret: ^Int) -> rawptr
-Enqueue_Map_Buffer_Fn :: ^Enqueue_Map_Buffer_T
-Enqueue_Map_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             image: Mem,
-             blocking_map: Bool,
-             map_flags: Map_Flags,
-             origin: ^c.size_t,
-             region: ^c.size_t,
-             image_row_pitch: ^c.size_t,
-             image_slice_pitch: ^c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event,
-             errcode_ret: ^Int) -> rawptr
-Enqueue_Map_Image_Fn :: ^Enqueue_Map_Image_T
-Enqueue_Unmap_Mem_Object_T :: #type proc  (
-             command_queue: Command_Queue,
-             memobj: Mem,
-             mapped_ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Unmap_Mem_Object_Fn :: ^Enqueue_Unmap_Mem_Object_T
-Enqueue_N_D_Range_Kernel_T :: #type proc  (
-             command_queue: Command_Queue,
-             kernel: Kernel,
-             work_dim: Uint,
-             global_work_offset: ^c.size_t,
-             global_work_size: ^c.size_t,
-             local_work_size: ^c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_N_D_Range_Kernel_Fn :: ^Enqueue_N_D_Range_Kernel_T
-Enqueue_Native_Kernel_T :: #type proc  (
-             command_queue: Command_Queue,
-             user_func: #type proc "stdcall" (_1: rawptr),
-             args: rawptr,
-             cb_args: c.size_t,
-             num_mem_objects: Uint,
-             mem_list: ^Mem,
-             args_mem_loc: ^rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Native_Kernel_Fn :: ^Enqueue_Native_Kernel_T
-Set_Command_Queue_Property_T :: #type proc  (
-             command_queue: Command_Queue,
-             properties: Command_Queue_Properties,
-             enable: Bool,
-             old_properties: ^Command_Queue_Properties) -> Int
-Set_Command_Queue_Property_Fn :: ^Set_Command_Queue_Property_T
-Create_Image2_D_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             image_format: ^Image_Format,
-             image_width: c.size_t,
-             image_height: c.size_t,
-             image_row_pitch: c.size_t,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Image2_D_Fn :: ^Create_Image2_D_T
-Create_Image3_D_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             image_format: ^Image_Format,
-             image_width: c.size_t,
-             image_height: c.size_t,
-             image_depth: c.size_t,
-             image_row_pitch: c.size_t,
-             image_slice_pitch: c.size_t,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Image3_D_Fn :: ^Create_Image3_D_T
-Enqueue_Marker_T :: #type proc  (command_queue: Command_Queue, event: ^Event) -> Int
-Enqueue_Marker_Fn :: ^Enqueue_Marker_T
-Enqueue_Wait_For_Events_T :: #type proc  (command_queue: Command_Queue, num_events: Uint, event_list: ^Event) -> Int
-Enqueue_Wait_For_Events_Fn :: ^Enqueue_Wait_For_Events_T
-Enqueue_Barrier_T :: #type proc  (command_queue: Command_Queue) -> Int
-Enqueue_Barrier_Fn :: ^Enqueue_Barrier_T
-Unload_Compiler_T :: #type proc  () -> Int
-Unload_Compiler_Fn :: ^Unload_Compiler_T
-Get_Extension_Function_Address_T :: #type proc  (func_name: cstring) -> rawptr
-Get_Extension_Function_Address_Fn :: ^Get_Extension_Function_Address_T
-Create_Command_Queue_T :: #type proc  (
-             _context: Context,
-             device: Device_Id,
-             properties: Command_Queue_Properties,
-             errcode_ret: ^Int) -> Command_Queue
-Create_Command_Queue_Fn :: ^Create_Command_Queue_T
-Create_Sampler_T :: #type proc  (
-             _context: Context,
-             normalized_coords: Bool,
-             addressing_mode: Addressing_Mode,
-             filter_mode: Filter_Mode,
-             errcode_ret: ^Int) -> Sampler
-Create_Sampler_Fn :: ^Create_Sampler_T
-Enqueue_Task_T :: #type proc  (
-             command_queue: Command_Queue,
-             kernel: Kernel,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Task_Fn :: ^Enqueue_Task_T
-Create_Sub_Buffer_T :: #type proc  (
-             buffer: Mem,
-             flags: Mem_Flags,
-             buffer_create_type: Buffer_Create_Type,
-             buffer_create_info: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Sub_Buffer_Fn :: ^Create_Sub_Buffer_T
-Set_Mem_Object_Destructor_Callback_T :: #type proc  (
-             memobj: Mem,
-             pfn_notify: #type proc "stdcall" (memobj: Mem, user_data: rawptr),
-             user_data: rawptr) -> Int
-Set_Mem_Object_Destructor_Callback_Fn :: ^Set_Mem_Object_Destructor_Callback_T
-Create_User_Event_T :: #type proc  (_context: Context, errcode_ret: ^Int) -> Event
-Create_User_Event_Fn :: ^Create_User_Event_T
-Set_User_Event_Status_T :: #type proc  (event: Event, execution_status: Int) -> Int
-Set_User_Event_Status_Fn :: ^Set_User_Event_Status_T
-Set_Event_Callback_T :: #type proc  (
-             event: Event,
-             command_exec_callback_type: Int,
-             pfn_notify: #type proc "stdcall" (event: Event, event_command_status: Int, user_data: rawptr),
-             user_data: rawptr) -> Int
-Set_Event_Callback_Fn :: ^Set_Event_Callback_T
-Enqueue_Read_Buffer_Rect_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             blocking_read: Bool,
-             buffer_origin: ^c.size_t,
-             host_origin: ^c.size_t,
-             region: ^c.size_t,
-             buffer_row_pitch: c.size_t,
-             buffer_slice_pitch: c.size_t,
-             host_row_pitch: c.size_t,
-             host_slice_pitch: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Read_Buffer_Rect_Fn :: ^Enqueue_Read_Buffer_Rect_T
-Enqueue_Write_Buffer_Rect_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             blocking_write: Bool,
-             buffer_origin: ^c.size_t,
-             host_origin: ^c.size_t,
-             region: ^c.size_t,
-             buffer_row_pitch: c.size_t,
-             buffer_slice_pitch: c.size_t,
-             host_row_pitch: c.size_t,
-             host_slice_pitch: c.size_t,
-             ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Write_Buffer_Rect_Fn :: ^Enqueue_Write_Buffer_Rect_T
-Enqueue_Copy_Buffer_Rect_T :: #type proc  (
-             command_queue: Command_Queue,
-             src_buffer: Mem,
-             dst_buffer: Mem,
-             src_origin: ^c.size_t,
-             dst_origin: ^c.size_t,
-             region: ^c.size_t,
-             src_row_pitch: c.size_t,
-             src_slice_pitch: c.size_t,
-             dst_row_pitch: c.size_t,
-             dst_slice_pitch: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Copy_Buffer_Rect_Fn :: ^Enqueue_Copy_Buffer_Rect_T
-Create_Sub_Devices_T :: #type proc  (
-             in_device: Device_Id,
-             properties: ^Device_Partition_Property,
-             num_devices: Uint,
-             out_devices: ^Device_Id,
-             num_devices_ret: ^Uint) -> Int
-Create_Sub_Devices_Fn :: ^Create_Sub_Devices_T
-Retain_Device_T :: #type proc  (device: Device_Id) -> Int
-Retain_Device_Fn :: ^Retain_Device_T
-Release_Device_T :: #type proc  (device: Device_Id) -> Int
-Release_Device_Fn :: ^Release_Device_T
-Create_Image_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             image_format: ^Image_Format,
-             image_desc: ^Image_Desc,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Image_Fn :: ^Create_Image_T
-Create_Program_With_Built_In_Kernels_T :: #type proc  (
-             _context: Context,
-             num_devices: Uint,
-             device_list: ^Device_Id,
-             kernel_names: cstring,
-             errcode_ret: ^Int) -> Program
-Create_Program_With_Built_In_Kernels_Fn :: ^Create_Program_With_Built_In_Kernels_T
-Compile_Program_T :: #type proc  (
-             program: Program,
-             num_devices: Uint,
-             device_list: ^Device_Id,
-             options: cstring,
-             num_input_headers: Uint,
-             input_headers: ^Program,
-             header_include_names: ^cstring,
-             pfn_notify: #type proc "stdcall" (program: Program, user_data: rawptr),
-             user_data: rawptr) -> Int
-Compile_Program_Fn :: ^Compile_Program_T
-Link_Program_T :: #type proc  (
-             _context: Context,
-             num_devices: Uint,
-             device_list: ^Device_Id,
-             options: cstring,
-             num_input_programs: Uint,
-             input_programs: ^Program,
-             pfn_notify: #type proc "stdcall" (program: Program, user_data: rawptr),
-             user_data: rawptr,
-             errcode_ret: ^Int) -> Program
-Link_Program_Fn :: ^Link_Program_T
-Unload_Platform_Compiler_T :: #type proc  (platform: Platform_Id) -> Int
-Unload_Platform_Compiler_Fn :: ^Unload_Platform_Compiler_T
-Get_Kernel_Arg_Info_T :: #type proc  (
-             kernel: Kernel,
-             arg_index: Uint,
-             param_name: Kernel_Arg_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Kernel_Arg_Info_Fn :: ^Get_Kernel_Arg_Info_T
-Enqueue_Fill_Buffer_T :: #type proc  (
-             command_queue: Command_Queue,
-             buffer: Mem,
-             pattern: rawptr,
-             pattern_size: c.size_t,
-             offset: c.size_t,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Fill_Buffer_Fn :: ^Enqueue_Fill_Buffer_T
-Enqueue_Fill_Image_T :: #type proc  (
-             command_queue: Command_Queue,
-             image: Mem,
-             fill_color: rawptr,
-             origin: ^c.size_t,
-             region: ^c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Fill_Image_Fn :: ^Enqueue_Fill_Image_T
-Enqueue_Migrate_Mem_Objects_T :: #type proc  (
-             command_queue: Command_Queue,
-             num_mem_objects: Uint,
-             mem_objects: ^Mem,
-             flags: Mem_Migration_Flags,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Migrate_Mem_Objects_Fn :: ^Enqueue_Migrate_Mem_Objects_T
-Enqueue_Marker_With_Wait_List_T :: #type proc  (
-             command_queue: Command_Queue,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Marker_With_Wait_List_Fn :: ^Enqueue_Marker_With_Wait_List_T
-Enqueue_Barrier_With_Wait_List_T :: #type proc  (
-             command_queue: Command_Queue,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_Barrier_With_Wait_List_Fn :: ^Enqueue_Barrier_With_Wait_List_T
-Get_Extension_Function_Address_For_Platform_T :: #type proc  (platform: Platform_Id, func_name: cstring) -> rawptr
-Get_Extension_Function_Address_For_Platform_Fn :: ^Get_Extension_Function_Address_For_Platform_T
-Create_Command_Queue_With_Properties_T :: #type proc  (
-             _context: Context,
-             device: Device_Id,
-             properties: ^Queue_Properties,
-             errcode_ret: ^Int) -> Command_Queue
-Create_Command_Queue_With_Properties_Fn :: ^Create_Command_Queue_With_Properties_T
-Create_Pipe_T :: #type proc  (
-             _context: Context,
-             flags: Mem_Flags,
-             pipe_packet_size: Uint,
-             pipe_max_packets: Uint,
-             properties: ^Pipe_Properties,
-             errcode_ret: ^Int) -> Mem
-Create_Pipe_Fn :: ^Create_Pipe_T
-Get_Pipe_Info_T :: #type proc  (
-             pipe: Mem,
-             param_name: Pipe_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Pipe_Info_Fn :: ^Get_Pipe_Info_T
-S_V_M_Alloc_T :: #type proc  (_context: Context, flags: Svm_Mem_Flags, size: c.size_t, alignment: Uint) -> rawptr
-S_V_M_Alloc_Fn :: ^S_V_M_Alloc_T
-S_V_M_Free_T :: #type proc  (_context: Context, svm_pointer: rawptr)
-S_V_M_Free_Fn :: ^S_V_M_Free_T
-Create_Sampler_With_Properties_T :: #type proc  (
-             _context: Context,
-             sampler_properties: ^Sampler_Properties,
-             errcode_ret: ^Int) -> Sampler
-Create_Sampler_With_Properties_Fn :: ^Create_Sampler_With_Properties_T
-Set_Kernel_Arg_S_V_M_Pointer_T :: #type proc  (kernel: Kernel, arg_index: Uint, arg_value: rawptr) -> Int
-Set_Kernel_Arg_S_V_M_Pointer_Fn :: ^Set_Kernel_Arg_S_V_M_Pointer_T
-Set_Kernel_Exec_Info_T :: #type proc  (
-             kernel: Kernel,
-             param_name: Kernel_Exec_Info,
-             param_value_size: c.size_t,
-             param_value: rawptr) -> Int
-Set_Kernel_Exec_Info_Fn :: ^Set_Kernel_Exec_Info_T
-Enqueue_S_V_M_Free_T :: #type proc  (
-             command_queue: Command_Queue,
-             num_svm_pointers: Uint,
-             svm_pointers: []rawptr,
-             pfn_free_func: #type proc "stdcall" (queue: Command_Queue, num_svm_pointers: Uint, svm_pointers: []rawptr, user_data: rawptr),
-             user_data: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Free_Fn :: ^Enqueue_S_V_M_Free_T
-Enqueue_S_V_M_Memcpy_T :: #type proc  (
-             command_queue: Command_Queue,
-             blocking_copy: Bool,
-             dst_ptr: rawptr,
-             src_ptr: rawptr,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Memcpy_Fn :: ^Enqueue_S_V_M_Memcpy_T
-Enqueue_S_V_M_Mem_Fill_T :: #type proc  (
-             command_queue: Command_Queue,
-             svm_ptr: rawptr,
-             pattern: rawptr,
-             pattern_size: c.size_t,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Mem_Fill_Fn :: ^Enqueue_S_V_M_Mem_Fill_T
-Enqueue_S_V_M_Map_T :: #type proc  (
-             command_queue: Command_Queue,
-             blocking_map: Bool,
-             flags: Map_Flags,
-             svm_ptr: rawptr,
-             size: c.size_t,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Map_Fn :: ^Enqueue_S_V_M_Map_T
-Enqueue_S_V_M_Unmap_T :: #type proc  (
-             command_queue: Command_Queue,
-             svm_ptr: rawptr,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Unmap_Fn :: ^Enqueue_S_V_M_Unmap_T
-Set_Default_Device_Command_Queue_T :: #type proc  (_context: Context, device: Device_Id, command_queue: Command_Queue) -> Int
-Set_Default_Device_Command_Queue_Fn :: ^Set_Default_Device_Command_Queue_T
-Get_Device_And_Host_Timer_T :: #type proc  (device: Device_Id, device_timestamp: ^Ulong, host_timestamp: ^Ulong) -> Int
-Get_Device_And_Host_Timer_Fn :: ^Get_Device_And_Host_Timer_T
-Get_Host_Timer_T :: #type proc  (device: Device_Id, host_timestamp: ^Ulong) -> Int
-Get_Host_Timer_Fn :: ^Get_Host_Timer_T
-Create_Program_With_I_L_T :: #type proc  (_context: Context, il: rawptr, length: c.size_t, errcode_ret: ^Int) -> Program
-Create_Program_With_I_L_Fn :: ^Create_Program_With_I_L_T
-Clone_Kernel_T :: #type proc  (source_kernel: Kernel, errcode_ret: ^Int) -> Kernel
-Clone_Kernel_Fn :: ^Clone_Kernel_T
-Get_Kernel_Sub_Group_Info_T :: #type proc  (
-             kernel: Kernel,
-             device: Device_Id,
-             param_name: Kernel_Sub_Group_Info,
-             input_value_size: c.size_t,
-             input_value: rawptr,
-             param_value_size: c.size_t,
-             param_value: rawptr,
-             param_value_size_ret: ^c.size_t) -> Int
-Get_Kernel_Sub_Group_Info_Fn :: ^Get_Kernel_Sub_Group_Info_T
-Enqueue_S_V_M_Migrate_Mem_T :: #type proc  (
-             command_queue: Command_Queue,
-             num_svm_pointers: Uint,
-             svm_pointers: ^rawptr,
-             sizes: ^c.size_t,
-             flags: Mem_Migration_Flags,
-             num_events_in_wait_list: Uint,
-             event_wait_list: ^Event,
-             event: ^Event) -> Int
-Enqueue_S_V_M_Migrate_Mem_Fn :: ^Enqueue_S_V_M_Migrate_Mem_T
-Set_Program_Specialization_Constant_T :: #type proc  (program: Program, spec_id: Uint, spec_size: c.size_t, spec_value: rawptr) -> Int
-Set_Program_Specialization_Constant_Fn :: ^Set_Program_Specialization_Constant_T
-Set_Program_Release_Callback_T :: #type proc  (
-             program: Program,
-             pfn_notify: #type proc "stdcall" (program: Program, user_data: rawptr),
-             user_data: rawptr) -> Int
-Set_Program_Release_Callback_Fn :: ^Set_Program_Release_Callback_T
-Set_Context_Destructor_Callback_T :: #type proc  (
-             _context: Context,
-             pfn_notify: #type proc "stdcall" (_context: Context, user_data: rawptr),
-             user_data: rawptr) -> Int
-Set_Context_Destructor_Callback_Fn :: ^Set_Context_Destructor_Callback_T
-Create_Buffer_With_Properties_T :: #type proc  (
-             _context: Context,
-             properties: ^Mem_Properties,
-             flags: Mem_Flags,
-             size: c.size_t,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Buffer_With_Properties_Fn :: ^Create_Buffer_With_Properties_T
-Create_Image_With_Properties_T :: #type proc  (
-             _context: Context,
-             properties: ^Mem_Properties,
-             flags: Mem_Flags,
-             image_format: ^Image_Format,
-             image_desc: ^Image_Desc,
-             host_ptr: rawptr,
-             errcode_ret: ^Int) -> Mem
-Create_Image_With_Properties_Fn :: ^Create_Image_With_Properties_T

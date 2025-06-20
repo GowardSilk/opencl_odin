@@ -1,15 +1,65 @@
 import re
 from typing import Optional
+import os
 
-ABBREVIATIONS = {"GL", "KHR", "ID", "CL", "EXT", "AMD", "NV"}
+ABBREVIATIONS = {
+    "gl",
+    "khr",
+    "id",
+    "cl",
+    "ext",
+    "nv",
+    "img",
+    "arm",
+    "amd",
+    "intel",
+    "svm",
+    "d3d10",
+    "d3d11",
+    "2d",
+    "3d",
+    "icd",
+    "nd",  # NDRange
+    "il",  # Intermmediate language
+}
+MAX_ABBR_LEN = max(len(s) for s in ABBREVIATIONS)
 
 
 def change_format(s: str) -> str:
-    if s == s.upper():
+    if s == s.upper():  # ignore macros
         return s
 
-    s = re.sub(r"(?<!^)([A-Z])", r"_\1", s).lower()
-    return "_".join(word.title() for word in s.split("_"))
+    # s = "khr"
+
+    s = re.sub(r"(?<!^)([A-Z]|[0-9])", r"_\1", s).lower()
+    words = [word for word in s.split("_")]
+    final_word: str = ""
+    index = 0
+    while index < len(words):
+        found_abbr = False
+        index_end = min(len(words), index + MAX_ABBR_LEN)
+
+        for j in range(index + 1, index_end + 1):
+            word_candidate = "".join(words[index:j])
+            if word_candidate in ABBREVIATIONS:
+                # make an exception for "2D" and "3D"
+                # it looks better when having "Image2D"
+                # instead of "Image_2D"
+                if word_candidate == "2d" or word_candidate == "3d":
+                    final_word = final_word[:-1]
+                final_word += word_candidate.upper() + (
+                    "_" if index < len(words) - 1 else ""
+                )
+                index = j
+                found_abbr = True
+                break
+
+        if not found_abbr:
+            final_word += words[index].title() + ("_" if index < len(words) - 1 else "")
+            index += 1
+
+    # os._exit(0)
+    return final_word
 
 
 def format(s: str) -> str:
@@ -17,7 +67,8 @@ def format(s: str) -> str:
     if s == new_s:
         return s
 
-    return change_format(new_s)
+    new_s = change_format(new_s)
+    return new_s
 
 
 def strip_cl_prefix(s: str) -> str:
@@ -55,3 +106,7 @@ def format_enum_value(name: str, value: str) -> str:
 
 def format_compound_type(type: str) -> str:
     return "{\n" + "\n".join(f"\t{line}" for line in type.splitlines()) + "\n}"
+
+
+def format_macro_function_type(params: str, expr: tuple[str, str]) -> str:
+    return f"#force_inline proc({params}) -> {expr[1]} {{ return {expr[0]}; }}"

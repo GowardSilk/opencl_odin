@@ -47,7 +47,7 @@ C_TO_ODIN_TYPES = {
     "ID3D11Texture3D": CTypeMapping("d3d11.ITexture3D", None),
     "D3D_PRIMITIVE_TOPOLOGY": CTypeMapping("d3d11.PRIMITIVE_TOPOLOGY", None),
     "D3D_PRIMITIVE": CTypeMapping("d3d11.PRIMITIVE", None),
-    "D3D_SRV_DIMENSION": CTypeMapping("d3d11.D3D10_SRV_DIMENSION", None),
+    "D3D_SRV_DIMENSION": CTypeMapping("d3d11.SRV_DIMENSION", None),
     # dxgi
     "DXGI_FORMAT": CTypeMapping("dxgi.FORMAT", None),
     "DXGI_SAMPLE_DESC": CTypeMapping("dxgi.SAMPLE_DESC", None),
@@ -65,13 +65,59 @@ C_TO_ODIN_TYPES = {
     "LPCSTR": CTypeMapping("win32.LPCSTR", None),
     "LPSTR": CTypeMapping("win32.LPSTR", None),
     "HANDLE": CTypeMapping("win32.HANDLE", None),
-    "FLOAT": CTypeMapping("win32.FLOAT", None),
+    "FLOAT": CTypeMapping("f32", None),
     "RECT": CTypeMapping("win32.RECT", None),
     "RPC_IF_HANDLE": CTypeMapping("win32.LPVOID", None),
     "IID": CTypeMapping("win32.IID", None),
     "GUID": CTypeMapping("win32.GUID", None),
     "HRESULT": CTypeMapping("win32.HRESULT", None),
 }
+
+MACRO_IGNORES = {
+    "CL_API_CALL",
+    "CL_CALLBACK",
+    "CL_API_SUFFIX_COMMON",
+    "CL_API_PREFIX_COMMON",
+    "CL_API_SUFFIX__VERSION_1_0",
+    "CL_API_SUFFIX__VERSION_1_1",
+    "CL_API_SUFFIX__VERSION_1_2",
+    "CL_API_SUFFIX__VERSION_2_0",
+    "CL_API_SUFFIX__VERSION_2_1",
+    "CL_API_SUFFIX__VERSION_2_2",
+    "CL_API_SUFFIX__VERSION_3_0",
+    "CL_API_SUFFIX__EXPERIMENTAL",
+    "CL_API_SUFFIX__VERSION_1_0_DEPRECATED",
+    "CL_API_PREFIX__VERSION_1_0_DEPRECATED",
+    "CL_API_SUFFIX__VERSION_1_1_DEPRECATED",
+    "CL_API_PREFIX__VERSION_1_1_DEPRECATED",
+    "CL_API_SUFFIX__VERSION_1_2_DEPRECATED",
+    "CL_API_PREFIX__VERSION_1_2_DEPRECATED",
+    "CL_API_SUFFIX__VERSION_2_0_DEPRECATED",
+    "CL_API_PREFIX__VERSION_2_0_DEPRECATED",
+    "CL_API_SUFFIX__VERSION_2_1_DEPRECATED",
+    "CL_API_PREFIX__VERSION_2_1_DEPRECATED",
+    "CL_API_SUFFIX__VERSION_2_2_DEPRECATED",
+    "CL_API_PREFIX__VERSION_2_2_DEPRECATED",
+    "CL_ALIGNED",
+    "_CL_STRINGIFY",
+    "CL_PROGRAM_STRING_DEBUG_INFO",
+}
+
+
+def clean_single_number(num: str):
+
+    def strip_paren(num: str) -> str:
+        if num[0] == "(" and num[-1] == ")":
+            return strip_paren(num[1:-1])
+        return num
+
+    num = strip_paren(num)
+
+    if num.lower().startswith(("0x", "0x")):
+        return re.sub(r"[uUlL]+$", "", num)
+    elif "e" in num.lower():
+        return re.sub(r"[fFdD]+$", "", num)
+    return re.sub(r"[uUlLfFdD]+$", "", num)
 
 
 def get_alias_type(key: str) -> str | None:
@@ -143,6 +189,103 @@ def next_token_unwrap(fcontent, cursor) -> tuple[str, int]:
     return result
 
 
+def parse_macro_expression(fcontent, cursor) -> tuple[Expression, int]:
+    # Skip whitespace after the key
+    next_cursor = cursor
+    while (
+        next_cursor < len(fcontent)
+        and fcontent[next_cursor].isspace()
+        and fcontent[next_cursor] != "\n"
+    ):
+        next_cursor += 1
+
+    if fcontent[next_cursor] == "\n":
+        return Expression("", ""), -1
+
+    cursor = next_cursor
+    # Find end of line (value portion)
+    while next_cursor < len(fcontent) and fcontent[next_cursor] != "\n":
+        next_cursor += 1
+
+    # Extract the raw value
+    raw_value = fcontent[cursor:next_cursor].strip()
+
+    def clean_numeric(value: str) -> str:
+        value = re.sub(
+            r"\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*(-?\s*[a-zA-Z0-9_]+)",
+            lambda m: f"cast({format(m.group(1))}){m.group(2)}",
+            value,
+        )
+
+        # Match all numeric literals in the expression
+        numeric_pattern = re.compile(
+            r"\(?"  # optional open parenthesis
+            r"\s*"  # optional space
+            r"-?\s*"  # optional minus with optional space
+            r"(?:"  # begin non-capturing group
+            r"0[xX][0-9a-fA-F]+(?:[uUlL]+)?"  # Hex
+            r"|0[xX][0-9a-fA-F.]+p[+-]?\d+(?:[fFdD]+)?"  # Hex float
+            r"|\d+\.?\d*(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # Decimal/scientific
+            r"|\.\d+(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # .decimal
+            r")"
+            r"\s*"  # optional space
+            r"\)?"  # optional closing parenthesis
+            r"(?=\s*[+\-/*%)]|$)"  # lookahead
+        )
+
+        # Process each number in the expression
+        return numeric_pattern.sub(lambda m: clean_single_number(m.group(0)), value)
+
+    cleaned_value = clean_numeric(raw_value)
+
+    # Remove trailing comments
+    cleaned_value = re.sub(r"/\*.*\*/", "", cleaned_value).strip()
+    cleaned_value = re.sub(r"//.*$", "", cleaned_value).strip()
+    cleaned_value = cleaned_value.strip()
+
+    # note: we assume integral expressions
+    return (
+        Expression(re.sub(r"\bCL_", "", cleaned_value), C_TO_ODIN_TYPES["int"].signed),
+        next_cursor,
+    )
+
+
+def try_apply_macro_function_type(fcontent, cursor) -> tuple[str, int]:
+    # brace, cursor = next_token_unwrap(fcontent, cursor)
+    brace = fcontent[cursor]
+    if brace != "(":
+        return "", -1
+    cursor += 1
+
+    params: str = ""
+    generic_type = ord("A")
+    while True:
+        word, cursor = next_token_unwrap(fcontent, cursor)
+        if word == ")":
+            break
+        params += f"{word}: ${chr(generic_type)}"
+        generic_type += 1
+
+        comma, cursor = next_token_unwrap(fcontent, cursor)
+        if comma == ")":
+            break
+        if comma != ",":
+            return "", -1
+        params += ", "
+
+    word, _ = next_token_unwrap(fcontent, cursor)
+    assert (
+        word != "{" and word != "do"
+    ), f"Cannot parse macro function type as it is too complex (or I too lazy);"
+
+    expr, cursor = parse_macro_expression(fcontent, cursor)
+    if cursor == -1:
+        return "", -1
+
+    assert expr.val, "Invalid macro: blank value"
+    return fmt.format_macro_function_type(params, (expr.val, expr._type)), cursor
+
+
 def parse_member_type_array_identifier(fcontent, cursor) -> tuple[str, int]:
     number, next_cursor = next_token_unwrap(fcontent, cursor)
     if number[0].isdigit():
@@ -209,6 +352,8 @@ def parse_enum_member(fcontent, cursor) -> tuple[str, int]:
         cursor += 1
         curr = fcontent[cursor]
 
+    value = clean_single_number(value)
+
     if curr == ",":
         value += ",\n"
         cursor += 1
@@ -272,7 +417,7 @@ def parse_type_compound_helper(base: str, fcontent, cursor) -> tuple[str, int]:
 
         return "^" + name, cursor
 
-    return name, cursor
+    return " " + name, cursor
 
 
 def is_function_ptr_type(fcontent, cursor) -> str | None:
@@ -335,7 +480,6 @@ def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]
 
     potential_const, potential_cursor = next_token_unwrap(fcontent, cursor)
     if potential_const == "const":  # const ptr
-        custom_print("Skipping const ptr", Level.ERROR)
         cursor = potential_cursor  # skip, Odin does not care
 
     while True:
@@ -597,6 +741,7 @@ def parse(fcontent: str, forigin: str) -> None:
 
             case "typedef":
                 # <typedef> ::= "typedef" <type> word ";"
+                # for <type>, see case "extern" above
                 a = Alias()
 
                 _type, next_cursor = parse_type(fcontent, next_cursor)
@@ -608,9 +753,12 @@ def parse(fcontent: str, forigin: str) -> None:
                 if potential_cursor != -1:  # function decl
                     a._from._from = f"{f.into_odin(typed=True)}"
                     a._to = f.name
-                    custom_print(f"Typedef function result: #type {f.into_odin(typed=True)}", Level.INFO)
+                    custom_print(
+                        f"Typedef function result: {f.into_odin(typed=True)}; (fname: {f.name})",
+                        Level.INFO,
+                    )
                     semic, next_cursor = next_token_unwrap(fcontent, potential_cursor)
-                    assert semic == ";", f"Expected \";\" but received {semic}"
+                    assert semic == ";", f'Expected ";" but received {semic}'
                 else:
                     a._to, next_cursor = next_token_unwrap(fcontent, next_cursor)
                     terminator, next_cursor = next_token_unwrap(fcontent, next_cursor)
@@ -622,133 +770,60 @@ def parse(fcontent: str, forigin: str) -> None:
                     # typedef <knowntype> <type>;
                     # this has no meaning in Odin, but the type may be referred to inside the code so, make a "blank"
                     # alias <name> -> <name>, that ought to be rewritten later
+                    # TODO(GowardSilk): This is so ugly, even I do not want to look at it
                     space = a._from._from.find(" ")
                     is_blank_typedef = (
                         space == -1 and a._from._from == a._to
                     )  # typedef <name> <name2>
-                    is_blank_typedef = (
-                        is_blank_typedef
-                        or is_compound_type(a._from._from[:space])
-                        and a._from._from[space:] == a._to
+                    is_blank_typedef = is_blank_typedef or (
+                        is_compound_type(a._from._from[:space])
+                        and a._from._from[space:].strip() == a._to
                     )  # typedef "struct|enum|union" <name> <name2>;
                     if is_blank_typedef:
                         a._from._from = a._to
                         custom_print(
                             f"Found blank typedef: <{a._to} | {a._to}>", Level.INFO
                         )
-                        add_alias(a)
                         cursor = next_cursor
                         continue
-                    custom_print(f"Found alias: <{a._from} | {a._to}>", Level.INFO)
+                    custom_print(f"Found alias: <{a._to} | {a._from}>", Level.INFO)
 
                 add_alias(a)
 
             case "#define":
-                # <define> ::= "#define" word word
+                # <define>         ::= "#define" word <definition>
+                # <definition>     ::= <macro-constant> | <macro-function>
+                # <macro-constant> ::= word
+                # <macro-function> ::= "(" [ <parameter-list> ] ")" word
+                # <parameter-list> ::= <identifier> { "," <identifier> }
 
                 d = Definition()
                 d.key, next_cursor = next_token_unwrap(fcontent, next_cursor)
 
-                # Skip whitespace after the key
-                while (
-                    next_cursor < len(fcontent)
-                    and fcontent[next_cursor].isspace()
-                    and fcontent[next_cursor] != "\n"
+                m, potential_cursor = try_apply_macro_function_type(
+                    fcontent, next_cursor
+                )
+                if potential_cursor != -1:
+                    custom_print("Parsing <<Macro>> Function", Level.INFO)
+                    custom_print(f"Result: `{m}`")
+                    next_cursor = potential_cursor
+                    d.value = m
+                    d.is_fn = True
+                else:
+                    expr, potential_cursor = parse_macro_expression(
+                        fcontent, next_cursor
+                    )
+                    if potential_cursor == -1:
+                        d.value = None
+                    d.value = expr.val
+                    d.is_fn = False
+
+                # we can delete "__ prefix" macros as they should be exclusive to the macro system internals
+                if (
+                    d.value
+                    and not d.key.startswith("__")
+                    and d.key not in MACRO_IGNORES
                 ):
-                    next_cursor += 1
-
-                cursor = next_cursor
-                # Find end of line (value portion)
-                while next_cursor < len(fcontent) and fcontent[next_cursor] != "\n":
-                    next_cursor += 1
-
-                # Extract the raw value
-                raw_value = fcontent[cursor:next_cursor].strip()
-
-                # Skip if empty or special cases
-                if not raw_value or raw_value in {"#define", "typedef", "extern"}:
-                    continue
-
-                def clean_numeric(value: str) -> str:
-                    value = re.sub(
-                        r"\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*([a-zA-Z0-9_]+)",
-                        r"cast(\1)\2",
-                        value,
-                    )
-
-                    # for each numerical expression we have to get rid of suffixes
-                    def clean_single_number(m):
-                        num = m.group(0)
-                        if num.lower().startswith(("0x", "0x")):
-                            return re.sub(r"[uUlL]+$", "", num)
-                        elif "e" in num.lower():
-                            return re.sub(r"[fFdD]+$", "", num)
-                        return re.sub(r"[uUlLfFdD]+$", "", num)
-
-                    # Match all numeric literals in the expression
-                    numeric_pattern = re.compile(
-                        r"-?"  # Optional sign
-                        r"(?:"
-                        r"0[xX][0-9a-fA-F]+(?:[uUlL]+)?"  # Hex
-                        r"|0[xX][0-9a-fA-F.]+p[+-]?\d+(?:[fFdD]+)?"  # Hex float
-                        r"|\d+\.?\d*(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # Decimal/scientific
-                        r"|\.\d+(?:[eE][+-]?\d+)?(?:[fFdD]+)?"  # .decimal
-                        r")(?=\s*[+-/*%]|\s*$)"  # Lookahead for operator or end
-                    )
-
-                    # Process each number in the expression
-                    return numeric_pattern.sub(clean_single_number, value)
-
-                cleaned_value = clean_numeric(raw_value)
-
-                # def remove_suffixes(match):
-                #     num = match.group(1)
-                #     # Handle hex literals (preserve a-f, remove only trailing u/l)
-                #     if num.lower().startswith(('0x', '0x')):
-                #         return re.sub(r'[uUlL]+$', '', num)
-                #     # Handle scientific notation (preserve e/E, remove only trailing f)
-                #     if 'e' in num.lower():
-                #         return re.sub(r'[fFdD]+$', '', num)
-                #     # Default case for decimals/ints
-                #     return re.sub(r'[uUlLfFdD]+$', '', num)
-                #     # num = match.group(1)
-                #     # if not num.lower().startswith(("0x", "0x")):
-                #     #     return re.sub(r'[uUlLfFdD]+$', '', num)
-                #     # else:
-                #     #     return re.sub(r'[uUlLdD]+$', '', num)
-
-                # # Improved pattern for numeric constants and simple expressions
-                # constant_pattern = re.compile(
-                #     r'''
-                #     (?:\(\s*\w+\s*\))?       # Optional cast like (int)
-                #     \s*                      # Optional whitespace
-                #     (                        # Capture group for the value:
-                #     -?                     # Optional minus sign
-                #     (?:0[xX][0-9a-fA-F]+   # Hex literal
-                #     |\d+\.?\d*            # Decimal number (with optional fraction)
-                #     |\.\d+)                # Decimal fraction starting with .
-                #     (?:[uUlLfFdD]*)\b      # Optional suffixes
-                #     |\w+                   # Or another identifier (for enum values)
-                #     |'\\?.'                # Character literal
-                #     |"\\?."                # String literal (though rare in #defines)
-                #     )
-                #     (?:\s*[+-/*%]\s*         # Optional simple arithmetic
-                #     (?:-?\d+\b            # Followed by numbers
-                #     |\w+\b)               # Or identifiers
-                #     )*
-                #     ''', re.VERBOSE
-                # )
-
-                # # Clean up the value
-                # cleaned_value = constant_pattern.sub(remove_suffixes, raw_value)
-
-                # Remove trailing comments
-                cleaned_value = re.sub(r"/\*.*\*/", "", cleaned_value).strip()
-                cleaned_value = re.sub(r"//.*$", "", cleaned_value).strip()
-                cleaned_value = cleaned_value.strip()
-
-                if cleaned_value:  # Only add if we have a value
-                    d.value = cleaned_value
                     d.file = forigin
                     g_definitions.append(d)
 
@@ -818,10 +893,10 @@ def main(cc: str, out_dir: str, enable_d3d: bool, only_essential: bool) -> None:
 
     file_blob: str = ""
 
-    file_blob += "\n"
-    file_blob += 'foreign import opencl "OpenCL.lib"\n\n'
-
     for target_header in header_files:
+        file_blob += "\n"
+        file_blob += 'foreign import opencl "OpenCL.lib"\n\n'
+
         functions = list(filter(lambda func: func.file == target_header, g_functions))
         aliases = list(
             filter(lambda alias: alias[1].file == target_header, g_aliases.items())
@@ -844,23 +919,25 @@ def main(cc: str, out_dir: str, enable_d3d: bool, only_essential: bool) -> None:
             file_blob += "\n" if len(definitions) > 0 else ""
 
             if len(functions) > 0:
-                file_blob += "@(link_prefix=\"cl\")\n"
+                file_blob += '@(link_prefix="cl")\n'
                 file_blob += "foreign opencl {\n"
                 for func in functions:
                     file_blob += "\t" + func.into_odin(typed=False) + "\n"
                 file_blob += "}\n"
 
-    with open(os.path.join(out_dir, "out.odin"), "w+") as file:
-        file.write("package cl;\n\n")
-        file.write('import "core:c"\n')
-        preprocess_out = preprocess_run(cc, current_location, "defs.odin.c")
-        with open(preprocess_out, "r") as defsfile:
-            defs = defsfile.readlines()
-            for line in defs:
-                var = re.compile(r"^@(.*?)@$", re.DOTALL)
-                match = var.match(line)
-                if match:
-                    key = match.group(1)
-                    file.write(ODIN_CONFIG[key])
-        file.write("\n")
-        file.write(file_blob)
+        with open(os.path.join(out_dir, target_header[:-2] + ".odin"), "w+") as file:
+            file.write("package cl;\n\n")
+            file.write('import "core:c"\n')
+            preprocess_out = preprocess_run(cc, current_location, "defs.odin.c")
+            with open(preprocess_out, "r") as defsfile:
+                defs = defsfile.readlines()
+                for line in defs:
+                    var = re.compile(r"^@(.*?)@$", re.DOTALL)
+                    match = var.match(line)
+                    if match:
+                        key = match.group(1)
+                        file.write(ODIN_CONFIG[key])
+            file.write("\n")
+            file.write(file_blob)
+
+        file_blob = ""
