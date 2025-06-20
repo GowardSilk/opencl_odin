@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Adjusting examples to the new parsed version of bindings]
+
+#### Changed
+- `basic/*` updated to support newly parsed bindings
+- `video/*` updated to support newly parsed bindings
+- `compute.odin` basic execution of compute operations;
+- `opencl_log.odin` extending error messaging
+- `opencl.odin` adding additional check for mandatory gl_sharing KHR extensions
+
 ### [Parsing changes]
 
 #### Changed

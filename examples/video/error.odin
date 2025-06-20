@@ -4,6 +4,7 @@ Error :: enum {
     None = 0,
 
     Platform_Query_Fail,
+    No_GL_Interop_Support,
     Device_Query_Fail,
     Context_Creation_Fail,
 

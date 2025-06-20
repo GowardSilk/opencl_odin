@@ -1,6 +1,13 @@
 package video;
 
+import "core:c"
+import "core:log"
 import "core:math"
+
+import gl "vendor:OpenGL"
+import cl "shared:opencl"
+
+import "ui"
 
 // 1. Convolution Filters (Blurs, Sharpening, Edge Detection)
 //      Gaussian Blur (separable and non-separable)
@@ -17,11 +24,22 @@ import "core:math"
 //      Opening / Closing
 
 Compute_Operation :: enum {
-    Convolution_Filter_Gauss_Horizontal_Op,
-    Convolution_Filter_Gauss_Vertical_Op,
-    Convolution_Filter_Sobel_Op,
-    Convolution_Filter_Unsharp_Op,
+    Convolution_Filter_Gauss_Horizontal = 1,
+    Convolution_Filter_Gauss_Vertical   = 2,
+
+    Convolution_Filter_Sobel            = 4,
+
+    Convolution_Filter_Unsharp          = 8,
 }
+Compute_Operations :: bit_set[Compute_Operation];
+
+CF_GAUSS_BIT   : Compute_Operation : .Convolution_Filter_Gauss_Horizontal | .Convolution_Filter_Gauss_Vertical;
+CF_SOBEL_BIT   : Compute_Operation : .Convolution_Filter_Sobel;
+CF_UNSHARP_BIT : Compute_Operation : .Convolution_Filter_Unsharp;
+
+CF_GAUSS   : Compute_Operations : {.Convolution_Filter_Gauss_Horizontal, .Convolution_Filter_Gauss_Vertical};
+CF_SOBEL   : Compute_Operations : {.Convolution_Filter_Sobel};
+CF_UNSHARP : Compute_Operations : {.Convolution_Filter_Unsharp};
 
 /* =========================================
  *                CF_GAUSSIAN
@@ -169,3 +187,63 @@ CF_SOBEL_FILTER_KERNEL_NAME: cstring: "";
 CF_UNSHARP_MASK: cstring: ``;
 CF_UNSHARP_MASK_SIZE: uint: len(CF_UNSHARP_MASK);
 CF_UNSHARP_MASK_KERNEL_NAME: cstring: "";
+
+execute_operations :: proc(app_context: ^App_Context) {
+    if CF_GAUSS_BIT in app_context^.c.operations {
+        log.info("Gauss");
+
+        log.infof("%v", app_context^.c.operations);
+        original_texture := ui.get_image_id(app_context^.selected_image);
+        // have to create new OpenGL texture (output texture)
+        // note: it does not matter that we are not "in correct" window;
+        // this data can be shared across all windows
+        width, height, internal_format, levels: i32;
+        gl.BindTexture(gl.TEXTURE_2D, original_texture);
+        gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_WIDTH, &width);
+        gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_HEIGHT, &height);
+        gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_INTERNAL_FORMAT, &internal_format);
+        gl.GetTexParameteriv(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, &levels);
+
+        new_texture: u32;
+        gl.GenTextures(1, &new_texture);
+        gl.BindTexture(gl.TEXTURE_2D, new_texture);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, internal_format, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil);
+
+        gauss_kernel := generate_gauss_kernel(3.0);
+        defer delete(gauss_kernel);
+        // todo: either "mark" the kernel arg with some 
+        // kind of regions or just dont bother storing them
+        // at all
+        base := len(app_context^.c.buffers);
+        assert(
+            create_buffer(
+                &app_context^.c,
+                gauss_kernel,
+                len(gauss_kernel) * size_of(f64)
+            ) == .None
+        );
+        assert(
+            create_buffer(
+                &app_context^.c,
+                cast(c.int)len(gauss_kernel),
+                size_of(c.int)
+            ) == .None
+        );
+
+        assert(false);
+        cl.CreateFromGLTexture2D(
+            app_context^.c._context,
+            0,
+            0,
+            0,
+            0,
+            nil
+        );
+    }
+    if CF_SOBEL_BIT in app_context^.c.operations {
+        log.info("Sobel");
+    }
+    if CF_UNSHARP_BIT in app_context^.c.operations {
+        log.info("Unsharp");
+    }
+}

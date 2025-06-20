@@ -9,7 +9,8 @@ import cl "shared:opencl"
 
 cl_context_errlog :: #force_inline proc(c: ^OpenCL_Context, $msg: string, ret: cl.Int, loc := #caller_location) {
     log_str := cl_context_log(c, loc);
-    log.errorf("%s Error value: %d (aka %s)\n%s\n", msg, ret, err_to_name(ret), log_str, location=loc);
+    err_name, err_desc := err_to_name(ret);
+    log.errorf("%s Error value: %d (aka %s; \"%s\")\n%s\n", msg, ret, err_name, err_desc, log_str, location=loc);
     delete(log_str);
 }
 /** @brief logs the current context state */
@@ -142,7 +143,7 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
             fmt.sbprintfln(b, "\t\tReference Count: %d", ref_count);
         }
 
-        dev: cl.Device_Id;
+        dev: cl.Device_ID;
         if cl.GetCommandQueueInfo(c^.queue, cl.QUEUE_DEVICE, size_of(dev), &dev, nil) == cl.SUCCESS {
             if dev == c^.device {
                 fmt.sbprintln(b, "\t\tAssociated with primary device.");
@@ -171,10 +172,10 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
         strings.write_string(b, "\tKernels:\n");
         for kernel in c^.kernels {
             log_sz: uint;
-            if ret := cl.GetKernelInfo(kernel, cl.KERNEL_FUNCTION_NAME, 0, nil, &log_sz); ret == cl.SUCCESS {
+            if ret := cl.GetKernelInfo(kernel.kernel, cl.KERNEL_FUNCTION_NAME, 0, nil, &log_sz); ret == cl.SUCCESS {
                 name := make([]byte, log_sz);
                 defer delete(name);
-                cl.GetKernelInfo(kernel, cl.KERNEL_FUNCTION_NAME, log_sz, &name[0], nil);
+                cl.GetKernelInfo(kernel.kernel, cl.KERNEL_FUNCTION_NAME, log_sz, &name[0], nil);
                 fmt.sbprintfln(b, "\t  - %s", cast(string)name);
             }
         }
@@ -191,8 +192,99 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
     if c^.program != nil      do cl_context_log_program(c, &builder);
     if c^.queue != nil        do cl_context_log_queue(c, &builder);
     if len(c^.buffers) != 0   do cl_context_log_buffers(c, &builder);
-    /* TODO: some way to determine kernel validity here ? */
-    cl_context_log_kernels(c, &builder);
+    if len(c^.kernels) != 0   do cl_context_log_kernels(c, &builder);
 
     return strings.to_string(builder);
+}
+
+/** @brief converts cl error values into string representation */
+err_to_name :: proc(err: cl.Int) -> (string, string) {
+    // messages/values taken from https://streamhpc.com/blog/2013-04-28/opencl-error-codes/
+
+    switch err {
+        // Core Errors (1.x & 2.x)
+        case cl.SUCCESS:                        return "CL_SUCCESS", "The sweet spot.";
+        case cl.DEVICE_NOT_FOUND:              return "CL_DEVICE_NOT_FOUND", "clGetDeviceIDs if no OpenCL devices that matched device_type were found.";
+        case cl.DEVICE_NOT_AVAILABLE:          return "CL_DEVICE_NOT_AVAILABLE", "clCreateContext if a device in devices is currently not available even though the device was returned by clGetDeviceIDs.";
+        case cl.COMPILER_NOT_AVAILABLE:        return "CL_COMPILER_NOT_AVAILABLE", "clBuildProgram if a compiler is not available (CL_DEVICE_COMPILER_AVAILABLE is FALSE).";
+        case cl.MEM_OBJECT_ALLOCATION_FAILURE: return "CL_MEM_OBJECT_ALLOCATION_FAILURE", "if there is a failure to allocate memory for buffer object.";
+        case cl.OUT_OF_RESOURCES:              return "CL_OUT_OF_RESOURCES", "if there is a failure to allocate resources required by the OpenCL implementation on the device.";
+        case cl.OUT_OF_HOST_MEMORY:            return "CL_OUT_OF_HOST_MEMORY", "if there is a failure to allocate resources required by the OpenCL implementation on the host.";
+        case cl.PROFILING_INFO_NOT_AVAILABLE:  return "CL_PROFILING_INFO_NOT_AVAILABLE", "clGetEventProfilingInfo if profiling info is not available for the event.";
+        case cl.MEM_COPY_OVERLAP:             return "CL_MEM_COPY_OVERLAP", "clEnqueueCopyBuffer/Image if regions overlap.";
+        case cl.IMAGE_FORMAT_MISMATCH:        return "CL_IMAGE_FORMAT_MISMATCH", "clEnqueueCopyImage if src and dst do not use the same image format.";
+        case cl.IMAGE_FORMAT_NOT_SUPPORTED:   return "CL_IMAGE_FORMAT_NOT_SUPPORTED", "clCreateImage if the image_format is not supported.";
+        case cl.BUILD_PROGRAM_FAILURE:        return "CL_BUILD_PROGRAM_FAILURE", "clBuildProgram if there is a failure to build the program executable.";
+        case cl.MAP_FAILURE:                  return "CL_MAP_FAILURE", "clEnqueueMapBuffer/Image if there is a failure to map the requested region.";
+        case cl.MISALIGNED_SUB_BUFFER_OFFSET: return "CL_MISALIGNED_SUB_BUFFER_OFFSET", "if sub-buffer offset is not aligned.";
+        case cl.EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST:
+            return "CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST",
+                "if the execution status of any event in wait-list is a negative integer.";
+        case cl.COMPILE_PROGRAM_FAILURE:      return "CL_COMPILE_PROGRAM_FAILURE", "clCompileProgram if there is a failure to compile the program source.";
+        case cl.LINKER_NOT_AVAILABLE:         return "CL_LINKER_NOT_AVAILABLE", "clLinkProgram if a linker is not available (CL_DEVICE_LINKER_AVAILABLE is FALSE).";
+        case cl.LINK_PROGRAM_FAILURE:         return "CL_LINK_PROGRAM_FAILURE", "clLinkProgram if there is a failure to link the compiled binaries.";
+        case cl.DEVICE_PARTITION_FAILED:      return "CL_DEVICE_PARTITION_FAILED", "clCreateSubDevices if the device could not be partitioned.";
+        case cl.KERNEL_ARG_INFO_NOT_AVAILABLE:return "CL_KERNEL_ARG_INFO_NOT_AVAILABLE", "clGetKernelArgInfo if the argument information is not available.";
+
+        // Compile-time / parameter errors
+        case cl.INVALID_VALUE:                return "CL_INVALID_VALUE", "if value is not valid or parameters in a set of values are not appropriate.";
+        case cl.INVALID_DEVICE_TYPE:          return "CL_INVALID_DEVICE_TYPE", "if an invalid device_type is given.";
+        case cl.INVALID_PLATFORM:             return "CL_INVALID_PLATFORM", "if an invalid platform was given.";
+        case cl.INVALID_DEVICE:               return "CL_INVALID_DEVICE", "if devices contains an invalid device.";
+        case cl.INVALID_CONTEXT:              return "CL_INVALID_CONTEXT", "if context is not a valid context.";
+        case cl.INVALID_QUEUE_PROPERTIES:     return "CL_INVALID_QUEUE_PROPERTIES", "if properties are not supported by the device.";
+        case cl.INVALID_COMMAND_QUEUE:        return "CL_INVALID_COMMAND_QUEUE", "if command_queue is not a valid command-queue.";
+        case cl.INVALID_HOST_PTR:             return "CL_INVALID_HOST_PTR", "if host_ptr is NULL and CL_MEM_USE_HOST_PTR or CL_MEM_COPY_HOST_PTR is specified.";
+        case cl.INVALID_MEM_OBJECT:           return "CL_INVALID_MEM_OBJECT", "if memobj is not a valid memory object.";
+        case cl.INVALID_IMAGE_FORMAT_DESCRIPTOR:
+                                            return "CL_INVALID_IMAGE_FORMAT_DESCRIPTOR", "if image_format is not a valid descriptor.";
+        case cl.INVALID_IMAGE_SIZE:           return "CL_INVALID_IMAGE_SIZE", "if image dimensions or row/array pitches are not valid.";
+        case cl.INVALID_SAMPLER:              return "CL_INVALID_SAMPLER", "if sampler is not a valid sampler.";
+        case cl.INVALID_BINARY:               return "CL_INVALID_BINARY", "if the program binary is not valid.";
+        case cl.INVALID_BUILD_OPTIONS:        return "CL_INVALID_BUILD_OPTIONS", "if the build options are invalid.";
+        case cl.INVALID_PROGRAM:              return "CL_INVALID_PROGRAM", "if program is not a valid program object.";
+        case cl.INVALID_PROGRAM_EXECUTABLE:   return "CL_INVALID_PROGRAM_EXECUTABLE", "if program executable is not valid.";
+        case cl.INVALID_KERNEL_NAME:          return "CL_INVALID_KERNEL_NAME", "if the kernel name is not found in program.";
+        case cl.INVALID_KERNEL_DEFINITION:    return "CL_INVALID_KERNEL_DEFINITION", "if kernel definition is invalid.";
+        case cl.INVALID_KERNEL:               return "CL_INVALID_KERNEL", "if kernel object is not valid.";
+        case cl.INVALID_ARG_INDEX:            return "CL_INVALID_ARG_INDEX", "if argument index is invalid.";
+        case cl.INVALID_ARG_VALUE:            return "CL_INVALID_ARG_VALUE", "if argument value is not valid.";
+        case cl.INVALID_ARG_SIZE:             return "CL_INVALID_ARG_SIZE", "if argument size does not match the size of the data type.";
+        case cl.INVALID_KERNEL_ARGS:          return "CL_INVALID_KERNEL_ARGS", "if kernel arguments have not been set or are invalid.";
+        case cl.INVALID_WORK_DIMENSION:       return "CL_INVALID_WORK_DIMENSION", "if work_dim is invalid.";
+        case cl.INVALID_WORK_GROUP_SIZE:      return "CL_INVALID_WORK_GROUP_SIZE", "if work-group size is invalid.";
+        case cl.INVALID_WORK_ITEM_SIZE:       return "CL_INVALID_WORK_ITEM_SIZE", "if an individual work-item size is invalid.";
+        case cl.INVALID_GLOBAL_OFFSET:        return "CL_INVALID_GLOBAL_OFFSET", "if global_offset is invalid.";
+        case cl.INVALID_EVENT_WAIT_LIST:      return "CL_INVALID_EVENT_WAIT_LIST", "if event_wait_list is NULL but num_events_in_wait_list > 0, or vice versa.";
+        case cl.INVALID_EVENT:                return "CL_INVALID_EVENT", "if event objects are not valid.";
+        case cl.INVALID_OPERATION:            return "CL_INVALID_OPERATION", "if the operation is invalid for the current state of the object.";
+        case cl.INVALID_GL_OBJECT:           return "CL_INVALID_GL_OBJECT", "if associated GL object is not valid.";
+        case cl.INVALID_BUFFER_SIZE:          return "CL_INVALID_BUFFER_SIZE", "if buffer size is zero.";
+        case cl.INVALID_MIP_LEVEL:            return "CL_INVALID_MIP_LEVEL", "if mip-level is invalid.";
+        case cl.INVALID_GLOBAL_WORK_SIZE:     return "CL_INVALID_GLOBAL_WORK_SIZE", "if global work size is not a multiple of the work-group size.";
+        case cl.INVALID_PROPERTY:             return "CL_INVALID_PROPERTY", "if property name is invalid.";
+        case cl.INVALID_IMAGE_DESCRIPTOR:     return "CL_INVALID_IMAGE_DESCRIPTOR", "if image descriptor is invalid.";
+        case cl.INVALID_COMPILER_OPTIONS:     return "CL_INVALID_COMPILER_OPTIONS", "if compiler options are invalid.";
+        case cl.INVALID_LINKER_OPTIONS:       return "CL_INVALID_LINKER_OPTIONS", "if linker options are invalid.";
+        case cl.INVALID_DEVICE_PARTITION_COUNT:
+                                            return "CL_INVALID_DEVICE_PARTITION_COUNT", "if partition count is invalid.";
+        case cl.INVALID_PIPE_SIZE:            return "CL_INVALID_PIPE_SIZE", "if pipe size is invalid.";
+        case cl.INVALID_DEVICE_QUEUE:         return "CL_INVALID_DEVICE_QUEUE", "if device queue is invalid.";
+        case cl.INVALID_SPEC_ID:              return "CL_INVALID_SPEC_ID", "if specialization constant ID is invalid.";
+        case cl.MAX_SIZE_RESTRICTION_EXCEEDED:
+                                            return "CL_MAX_SIZE_RESTRICTION_EXCEEDED", "if max size restriction exceeded.";
+
+        // KHR / Extension Errors
+        case cl.INVALID_GL_SHAREGROUP_REFERENCE_KHR:
+                                            return "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR", "if the GL sharegroup reference is invalid.";
+        case cl.PLATFORM_NOT_FOUND_KHR:       return "CL_PLATFORM_NOT_FOUND_KHR", "if no OpenCL platforms found.";
+        case cl.INVALID_D3D10_DEVICE_KHR:     return "CL_INVALID_D3D10_DEVICE_KHR", "if D3D10 device for interop is invalid.";
+
+        // NVIDIA vendor-specific
+        case -9999:
+            return "CL_DEVICE_ILLEGAL_READ_WRITE_NV", "Illegal read or write to a buffer (NVIDIA).";
+
+        case:
+            return "UNKNOWN_ERROR", "Unknown OpenCL error code.";
+    }
 }

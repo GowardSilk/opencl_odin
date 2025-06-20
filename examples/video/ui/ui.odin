@@ -55,6 +55,7 @@ Draw_Command_Queue :: struct {
 Draw_Context :: struct {
     queue: Draw_Command_Queue,
     ren: Batch_Renderer,
+    usr_data: rawptr,
 }
 
 Draw_Proc :: #type proc "odin" (w: Window);
@@ -75,7 +76,7 @@ register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> Gener
     return nil;
 }
 
-init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
+init :: proc(usr_data: rawptr = nil) -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
     glfw_error_callback :: proc "cdecl" (error: c.int, description: cstring) {
         context = runtime.default_context();
         log.errorf("Error encountered (%d): %s", error, description);
@@ -96,6 +97,8 @@ init :: proc() -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
     // render queue
     ctx^.queue.windows = make_dynamic_array([dynamic]Window) or_return;
     ctx^.queue.commands = make_dynamic_array([dynamic]Draw_Command) or_return;
+
+    ctx^.usr_data = usr_data;
 
     return ctx, .None;
 }
@@ -214,6 +217,29 @@ reset_state :: proc() {
     clear(&ctx^.queue.commands);
 
     batch_renderer_clear(&ctx^.ren);
+}
+
+get_data :: #force_inline proc($T: typeid) -> ^T {
+    return cast(^T)get_context()^.usr_data;
+}
+
+/**
+ * @brief retrieves OpenGL texture2D id which contains img data from `img_path'
+ * @note cannot query when Image from `img_path' was not loaded with `draw_image'
+ * @param img_path path to the original img
+ * @return OpenGL texture2D id
+ */
+get_image_id :: #force_inline proc(img_path: string) -> u32 {
+    return batch_renderer_handle_image_request(&get_context()^.ren, img_path);
+}
+
+/**
+ * @brief resets registered renderer's texture ID to new location
+ * @param img_path path to the original img
+ * @param new_img_id new OpenGL texture2D id
+ */
+reset_image_id :: #force_inline proc(img_path: string, new_img_id: u32) {
+    batch_renderer_invalidate_image_and_reset(&get_context()^.ren, img_path, new_img_id);
 }
 
 destroy :: proc() {

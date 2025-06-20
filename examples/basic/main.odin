@@ -10,15 +10,15 @@ import cl "shared:opencl"
  * @brief picks platform and device IDs based on max compute unit count
  * @return nil pair if any query failed, other the most "performant" device and platform
  */
-pick_platform_and_device :: proc() -> (cl.Platform_Id, cl.Device_Id) {
+pick_platform_and_device :: proc() -> (cl.Platform_ID, cl.Device_ID) {
 	// query all available platforms
-	all_platforms: []cl.Platform_Id;
+	all_platforms: []cl.Platform_ID;
 	num_all_platforms: cl.Uint = 0;
 	if ret := cl.GetPlatformIDs(0, nil, &num_all_platforms); ret != cl.SUCCESS {
 		log.errorf("Failed to query platform ids! Error value: %d", ret);
 		return nil, nil;
 	}
-	all_platforms = make([]cl.Platform_Id, num_all_platforms);
+	all_platforms = make([]cl.Platform_ID, num_all_platforms);
 	defer delete(all_platforms);
 	if ret := cl.GetPlatformIDs(num_all_platforms, &all_platforms[0], nil); ret != cl.SUCCESS {
 		log.errorf("Failed to query platform ids! Error value: %d", ret);
@@ -28,12 +28,12 @@ pick_platform_and_device :: proc() -> (cl.Platform_Id, cl.Device_Id) {
 	// try to pick the most "performant" one
 	// this is technically an overkill but it should demonstrate the "filtering"
 	// and device query
-	best_platform: cl.Platform_Id;
-	best_device: cl.Device_Id;
+	best_platform: cl.Platform_ID;
+	best_device: cl.Device_ID;
     max_compute_units: cl.Uint = 0;
 
     for i: cl.Uint = 0; i < num_all_platforms; i += 1 {
-        devices: [10]cl.Device_Id;
+        devices: [10]cl.Device_ID;
         num_devices: cl.Uint;
         cl.GetDeviceIDs(all_platforms[i], cl.DEVICE_TYPE_ALL, 10, &devices[0], &num_devices);
 
@@ -76,7 +76,7 @@ ctx_error_callback :: proc "stdcall" (errinfo: cstring, private_info: rawptr, cb
  * @note function does not validate `device` parameter! assumes to be valid
  * @return `nil` when clCreateContext failed to initialize, otherwise valid handle to context
  */
-create_context :: proc(device: cl.Device_Id) -> cl.Context {
+create_context :: proc(device: cl.Device_ID) -> cl.Context {
 	device := device
 
 	ret: cl.Int;
@@ -93,7 +93,7 @@ create_context :: proc(device: cl.Device_Id) -> cl.Context {
  * @note function does not validate `device` nor `ctx` parameter! assumes to be valid
  * @return `nil` when failed to compile program
  */
-create_Program :: proc(ctx: cl.Context, device: cl.Device_Id) -> cl.Program {
+create_program :: proc(ctx: cl.Context, device: cl.Device_ID) -> cl.Program {
 	device := device;
 
 	ret: cl.Int;
@@ -117,7 +117,7 @@ create_Program :: proc(ctx: cl.Context, device: cl.Device_Id) -> cl.Program {
 	return program;
 }
 
-create_command_queue :: proc(ctx: cl.Context, device: cl.Device_Id) -> cl.Command_Queue {
+create_command_queue :: proc(ctx: cl.Context, device: cl.Device_ID) -> cl.Command_Queue {
 	ret: cl.Int;
 	queue := cl.CreateCommandQueue(ctx, device, 0, &ret);
 	if ret != cl.SUCCESS {
@@ -201,21 +201,21 @@ main :: proc() {
 	context.logger = log.create_console_logger();
 
 	// pick appropriate platform and device
-	Platform_Id, Device_Id := pick_platform_and_device();
-	if Platform_Id == nil || Device_Id == nil do return;
+	Platform_ID, Device_ID := pick_platform_and_device();
+	if Platform_ID == nil || Device_ID == nil do return;
 
 	// create runtime context
-	ctx := create_context(Device_Id);
+	ctx := create_context(Device_ID);
 	if ctx == nil do return;
 	defer cl.ReleaseContext(ctx);
 	
 	// create Program to be run on the device
-	Program := create_Program(ctx, Device_Id);
-	if Program == nil do return;
-	defer cl.ReleaseProgram(Program);
+	program := create_program(ctx, Device_ID);
+	if program == nil do return;
+	defer cl.ReleaseProgram(program);
 
 	// create command queue
-	queue := create_command_queue(ctx, Device_Id);
+	queue := create_command_queue(ctx, Device_ID);
 	if queue == nil do return;
 	defer cl.ReleaseCommandQueue(queue);
 
@@ -226,7 +226,7 @@ main :: proc() {
 	defer cl.ReleaseMemObject(buffer_out);
 
 	// create executable
-	kernel := create_kernel(Program);
+	kernel := create_kernel(program);
 	if kernel == nil do return;
 	defer cl.ReleaseKernel(kernel);
 

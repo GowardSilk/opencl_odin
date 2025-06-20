@@ -371,6 +371,20 @@ batch_renderer_register_image :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_W
     return nil;
 }
 
+batch_renderer_handle_image_request :: proc(ren: ^Batch_Renderer, img_path: string) -> u32 {
+    e, ok := ren^.images.image_vertices[img_path];
+    log.assertf(ok, "Image with path: \"%s\" is not registered!", img_path);
+
+    return e.texture;
+}
+
+batch_renderer_invalidate_image_and_reset :: proc(ren: ^Batch_Renderer, img_path: string, new_texture_id: u32) {
+    e, ok := &ren^.images.image_vertices[img_path];
+    log.assertf(ok, "Image with path: \"%s\" is not registered! Cannot invalidate an image which does not exist!", img_path);
+
+    e^.texture = new_texture_id;
+}
+
 batch_renderer_construct :: proc(ren: ^Batch_Renderer, id: Batch_Renderer_Window_ID) {
     perwindow, ok := ren^.perwindow[id];
     log.assertf(ok, "Window of ID: %d is not registered!", id);
