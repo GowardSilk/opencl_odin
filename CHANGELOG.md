@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### [Adding new example: 'audio']
+
+#### Added
+- `main.odin` basic setup of miniaudio's engine to load/play sounds. it is just a blank example technically without any OpenCL, which will be added once we will support proper loading (aka custom ma.device initialization with custom buffer copies which will be nice for real-time audio changes)
+- `sound1.flac` as basic test sound
+
 ### [Adjusting examples to the new parsed version of bindings]
 
 #### Changed
