@@ -90,19 +90,55 @@ main :: proc() {
 
                     rl.PlayAudioStream(uim.audio_stream);
                     wave_playing = true;
+
+                    //for i := 0; i < 40; i += 1 do log.errorf("Data: %d/%f", (cast([^]c.short)active_wave.data)[44100+i], (cast([^]c.float)active_wave.data)[44100+i]);
+                    //unreachable();
+                    if active_wave != nil {
+                        log.infof("Wave info - Sample rate: %d, Sample size: %d, Channels: %d, Frame count: %d",
+                            active_wave.sampleRate,
+                            active_wave.sampleSize,
+                            active_wave.channels,
+                            active_wave.frameCount);
+                    }
                 }
             }
 
-            if active_wave != nil {
+            if active_wave != nil && rl.IsAudioStreamProcessed(uim.audio_stream) {
                 samples_offset := u32(wave_index * uim.audio_buffer_size);
-                if rl.IsAudioStreamProcessed(uim.audio_stream) {
-                    rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
-                    wave_index += 1;
-                } else if samples_offset > active_wave.frameCount {
-                    rl.StopAudioStream(uim.audio_stream);
-                    wave_index = 0;
-                    wave_playing = false;
-                    active_wave = nil;
+                if cast(f32)uim.audio_stream.sampleRate/60.0 > cast(f32)uim.audio_buffer_size {
+                    // increase the number of updates per frame
+                    // max_i := cast(c.int)(44100.0/(uim.audio_buffer_size*60.0));
+                    // for i := c.int(0); i < max_i; i += 1 {
+                    //     if samples_offset > active_wave.frameCount {
+                    //         rl.StopAudioStream(uim.audio_stream);
+                    //         wave_index = 0;
+                    //         wave_playing = false;
+                    //         active_wave = nil;
+                    //         break;
+                    //     }
+                    //     rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
+                    //     samples_offset += cast(u32)uim.audio_buffer_size;
+                    // }
+                    // wave_index += max_i;
+                    unreachable();
+                } else {
+                    // decrease the number of frame times
+                    @static frame_skip: i32;
+                    frame_skip = max(0, i32((cast(f32)uim.audio_buffer_size*60.0)/44100.0)-3);
+                    @static frames_skipped: i32;
+                    if frames_skipped >= frame_skip {
+                        if samples_offset > active_wave.frameCount {
+                            rl.StopAudioStream(uim.audio_stream);
+                            wave_index = 0;
+                            wave_playing = false;
+                            active_wave = nil;
+                        } else {
+                            rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
+                            samples_offset += cast(u32)uim.audio_buffer_size;
+                            wave_index += 1;
+                        }
+                        frames_skipped = 0;
+                    } else do frames_skipped += 1;
                 }
             }
 
