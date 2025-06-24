@@ -1,44 +1,130 @@
 package audio;
 
+import "core:c"
+import "core:os"
 import "core:log"
+import "core:mem"
+import "core:strings"
 
-import ma "vendor:miniaudio"
+import cl "shared:opencl"
+import mu "vendor:microui"
+import rl "vendor:raylib"
 
-Audio_Manager :: struct {
-    engine: ma.engine,
-    sounds: [dynamic]ma.sound,
+Error :: union #shared_nil {
+    OpenCL_Error,
 }
 
 main :: proc() {
     context.logger = log.create_console_logger();
 
-    manager: Audio_Manager;
+    opencl: OpenCL_Context;
+    uim: UI_Manager;
+    err: Error;
 
-    if ret := ma.engine_init(nil, &manager.engine); ret != .SUCCESS {
-        log.errorf("Failed to initialize engine (err: %v)", ret);
+    opencl, err = init_cl_context();
+    if err != nil {
+        log.errorf("Failed to initialize OpenCL Context! Error: %v", err);
         return;
     }
-    defer ma.engine_uninit(&manager.engine);
+    defer delete_cl_context(&opencl);
 
-    ma.engine_start(&manager.engine);
-
-    sound: ma.sound;
-    if ret := ma.sound_init_from_file(&manager.engine, "audio/sound1.flac", {}, nil, nil, &sound); ret != .SUCCESS {
-        log.errorf("Failed to load \"%s\" sound (err: %v)", "audio/sound1.flac", ret);
+    uim, err = init_ui_manager();
+    if err != nil {
+        log.errorf("Failed to initialize ui manager! Error: %v", err);
         return;
     }
-    defer ma.sound_uninit(&sound);
+    defer delete_ui_manager(&uim);
 
-    fence: ma.fence;
-    ma.fence_init(&fence);
-    sound.endCallback = proc "cdecl" (data: rawptr, sound: ^ma.sound) {
-        ma.fence_release(cast(^ma.fence)data);
-    };
-    sound.pEndCallbackUserData = &fence;
-    ma.sound_start(&sound);
+    curr_dir_handle: os.Handle;
+    os_err: os.Error;
+    {
+        curr_dir_base := os.get_current_directory();
+        defer delete(curr_dir_base);
 
-    ma.fence_acquire(&fence);
-    ma.fence_wait(&fence);
+        curr_dir := make([]byte, len(curr_dir_base) + size_of("/audio"));
+        defer delete(curr_dir);
+        copy(curr_dir, curr_dir_base[:]);
+        copy_from_string(curr_dir[len(curr_dir_base):], "/audio");
 
-    ma.engine_stop(&manager.engine);
+        curr_dir_handle, os_err = os.open(cast(string)curr_dir);
+        if os_err != nil {
+            log.errorf("Failed to open current directory handle! Error: %v", os_err);
+            return;
+        }
+    }
+    defer os.close(curr_dir_handle);
+
+    wave_cache := make(map[string]rl.Wave);
+    active_wave: ^rl.Wave = nil;
+    wave_index: c.int = 0;
+    wave_playing := false;
+    defer {
+        for wave_name in wave_cache do rl.UnloadWave(wave_cache[wave_name]);
+        delete(wave_cache);
+    }
+
+    rl.SetTargetFPS(60);
+    for !rl.WindowShouldClose() {
+        ui_register_mouse_events(&uim);
+
+        mu.begin(uim.ctx);
+        if mu.window(uim.ctx, "Demo", {0, 0, 512, 512}, {.NO_CLOSE}) {
+            // query all files and play sound files
+            infos, read_err := os.read_dir(curr_dir_handle, -1);
+            if read_err != nil {
+                log.errorf("Failed to query files in `audio` directory! Error: %v", read_err);
+                return;
+            }
+            defer os.file_info_slice_delete(infos);
+
+            for info in infos do if is_sound_file(info) {
+                if .SUBMIT in mu.button(uim.ctx, info.name) {
+                    wave, ok := &wave_cache[info.name]; 
+                    if !ok {
+                        info_cname := make([]byte, len(info.name) + size_of("audio/") + 1);
+                        defer delete(info_cname);
+                        copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
+
+                        active_wave = map_insert(&wave_cache, info.name, rl.LoadWave(cast(cstring)&info_cname[0]));
+                    } else do active_wave = wave;
+
+                    rl.PlayAudioStream(uim.audio_stream);
+                    wave_playing = true;
+                }
+            }
+
+            if active_wave != nil {
+                samples_offset := u32(wave_index * uim.audio_buffer_size);
+                if rl.IsAudioStreamProcessed(uim.audio_stream) {
+                    rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
+                    wave_index += 1;
+                } else if samples_offset > active_wave.frameCount {
+                    rl.StopAudioStream(uim.audio_stream);
+                    wave_index = 0;
+                    wave_playing = false;
+                    active_wave = nil;
+                }
+            }
+
+            mu.checkbox(uim.ctx, "Distortion", &opencl.operations[.Distortion]);
+            mu.checkbox(uim.ctx, "Echo", &opencl.operations[.Echo]);
+            mu.checkbox(uim.ctx, "FFT", &opencl.operations[.FFT]);
+
+            if .SUBMIT in mu.button(uim.ctx, "Submit") {
+                // do OpenCL work here ?
+                // and update audio stream
+                // rl.UpdateAudioStream(uim.audio_stream, &wave_samples[0], wave_framecount);
+            }
+        }
+        mu.end(uim.ctx);
+
+        ui_render(&uim);
+    }
+}
+
+is_sound_file :: proc(fi: os.File_Info) -> bool {
+    if fi.is_dir do return false;
+
+    if fi.name[len(fi.name)-4:] == ".wav" do return true;
+    return false;
 }
