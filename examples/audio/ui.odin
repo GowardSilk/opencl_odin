@@ -3,20 +3,49 @@ package audio;
 import "base:runtime"
 
 import "core:c"
+import "core:log"
 
 import mu "vendor:microui"
-import rl "vendor:raylib"
+import sdl3 "vendor:sdl3"
 
 UI_Manager :: struct {
+    should_close: bool,
+
+    window:   ^sdl3.Window,
+    renderer: ^sdl3.Renderer,
+    atlas_texture: #type struct {
+        surface: ^sdl3.Surface,
+        texture: ^sdl3.Texture,
+    },
+
     ctx: ^mu.Context,
-    atlas_texture: rl.Texture2D,
-    audio_stream: rl.AudioStream,
-    audio_buffer_size: c.int,
+}
+
+UI_Error :: enum {
+    None = 0,
+
+    Init_Fail,
+    Window_Creation_Fail,
+    Renderer_Creation_Fail,
+    Surface_Creation_Fail,
+    Texture_Creation_Fail,
 }
 
 init_ui_manager :: proc() -> (uim: UI_Manager, err: Error) {
-    rl.InitWindow(1024, 1024, "OpenCL Audio Example");
-    rl.InitAudioDevice();
+    if !sdl3.Init({.VIDEO}) {
+        log.errorf("SDL3 Init error: %s", sdl3.GetError());
+        return {}, .Init_Fail;
+    }
+    uim.window = sdl3.CreateWindow("OpenCL Audio Example", 1024, 1024, {});
+    if uim.window == nil {
+        log.errorf("SDL3 Window Init error: %s", sdl3.GetError());
+        return {}, .Window_Creation_Fail;
+    }
+    uim.renderer = sdl3.CreateRenderer(uim.window, nil);
+    if uim.renderer == nil {
+        log.errorf("SDL3 Renderer Init error: %s", sdl3.GetError());
+        return {}, .Renderer_Creation_Fail;
+    }
 
     // microui CONTEXT
     merr: runtime.Allocator_Error;
@@ -32,67 +61,62 @@ init_ui_manager :: proc() -> (uim: UI_Manager, err: Error) {
     pixels, merr = make([][4]byte, mu.DEFAULT_ATLAS_WIDTH * mu.DEFAULT_ATLAS_HEIGHT);
     assert(merr == .None);
 	for alpha, i in mu.default_atlas_alpha {
-		pixels[i] = {0xff, 0xff, 0xff, alpha};
+		pixels[i] = {alpha, alpha, alpha, alpha};
 	}
 	defer delete(pixels);
 		
-	image := rl.Image{
-		data = raw_data(pixels),
-		width   = mu.DEFAULT_ATLAS_WIDTH,
-		height  = mu.DEFAULT_ATLAS_HEIGHT,
-		mipmaps = 1,
-		format  = .UNCOMPRESSED_R8G8B8A8,
-	};
-	uim.atlas_texture = rl.LoadTextureFromImage(image);
-
-    uim.audio_buffer_size = 4096;
-    rl.SetAudioStreamBufferSizeDefault(uim.audio_buffer_size);
-    uim.audio_stream = rl.LoadAudioStream(44100, 16, 1);
+    uim.atlas_texture.surface = sdl3.CreateSurfaceFrom(mu.DEFAULT_ATLAS_WIDTH, mu.DEFAULT_ATLAS_HEIGHT, .RGBA8888, raw_data(pixels), mu.DEFAULT_ATLAS_WIDTH*4);
+    if uim.atlas_texture.surface == nil {
+        log.errorf("SDL3 Surface Init error: %s", sdl3.GetError());
+        return {}, .Surface_Creation_Fail;
+    }
+    uim.atlas_texture.texture = sdl3.CreateTextureFromSurface(uim.renderer, uim.atlas_texture.surface);
+    if uim.atlas_texture.texture == nil {
+        log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
+        return {}, .Texture_Creation_Fail;
+    }
+    sdl3.SetTextureBlendMode(uim.atlas_texture.texture, sdl3.BLENDMODE_BLEND_PREMULTIPLIED);
 
     return uim, nil;
 }
 
-ui_register_mouse_events :: proc(uim: ^UI_Manager) {
-    // mouse coordinates
-    mouse_pos := [2]i32{rl.GetMouseX(), rl.GetMouseY()};
-    mu.input_mouse_move(uim^.ctx, mouse_pos.x, mouse_pos.y);
-    mu.input_scroll(uim^.ctx, 0, i32(rl.GetMouseWheelMove() * -30));
-    
-    // mouse buttons
-    @static buttons_to_key := [?]struct{
-        rl_button: rl.MouseButton,
-        mu_button: mu.Mouse,
-    }{
-        {.LEFT, .LEFT},
-        {.RIGHT, .RIGHT},
-        {.MIDDLE, .MIDDLE},
+ui_register_events :: proc(uim: ^UI_Manager) {
+
+    to_mui_mouse_key :: proc(key: sdl3.Uint8) -> mu.Mouse {
+        if key == sdl3.BUTTON_LEFT do return .LEFT;
+        if key == sdl3.BUTTON_RIGHT do return .RIGHT;
+        if key == sdl3.BUTTON_MIDDLE do return .MIDDLE;
+
+        unreachable();
     }
-    for button in buttons_to_key {
-        if rl.IsMouseButtonPressed(button.rl_button) { 
-            mu.input_mouse_down(uim^.ctx, mouse_pos.x, mouse_pos.y, button.mu_button)
-        } else if rl.IsMouseButtonReleased(button.rl_button) { 
-            mu.input_mouse_up(uim^.ctx, mouse_pos.x, mouse_pos.y, button.mu_button)
+
+    event: sdl3.Event;
+    for sdl3.PollEvent(&event) {
+        #partial switch event.type {
+            case .MOUSE_WHEEL:
+                mu.input_scroll(uim^.ctx, 0, cast(i32)event.wheel.y * -30);
+            case .MOUSE_MOTION:
+                mu.input_mouse_move(uim^.ctx, cast(i32)event.motion.x, cast(i32)event.motion.y);
+            case .MOUSE_BUTTON_UP:
+                mu.input_mouse_up(uim^.ctx, cast(i32)event.button.x, cast(i32)event.button.y, to_mui_mouse_key(event.button.button));
+            case .MOUSE_BUTTON_DOWN:
+                mu.input_mouse_down(uim^.ctx, cast(i32)event.button.x, cast(i32)event.button.y, to_mui_mouse_key(event.button.button));
+            case .QUIT:
+                uim^.should_close = true;
         }
     }
 }
 
 ui_render :: proc(uim: ^UI_Manager) {
-	render_texture :: proc(uim: ^UI_Manager, rect: mu.Rect, pos: [2]i32, color: mu.Color) {
-		source := rl.Rectangle{
-			f32(rect.x),
-			f32(rect.y),
-			f32(rect.w),
-			f32(rect.h),
-		};
-		position := rl.Vector2{f32(pos.x), f32(pos.y)};
-		
-		rl.DrawTextureRec(uim^.atlas_texture, source, position, transmute(rl.Color)color);
-	}
+    sdl3.SetRenderDrawColor(uim.renderer, 51, 51, 51, 255);
+    sdl3.RenderClear(uim.renderer);
 
-    rl.ClearBackground({51, 51, 51, 255});
+    render_texture :: proc(uim: ^UI_Manager, src: mu.Rect, dst: mu.Rect) {
+        src := sdl3.FRect{cast(f32)src.x, cast(f32)src.y, cast(f32)src.w, cast(f32)src.h};
+        dst := sdl3.FRect{cast(f32)dst.x, cast(f32)dst.y, cast(f32)dst.w, cast(f32)dst.h};
+        sdl3.RenderTexture(uim.renderer, uim.atlas_texture.texture, &src, &dst);
+    }
 
-    rl.BeginDrawing();
-    rl.BeginScissorMode(0, 0, rl.GetScreenWidth(), rl.GetScreenHeight());
     cmd: ^mu.Command;
     for variant in mu.next_command_iterator(uim^.ctx, &cmd) {
         switch v in variant {
@@ -101,32 +125,35 @@ ui_render :: proc(uim: ^UI_Manager) {
                 for ch in v.str do if ch & 0xc0 != 0x80 {
                     r := min(cast(int)ch, 127);
                     rect := mu.default_atlas[mu.DEFAULT_ATLAS_FONT + r];
-                    render_texture(uim, rect, pos, v.color);
+                    render_texture(uim, rect, {pos.x, pos.y, rect.w, rect.h});
                     pos.x += rect.w;
                 }
             case ^mu.Command_Rect:
-                rl.DrawRectangle(v.rect.x, v.rect.y, v.rect.w, v.rect.h, transmute(rl.Color)v.color);
+                r := v.rect;
+                c := v.color;
+                sdl3.SetRenderDrawColor(uim.renderer, c.r, c.g, c.b, c.a);
+                sdl3.RenderFillRect(uim.renderer,
+                    &sdl3.FRect{cast(f32)r.x, cast(f32)r.y, cast(f32)r.w, cast(f32)r.h});
             case ^mu.Command_Clip:
-                rl.EndScissorMode();
-                rl.BeginScissorMode(v.rect.x, v.rect.y, v.rect.w, v.rect.h);
+                sdl3.SetRenderClipRect(uim.renderer, 
+                    &sdl3.Rect{v.rect.x, v.rect.y, v.rect.w, v.rect.h});
 
             case ^mu.Command_Icon:
                 rect := mu.default_atlas[v.id];
-                x := v.rect.x + (v.rect.w - rect.w)/2;
-                y := v.rect.y + (v.rect.h - rect.h)/2;
-                render_texture(uim, rect, {x, y}, v.color);
+                render_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
             case ^mu.Command_Jump: unreachable();
         }
     }
-    rl.EndScissorMode();
-    rl.EndDrawing();
+
+    sdl3.RenderPresent(uim.renderer);
 }
 
 delete_ui_manager :: proc(uim: ^UI_Manager) {
-    rl.UnloadTexture(uim.atlas_texture);
-    rl.UnloadAudioStream(uim.audio_stream);
-    rl.CloseAudioDevice();
-    rl.CloseWindow();
+    sdl3.DestroyTexture(uim.atlas_texture.texture);
+    sdl3.DestroySurface(uim.atlas_texture.surface);
+    sdl3.DestroyRenderer(uim.renderer);
+    sdl3.DestroyWindow(uim.window);
+    sdl3.Quit();
 
     free(uim^.ctx);
 }

@@ -62,7 +62,7 @@ init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
         c.kernels[index].type = kernel.type;
     }
 
-    return c, .None;
+    return c, nil;
 }
 
 delete_cl_context :: proc(c: ^OpenCL_Context) {
@@ -80,7 +80,7 @@ pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
 		return .Platform_Query_Fail;
 	}
 
-    return .None;
+    return nil;
 }
 
 pick_device :: proc(c: ^OpenCL_Context) -> (err: Error) {
@@ -89,7 +89,7 @@ pick_device :: proc(c: ^OpenCL_Context) -> (err: Error) {
         return .Device_Query_Fail;
     }
 
-    return .None;
+    return nil;
 }
 
 create_context :: proc(c: ^OpenCL_Context) -> (err: Error) {
@@ -109,7 +109,7 @@ create_context :: proc(c: ^OpenCL_Context) -> (err: Error) {
 		return .Context_Creation_Fail;
 	}
 
-	return .None;
+	return nil;
 }
 
 delete_context :: #force_inline proc(_context: cl.Context) {
@@ -117,7 +117,7 @@ delete_context :: #force_inline proc(_context: cl.Context) {
 }
 
 assemble_program :: proc(c: ^OpenCL_Context, sources: []cstring, source_sizes: []uint) -> (err: Error) {
-    if len(sources) == 0 do return .None;
+    if len(sources) == 0 do return nil;
 
     ret: cl.Int;
 	c^.program = cl.CreateProgramWithSource(c^._context, cast(u32)len(sources), &sources[0], &source_sizes[0], &ret);
@@ -131,7 +131,7 @@ assemble_program :: proc(c: ^OpenCL_Context, sources: []cstring, source_sizes: [
 		return .Program_Compilation_Fail;
 	}
 
-	return .None;
+	return nil;
 }
 
 delete_program :: #force_inline proc(program: cl.Program) {
@@ -165,7 +165,7 @@ create_command_queue :: proc(c: ^OpenCL_Context) -> (err: Error) {
 		return .Command_Queue_Allocation_Fail;
 	}
 
-    return .None;
+    return nil;
 }
 
 delete_command_queue :: #force_inline proc(queue: cl.Command_Queue) {
@@ -180,7 +180,7 @@ compile_kernel :: proc(c: ^OpenCL_Context, name: cstring) -> (kernel: cl.Kernel,
 		return nil, .Kernel_Creation_Fail;
 	}
 
-	return kernel, .None;
+	return kernel, nil;
 }
 
 delete_kernel :: #force_inline proc(kernel: cl.Kernel) {
@@ -244,7 +244,7 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
             fmt.sbprintln(b, "\t\tExtensions:");
             exts, err := strings.split(cast(string)log_msg, " ");
             defer delete(exts);
-            assert(err == .None);
+            assert(err == nil);
             for ext in exts do fmt.sbprintfln(b, "\t\t\t%s", ext);
         }
     }

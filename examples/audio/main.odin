@@ -8,10 +8,10 @@ import "core:strings"
 
 import cl "shared:opencl"
 import mu "vendor:microui"
-import rl "vendor:raylib"
 
 Error :: union #shared_nil {
     OpenCL_Error,
+    UI_Error
 }
 
 main :: proc() {
@@ -54,18 +54,14 @@ main :: proc() {
     }
     defer os.close(curr_dir_handle);
 
-    wave_cache := make(map[string]rl.Wave);
-    active_wave: ^rl.Wave = nil;
-    wave_index: c.int = 0;
-    wave_playing := false;
+    wave_cache := make(map[string]rawptr);
     defer {
-        for wave_name in wave_cache do rl.UnloadWave(wave_cache[wave_name]);
+        // for wave_name in wave_cache do delete_wave
         delete(wave_cache);
     }
 
-    rl.SetTargetFPS(60);
-    for !rl.WindowShouldClose() {
-        ui_register_mouse_events(&uim);
+    for !uim.should_close {
+        ui_register_events(&uim);
 
         mu.begin(uim.ctx);
         if mu.window(uim.ctx, "Demo", {0, 0, 512, 512}, {.NO_CLOSE}) {
@@ -85,60 +81,8 @@ main :: proc() {
                         defer delete(info_cname);
                         copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
 
-                        active_wave = map_insert(&wave_cache, info.name, rl.LoadWave(cast(cstring)&info_cname[0]));
-                    } else do active_wave = wave;
-
-                    rl.PlayAudioStream(uim.audio_stream);
-                    wave_playing = true;
-
-                    //for i := 0; i < 40; i += 1 do log.errorf("Data: %d/%f", (cast([^]c.short)active_wave.data)[44100+i], (cast([^]c.float)active_wave.data)[44100+i]);
-                    //unreachable();
-                    if active_wave != nil {
-                        log.infof("Wave info - Sample rate: %d, Sample size: %d, Channels: %d, Frame count: %d",
-                            active_wave.sampleRate,
-                            active_wave.sampleSize,
-                            active_wave.channels,
-                            active_wave.frameCount);
+                        map_insert(&wave_cache, info.name, nil);
                     }
-                }
-            }
-
-            if active_wave != nil && rl.IsAudioStreamProcessed(uim.audio_stream) {
-                samples_offset := u32(wave_index * uim.audio_buffer_size);
-                if cast(f32)uim.audio_stream.sampleRate/60.0 > cast(f32)uim.audio_buffer_size {
-                    // increase the number of updates per frame
-                    // max_i := cast(c.int)(44100.0/(uim.audio_buffer_size*60.0));
-                    // for i := c.int(0); i < max_i; i += 1 {
-                    //     if samples_offset > active_wave.frameCount {
-                    //         rl.StopAudioStream(uim.audio_stream);
-                    //         wave_index = 0;
-                    //         wave_playing = false;
-                    //         active_wave = nil;
-                    //         break;
-                    //     }
-                    //     rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
-                    //     samples_offset += cast(u32)uim.audio_buffer_size;
-                    // }
-                    // wave_index += max_i;
-                    unreachable();
-                } else {
-                    // decrease the number of frame times
-                    @static frame_skip: i32;
-                    frame_skip = max(0, i32((cast(f32)uim.audio_buffer_size*60.0)/44100.0)-3);
-                    @static frames_skipped: i32;
-                    if frames_skipped >= frame_skip {
-                        if samples_offset > active_wave.frameCount {
-                            rl.StopAudioStream(uim.audio_stream);
-                            wave_index = 0;
-                            wave_playing = false;
-                            active_wave = nil;
-                        } else {
-                            rl.UpdateAudioStream(uim.audio_stream, &(cast([^]c.short)active_wave.data)[samples_offset], uim.audio_buffer_size);
-                            samples_offset += cast(u32)uim.audio_buffer_size;
-                            wave_index += 1;
-                        }
-                        frames_skipped = 0;
-                    } else do frames_skipped += 1;
                 }
             }
 
@@ -149,7 +93,6 @@ main :: proc() {
             if .SUBMIT in mu.button(uim.ctx, "Submit") {
                 // do OpenCL work here ?
                 // and update audio stream
-                // rl.UpdateAudioStream(uim.audio_stream, &wave_samples[0], wave_framecount);
             }
         }
         mu.end(uim.ctx);
