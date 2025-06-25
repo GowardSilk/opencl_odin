@@ -8,31 +8,37 @@ import "core:strings"
 
 import cl "shared:opencl"
 import mu "vendor:microui"
+import ma "vendor:miniaudio"
 
 Error :: union #shared_nil {
     OpenCL_Error,
-    UI_Error
+    UI_Error,
+    ma.result
+}
+
+notify_error :: proc($err_msg: string, err: Error) {
+    log.errorf("%s; Error: %v", err_msg, err);
+    os.exit(-1);
 }
 
 main :: proc() {
     context.logger = log.create_console_logger();
 
     opencl: OpenCL_Context;
+    am: ^Audio_Manager;
     uim: UI_Manager;
     err: Error;
 
     opencl, err = init_cl_context();
-    if err != nil {
-        log.errorf("Failed to initialize OpenCL Context! Error: %v", err);
-        return;
-    }
+    if err != nil do notify_error("Failed to initialize OpenCL Context", err);
     defer delete_cl_context(&opencl);
 
+    am, err = init_audio_manager(&opencl);
+    if err != nil do notify_error("Failed to initialize Audio manager", err);
+    defer delete_audio_device(am);
+
     uim, err = init_ui_manager();
-    if err != nil {
-        log.errorf("Failed to initialize ui manager! Error: %v", err);
-        return;
-    }
+    if err != nil do notify_error("Failed to initialize UI manager", err);
     defer delete_ui_manager(&uim);
 
     curr_dir_handle: os.Handle;
@@ -47,18 +53,9 @@ main :: proc() {
         copy_from_string(curr_dir[len(curr_dir_base):], "/audio");
 
         curr_dir_handle, os_err = os.open(cast(string)curr_dir);
-        if os_err != nil {
-            log.errorf("Failed to open current directory handle! Error: %v", os_err);
-            return;
-        }
+        if os_err != nil do notify_error("Failed to open current directory handle", err);
     }
     defer os.close(curr_dir_handle);
-
-    wave_cache := make(map[string]rawptr);
-    defer {
-        // for wave_name in wave_cache do delete_wave
-        delete(wave_cache);
-    }
 
     for !uim.should_close {
         ui_register_events(&uim);
@@ -67,22 +64,28 @@ main :: proc() {
         if mu.window(uim.ctx, "Demo", {0, 0, 512, 512}, {.NO_CLOSE}) {
             // query all files and play sound files
             infos, read_err := os.read_dir(curr_dir_handle, -1);
-            if read_err != nil {
-                log.errorf("Failed to query files in `audio` directory! Error: %v", read_err);
-                return;
-            }
+            if read_err != nil do notify_error("Failed to query files in `audio` directory", err);
             defer os.file_info_slice_delete(infos);
 
             for info in infos do if is_sound_file(info) {
                 if .SUBMIT in mu.button(uim.ctx, info.name) {
-                    wave, ok := &wave_cache[info.name]; 
-                    if !ok {
-                        info_cname := make([]byte, len(info.name) + size_of("audio/") + 1);
-                        defer delete(info_cname);
-                        copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
+                    info_cname := make([]byte, len(info.name) + size_of("audio/") + 1);
+                    defer delete(info_cname);
+                    copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
 
-                        map_insert(&wave_cache, info.name, nil);
+                    if am.decoder.frames != nil {
+                        ma.free(am.decoder.frames, nil);
+                        am.decoder.frames_count = 0;
                     }
+
+                    frames_out := cast(rawptr)am.decoder.frames;
+                    res := ma.decode_file(cast(cstring)&info_cname[0],
+                        &am.decoder.config,
+                        &am.decoder.frames_count,
+                        &frames_out,
+                    );
+                    if res != .SUCCESS do notify_error("Failed to decode selected file", res);
+                    am.decoder.frames = cast([^]c.short)frames_out;
                 }
             }
 
