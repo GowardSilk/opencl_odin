@@ -37,10 +37,10 @@ OpenCL_Context :: struct {
     program:    cl.Program,
     queue:      cl.Command_Queue,
 
-    audio_buffer: cl.Mem,
+    audio_buffer_in: cl.Mem,
+    audio_buffer_out: cl.Mem,
 
     kernels:    []OpenCL_Context_Kernel,
-    operations: [Audio_Operation]bool,
 }
 
 init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
@@ -69,7 +69,8 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     delete_context(c^._context);
     delete_program(c^.program);
     delete_command_queue(c^.queue);
-    delete_buffer(c^.audio_buffer);
+    delete_buffer(c^.audio_buffer_in);
+    delete_buffer(c^.audio_buffer_out);
     for kernel in c^.kernels do delete_kernel(kernel.kernel);
     delete(c^.kernels);
 }
@@ -138,19 +139,17 @@ delete_program :: #force_inline proc(program: cl.Program) {
     cl.ReleaseProgram(program);
 }
 
-create_buffer :: proc(c: ^OpenCL_Context, mem: $T, mem_sz: uint) -> (err: Error) {
+create_buffer :: proc(c: ^OpenCL_Context, mem: $T, mem_sz: uint, mem_flags: cl.Mem_Flags = cl.MEM_COPY_HOST_PTR) -> (buf: cl.Mem, err: Error) {
     mem := mem;
 
     ret: cl.Int;
-    buf := cl.CreateBuffer(c^._context, cl.MEM_COPY_HOST_PTR, mem_sz, cast(rawptr)&mem, &ret);
+    buf = cl.CreateBuffer(c^._context, mem_flags, mem_sz, cast(rawptr)&mem, &ret);
     if ret != cl.SUCCESS {
 		cl_context_errlog(c, "Failed to create output buffer!", ret);
-        return .Buffer_Allocation_Fail;
+        return nil, .Buffer_Allocation_Fail;
     }
 
-    append(&c^.buffers, buf);
-
-    return nil;
+    return buf, nil;
 }
 
 delete_buffer :: #force_inline proc(buf: cl.Mem) {

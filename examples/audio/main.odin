@@ -4,6 +4,7 @@ import "core:c"
 import "core:os"
 import "core:log"
 import "core:mem"
+import "core:sync"
 import "core:strings"
 
 import cl "shared:opencl"
@@ -24,16 +25,11 @@ notify_error :: proc($err_msg: string, err: Error) {
 main :: proc() {
     context.logger = log.create_console_logger();
 
-    opencl: OpenCL_Context;
     am: ^Audio_Manager;
     uim: UI_Manager;
     err: Error;
 
-    opencl, err = init_cl_context();
-    if err != nil do notify_error("Failed to initialize OpenCL Context", err);
-    defer delete_cl_context(&opencl);
-
-    am, err = init_audio_manager(&opencl);
+    am, err = init_audio_manager();
     if err != nil do notify_error("Failed to initialize Audio manager", err);
     defer delete_audio_device(am);
 
@@ -73,30 +69,56 @@ main :: proc() {
                     defer delete(info_cname);
                     copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
 
-                    if am.decoder.frames != nil {
-                        ma.free(am.decoder.frames, nil);
-                        am.decoder.frames_count = 0;
-                    }
+                    frames_config: ma.decoder_config;
 
-                    frames_out := cast(rawptr)am.decoder.frames;
+                    // check if any sounds are still playing
+                    // if so, delete them
+                    sync.mutex_lock(&am.guarded_decoder.guard);
+                    {
+                        if am.guarded_decoder.decoder.frames != nil {
+                            ma.free(am.guarded_decoder.decoder.frames, nil);
+                            am.guarded_decoder.decoder.frames_count = 0;
+                            am.guarded_decoder.decoder.frames = nil;
+                        }
+                        frames_config = am.guarded_decoder.decoder.config;
+                    }
+                    sync.mutex_unlock(&am.guarded_decoder.guard);
+
+                    // decode the file
+                    // note: this actually need not be locked, `frames_out' is just an out ptr
+                    // the pPCMframes is handled internally and allocated anew, so this is "thread-safe"
+                    frames_out: rawptr;
+                    frames_count: u64;
                     res := ma.decode_file(cast(cstring)&info_cname[0],
-                        &am.decoder.config,
-                        &am.decoder.frames_count,
+                        &frames_config,
+                        &frames_count,
                         &frames_out,
                     );
                     if res != .SUCCESS do notify_error("Failed to decode selected file", res);
-                    am.decoder.frames = cast([^]c.short)frames_out;
+                    assert(frames_out != nil);
+
+                    // play the new sound
+                    sync.mutex_lock(&am.guarded_decoder.guard);
+                    {
+                        am.guarded_decoder.decoder.frames = cast([^]c.short)frames_out;
+                        am.guarded_decoder.decoder.frames_count = frames_count;
+                        am.guarded_decoder.decoder.index = 0;
+                    }
+                    sync.mutex_unlock(&am.guarded_decoder.guard);
                 }
             }
 
+            /*
             mu.checkbox(uim.ctx, "Distortion", &opencl.operations[.Distortion]);
             mu.checkbox(uim.ctx, "Echo", &opencl.operations[.Echo]);
             mu.checkbox(uim.ctx, "FFT", &opencl.operations[.FFT]);
+            */
 
             if .SUBMIT in mu.button(uim.ctx, "Submit") {
-                // do OpenCL work here ?
-                // and update audio stream
+                // no need for a lock, this can "race" however it wants
+                am.guarded_decoder.decoder.launch_kernel = true;
             }
+            if .SUBMIT in mu.button(uim.ctx, "Clear") do am.guarded_decoder.decoder.launch_kernel = false;
         }
         mu.end(uim.ctx);
 
