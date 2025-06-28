@@ -53,6 +53,7 @@ main :: proc() {
     }
     defer os.close(curr_dir_handle);
 
+    operations: [Audio_Operation]bool;
     for !uim.should_close {
         ui_register_events(&uim);
 
@@ -108,11 +109,12 @@ main :: proc() {
                 }
             }
 
-            /*
-            mu.checkbox(uim.ctx, "Distortion", &opencl.operations[.Distortion]);
-            mu.checkbox(uim.ctx, "Echo", &opencl.operations[.Echo]);
-            mu.checkbox(uim.ctx, "FFT", &opencl.operations[.FFT]);
-            */
+            mu.checkbox(uim.ctx, "Distortion", &operations[.Distortion]);
+            sync.atomic_store_explicit(&am.settings.distortion, operations[.Distortion], .Relaxed);
+            mu.checkbox(uim.ctx, "Echo", &operations[.Echo]);
+            sync.atomic_store_explicit(&am.settings.echo, operations[.Echo], .Relaxed);
+            // mu.checkbox(uim.ctx, "FFT", &operations[.FFT]);
+            // sync.atomic_store_explicit(&am.settings.fft, operations[.FFT], .Relaxed);
 
             if .SUBMIT in mu.button(uim.ctx, "Submit") {
                 // no need for a lock, this can "race" however it wants

@@ -47,14 +47,20 @@ init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
     @(static)
     kernels      := [?]cstring {
         AOK_DISTORTION,
+        AOK_ECHO,
+        // AOK_FFT,
     };
     @(static)
     kernel_sizes := [?]uint {
         AOK_DISTORTION_SIZE,
+        AOK_ECHO_SIZE,
+        // AOK_FFT_SIZE,
     };
     @(static)
     kernel_names := [?]#type struct {name:cstring,type:Audio_Operation} {
         {name=AOK_DISTORTION_NAME,type=.Distortion},
+        {name=AOK_ECHO_NAME,type=.Echo},
+        // {name=AOK_FFT_NAME,type=.FFT},
     };
 
     pick_platform(&c) or_return;

@@ -34,6 +34,7 @@ Audio_Manager :: struct {
     device: ma.device,
     guarded_decoder: ^Audio_Decoder_Guard,
     opencl: ^OpenCL_Context,
+    settings: Audio_Operation_Settings,
 }
 
 init_decoder :: #force_inline proc(am: ^Audio_Manager) -> ma.result {
@@ -117,9 +118,9 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
 
         // TODO(GowardSilk): make sure we have some kind of Error pipeline established
         // for the main thread!
+        am := cast(^Audio_Manager)(device.pUserData);
         frames_to_copy_sz := cast(c.size_t)(frames_to_copy * sample_size * channels);
         {
-            am := cast(^Audio_Manager)(device.pUserData);
             sync.mutex_lock(&am^.guarded_decoder.guard);
             src := &am^.guarded_decoder.decoder.frames[decoder.index * channels];
 
@@ -137,29 +138,75 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
             sync.mutex_unlock(&am^.guarded_decoder.guard);
         }
 
-        ret := cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), &opencl^.audio_buffer_in);
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+        input_buffer := &opencl^.audio_buffer_in;
+        output_buffer := &opencl^.audio_buffer_out;
+        first_kernel := true;
 
-        assert(opencl^.audio_buffer_out != nil);
-        ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), &opencl^.audio_buffer_out);
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+        if am^.settings.distortion {
+            if first_kernel == true do first_kernel = false;
+            else {/* copy output_buffer -> input_buffer */}
 
-        assert(len(opencl^.kernels) == 1); // distortion
-        ret = cl.EnqueueNDRangeKernel(
+            ret := cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), input_buffer);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), output_buffer);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            ret = cl.EnqueueNDRangeKernel(
+                opencl^.queue,
+                opencl^.kernels[0].kernel,
+                1,
+                nil,
+                &frames_to_copy_sz,
+                nil,
+                0,
+                nil,
+                nil
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
+        }
+
+        if am^.settings.echo {
+            if first_kernel == true do first_kernel = false;
+            else {
+                /* copy output_buffer -> input_buffer */
+                ret := cl.EnqueueCopyBuffer(opencl^.queue, output_buffer^, input_buffer^, 0, 0, frames_to_copy_sz, 0, nil, nil);
+                fmt.assertf(ret == cl.SUCCESS, "Failed to copy output_buffer -> input_buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
+            }
+
+            ret := cl.SetKernelArg(opencl^.kernels[1].kernel, 0, size_of(cl.Mem), input_buffer); // input
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 1, size_of(cl.Mem), output_buffer); // output
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            alpha: c.float = 0.3;
+            ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 2, size_of(c.float), &alpha); // alpha
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            dt: cl.Uint = device.sampleRate / 2;
+            ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 3, size_of(cl.Uint), &dt); // dt
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            ret = cl.EnqueueNDRangeKernel(
+                opencl^.queue,
+                opencl^.kernels[1].kernel,
+                1,
+                nil,
+                &frames_to_copy_sz,
+                nil,
+                0,
+                nil,
+                nil
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
+        }
+
+        if am^.settings.fft do assert(false, "TODO(GowardSilk): Implement FFT!");
+
+        ret := cl.EnqueueReadBuffer(
             opencl^.queue,
-            opencl^.kernels[0].kernel,
-            1,
-            nil,
-            &frames_to_copy_sz,
-            nil,
-            0,
-            nil,
-            nil
-        );
-        fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %v/%s", ret, err_to_name(ret));
-        assert(cl.EnqueueReadBuffer(
-            opencl^.queue,
-            opencl^.audio_buffer_out,
+            output_buffer^,
             cl.TRUE,
             0,
             frames_to_copy_sz,
@@ -167,9 +214,9 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
             0,
             nil,
             nil
-        ) == cl.SUCCESS);
+        );
+        fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue read buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-        am := cast(^Audio_Manager)(device.pUserData);
         sync.mutex_lock(&am^.guarded_decoder.guard);
         am^.guarded_decoder.decoder.index += frames_to_copy;
         sync.mutex_unlock(&am^.guarded_decoder.guard);
@@ -246,11 +293,14 @@ Audio_Operation :: enum {
     FFT,
 }
 
-Audio_Operation_Queue :: struct #no_copy {
-    /* TODO(GowardSilk): instead of saving an enum array of `Audio_Operation`, we should make a queue in which the kernels fuse themselves together upon read ????*/
+Audio_Operation_Settings :: struct #no_copy {
+    distortion: bool,
+    echo: bool,
+    fft: bool,
 }
 
 // [A]udio_[O]peration_[K]ernel
+
 AOK_DISTORTION: cstring: `
     __kernel void distortion(
         __global short* input,
@@ -262,3 +312,38 @@ AOK_DISTORTION: cstring: `
 `;
 AOK_DISTORTION_SIZE: uint: len(AOK_DISTORTION);
 AOK_DISTORTION_NAME: cstring: "distortion";
+
+AOK_ECHO: cstring: `
+    // I(x) + I(x - dt)*alpha; alpha is cca. <0.3; 0.7>
+    __kernel void echo(
+        __global short* input,
+        __global short* output,
+        const float alpha,
+        const uint dt)
+    {
+        int idx = get_global_id(0);
+        short current = input[idx];
+        short echoed = 0;
+        
+        if (idx >= dt)
+            echoed = (short)(alpha * (float)input[idx - dt]);
+
+        // note: len(input) == len(output)
+        current += echoed;
+        output[idx] = clamp(current, (short)-32768, (short)32767);
+    }
+`;
+AOK_ECHO_SIZE: uint: len(AOK_ECHO);
+AOK_ECHO_NAME: cstring: "echo";
+
+AOK_FFT: cstring: `
+    __kernel void fft(
+        __global short* input,
+        __global short* output)
+    {
+        int idx = get_global_id(0);
+        output[idx] = abs(input[idx]);
+    }
+`;
+AOK_FFT_SIZE: uint: len(AOK_FFT);
+AOK_FFT_NAME: cstring: "fft";
