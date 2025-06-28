@@ -60,6 +60,8 @@ delete_decoder :: #force_inline proc(am: ^Audio_Manager) {
     free(am^.guarded_decoder);
 }
 
+MAX_DEVICE_DATA_FRAME_COUNT :: 4096;
+
 device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, frame_count_u32: u32) {
     frame_count := u64(frame_count_u32);
     channels := u64(device.playback.channels);
@@ -94,6 +96,25 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
     dst := cast([^]c.short)output;
 
     if decoder.launch_kernel {
+        if opencl^.audio_buffer_in == nil {
+            // Initialize input/output audio buffers
+            // we can do this preemptively since we are relying on static max frame size (viz. MAX_DEVICE_DATA_FRAME_COUNT)
+            ret: cl.Int;
+            opencl^.audio_buffer_in = cl.CreateBuffer(
+                opencl^._context,
+                cl.MEM_ALLOC_HOST_PTR | cl.MEM_READ_ONLY,
+                MAX_DEVICE_DATA_FRAME_COUNT * cast(c.size_t)(sample_size * channels),
+                nil,
+                &ret
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+            assert(opencl^.audio_buffer_in != nil);
+
+            opencl^.audio_buffer_out = cl.CreateBuffer(opencl^._context, cl.MEM_WRITE_ONLY, MAX_DEVICE_DATA_FRAME_COUNT * cast(c.size_t)(sample_size * channels), nil, &ret);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+            assert(opencl^.audio_buffer_out != nil);
+        }
+
         // TODO(GowardSilk): make sure we have some kind of Error pipeline established
         // for the main thread!
         frames_to_copy_sz := cast(c.size_t)(frames_to_copy * sample_size * channels);
@@ -101,14 +122,10 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
             am := cast(^Audio_Manager)(device.pUserData);
             sync.mutex_lock(&am^.guarded_decoder.guard);
             src := &am^.guarded_decoder.decoder.frames[decoder.index * channels];
-            assert(src != nil && frames_to_copy_sz != 0);
 
-            //opencl^.audio_buffer_in, err = create_buffer(opencl, src, frames_to_copy_sz, cl.MEM_COPY_HOST_PTR | cl.MEM_READ_ONLY);
+            assert(opencl^.audio_buffer_in != nil && frames_to_copy_sz <= MAX_DEVICE_DATA_FRAME_COUNT * cast(c.size_t)(sample_size * channels));
+
             ret: cl.Int;
-            opencl^.audio_buffer_in = cl.CreateBuffer(opencl^._context, cl.MEM_ALLOC_HOST_PTR | cl.MEM_READ_ONLY, frames_to_copy_sz, nil, &ret);
-            fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
-            assert(opencl^.audio_buffer_in != nil);
-
             buf_map := cl.EnqueueMapBuffer(opencl^.queue, opencl^.audio_buffer_in, cl.TRUE, cl.MAP_WRITE, 0, frames_to_copy_sz, 0, nil, nil, &ret);
             fmt.assertf(ret == cl.SUCCESS, "Failed to map buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
 
@@ -120,14 +137,10 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
             sync.mutex_unlock(&am^.guarded_decoder.guard);
         }
 
-        ret: cl.Int;
-        opencl^.audio_buffer_out = cl.CreateBuffer(opencl^._context, cl.MEM_WRITE_ONLY, frames_to_copy_sz, nil, &ret);
-        fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
-        assert(opencl^.audio_buffer_out != nil);
-
-        ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), &opencl^.audio_buffer_in);
+        ret := cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), &opencl^.audio_buffer_in);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
+        assert(opencl^.audio_buffer_out != nil);
         ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), &opencl^.audio_buffer_out);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
@@ -160,10 +173,6 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
         sync.mutex_lock(&am^.guarded_decoder.guard);
         am^.guarded_decoder.decoder.index += frames_to_copy;
         sync.mutex_unlock(&am^.guarded_decoder.guard);
-
-        cl.ReleaseMemObject(opencl^.audio_buffer_in);
-        cl.ReleaseMemObject(opencl^.audio_buffer_out);
-
     } else {
         // increment the wave buffer's index
         // and copy the final contents from wave buffer
@@ -185,11 +194,12 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
 
 init_audio_device :: proc(am: ^Audio_Manager) -> ma.result {
     device_config := ma.device_config_init(.playback);
-    device_config.playback.format   = .s16;
-    device_config.playback.channels = 0;
-    device_config.sampleRate        = 0;
-    device_config.dataCallback      = device_data_proc;
-    device_config.pUserData         = am;
+    device_config.playback.format    = .s16;
+    device_config.playback.channels  = 0;
+    device_config.sampleRate         = 0;
+    device_config.dataCallback       = device_data_proc;
+    device_config.pUserData          = am;
+    device_config.periodSizeInFrames = MAX_DEVICE_DATA_FRAME_COUNT;
 
     ma.device_init(nil, &device_config, &am.device) or_return;
     ma.device_start(&am.device) or_return;
