@@ -3,8 +3,8 @@ package audio;
 import "base:runtime"
 
 import "core:c"
+import "core:fmt"
 import "core:mem"
-import "core:strings"
 
 import cl "shared:opencl"
 import ma "vendor:miniaudio"
@@ -96,19 +96,43 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
     if decoder.launch_kernel {
         // TODO(GowardSilk): make sure we have some kind of Error pipeline established
         // for the main thread!
-        assert(cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), opencl^.audio_buffer_out) == cl.SUCCESS);
-        frames_to_copy_sz := cast(c.size_t)(frames_to_copy * sample_size);
+        frames_to_copy_sz := cast(c.size_t)(frames_to_copy * sample_size * channels);
         {
             am := cast(^Audio_Manager)(device.pUserData);
             sync.mutex_lock(&am^.guarded_decoder.guard);
             src := &am^.guarded_decoder.decoder.frames[decoder.index * channels];
-            opencl^.audio_buffer_in,  _ = create_buffer(opencl, src, frames_to_copy_sz, cl.MEM_COPY_HOST_PTR | cl.MEM_READ_ONLY);
+            assert(src != nil && frames_to_copy_sz != 0);
+
+            //opencl^.audio_buffer_in, err = create_buffer(opencl, src, frames_to_copy_sz, cl.MEM_COPY_HOST_PTR | cl.MEM_READ_ONLY);
+            ret: cl.Int;
+            opencl^.audio_buffer_in = cl.CreateBuffer(opencl^._context, cl.MEM_ALLOC_HOST_PTR | cl.MEM_READ_ONLY, frames_to_copy_sz, nil, &ret);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+            assert(opencl^.audio_buffer_in != nil);
+
+            buf_map := cl.EnqueueMapBuffer(opencl^.queue, opencl^.audio_buffer_in, cl.TRUE, cl.MAP_WRITE, 0, frames_to_copy_sz, 0, nil, nil, &ret);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to map buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            mem.copy(buf_map, src, auto_cast frames_to_copy_sz);
+
+            assert(
+                cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_in, buf_map, 0, nil, nil) == cl.SUCCESS);
+
             sync.mutex_unlock(&am^.guarded_decoder.guard);
         }
-        opencl^.audio_buffer_out, _ = create_buffer(opencl, dst, frames_to_copy_sz, cl.MEM_WRITE_ONLY);
+
+        ret: cl.Int;
+        opencl^.audio_buffer_out = cl.CreateBuffer(opencl^._context, cl.MEM_WRITE_ONLY, frames_to_copy_sz, nil, &ret);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
+        assert(opencl^.audio_buffer_out != nil);
+
+        ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), &opencl^.audio_buffer_in);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), &opencl^.audio_buffer_out);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
         assert(len(opencl^.kernels) == 1); // distortion
-        assert(cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), opencl^.audio_buffer_in) == cl.SUCCESS);
-        assert(cl.EnqueueNDRangeKernel(
+        ret = cl.EnqueueNDRangeKernel(
             opencl^.queue,
             opencl^.kernels[0].kernel,
             1,
@@ -118,7 +142,8 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
             0,
             nil,
             nil
-        ) == cl.SUCCESS);
+        );
+        fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %v/%s", ret, err_to_name(ret));
         assert(cl.EnqueueReadBuffer(
             opencl^.queue,
             opencl^.audio_buffer_out,
@@ -135,6 +160,9 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
         sync.mutex_lock(&am^.guarded_decoder.guard);
         am^.guarded_decoder.decoder.index += frames_to_copy;
         sync.mutex_unlock(&am^.guarded_decoder.guard);
+
+        cl.ReleaseMemObject(opencl^.audio_buffer_in);
+        cl.ReleaseMemObject(opencl^.audio_buffer_out);
 
     } else {
         // increment the wave buffer's index
@@ -215,11 +243,11 @@ Audio_Operation_Queue :: struct #no_copy {
 // [A]udio_[O]peration_[K]ernel
 AOK_DISTORTION: cstring: `
     __kernel void distortion(
-        __global read_only short* input,
-        __global write_only short* output)
+        __global short* input,
+        __global short* output)
     {
         int idx = get_global_id(0);
-        output[idx] = tanh(input[idx]);
+        output[idx] = abs(input[idx]);
     }
 `;
 AOK_DISTORTION_SIZE: uint: len(AOK_DISTORTION);

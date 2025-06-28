@@ -45,11 +45,17 @@ OpenCL_Context :: struct {
 
 init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
     @(static)
-    kernels      := [?]cstring {};
+    kernels      := [?]cstring {
+        AOK_DISTORTION,
+    };
     @(static)
-    kernel_sizes := [?]uint {};
+    kernel_sizes := [?]uint {
+        AOK_DISTORTION_SIZE,
+    };
     @(static)
-    kernel_names := [?]#type struct {name:cstring,type:Audio_Operation} {};
+    kernel_names := [?]#type struct {name:cstring,type:Audio_Operation} {
+        {name=AOK_DISTORTION_NAME,type=.Distortion},
+    };
 
     pick_platform(&c) or_return;
     pick_device(&c) or_return;
@@ -139,11 +145,10 @@ delete_program :: #force_inline proc(program: cl.Program) {
     cl.ReleaseProgram(program);
 }
 
-create_buffer :: proc(c: ^OpenCL_Context, mem: $T, mem_sz: uint, mem_flags: cl.Mem_Flags = cl.MEM_COPY_HOST_PTR) -> (buf: cl.Mem, err: Error) {
-    mem := mem;
-
+create_buffer :: proc(c: ^OpenCL_Context, mem: ^$T, mem_sz: uint, mem_flags: cl.Mem_Flags = cl.MEM_COPY_HOST_PTR) -> (buf: cl.Mem, err: Error) {
     ret: cl.Int;
-    buf = cl.CreateBuffer(c^._context, mem_flags, mem_sz, cast(rawptr)&mem, &ret);
+    buf = cl.CreateBuffer(c^._context, mem_flags, mem_sz, cast(rawptr)mem, &ret);
+    fmt.assertf(ret == cl.SUCCESS, "Failed to create output buffer(%v; %v)! %v; %s; %s", mem, (cast([^]i16)mem)[0], ret, err_to_name(ret));
     if ret != cl.SUCCESS {
 		cl_context_errlog(c, "Failed to create output buffer!", ret);
         return nil, .Buffer_Allocation_Fail;
