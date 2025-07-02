@@ -24,11 +24,6 @@ OpenCL_Error :: enum {
     Kernel_Creation_Fail,
 }
 
-OpenCL_Context_Kernel :: struct {
-    kernel: cl.Kernel,
-    type: Audio_Operation,
-}
-
 /** @brief contains the data for a whole OpenCL pipeline */
 OpenCL_Context :: struct {
     platform:   cl.Platform_ID,
@@ -41,40 +36,14 @@ OpenCL_Context :: struct {
     audio_buffer_out: cl.Mem,
     audio_buffer_out_host: []c.short, /**< array of latest processed frames */
     eat_pos: u64, /**< how much data has already been read from audio_buffer_out_host by device_data_proc */
-
-    kernels:    []OpenCL_Context_Kernel,
 }
 
 init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
-    @(static)
-    kernels      := [?]cstring {
-        AOK_DISTORTION,
-        AOK_ECHO,
-        // AOK_FFT,
-    };
-    @(static)
-    kernel_sizes := [?]uint {
-        AOK_DISTORTION_SIZE,
-        AOK_ECHO_SIZE,
-        // AOK_FFT_SIZE,
-    };
-    @(static)
-    kernel_names := [?]#type struct {name:cstring,type:Audio_Operation} {
-        {name=AOK_DISTORTION_NAME,type=.Distortion},
-        {name=AOK_ECHO_NAME,type=.Echo},
-        // {name=AOK_FFT_NAME,type=.FFT},
-    };
-
     pick_platform(&c) or_return;
     pick_device(&c) or_return;
     create_context(&c) or_return;
-    assemble_program(&c, kernels[:], kernel_sizes[:]) or_return;
+    assemble_program(&c, AOK[:], AOK_SIZES[:]) or_return;
     create_command_queue(&c) or_return;
-    c.kernels = make([]OpenCL_Context_Kernel, len(kernel_names));
-    for kernel, index in kernel_names {
-        c.kernels[index].kernel = compile_kernel(&c, kernel.name) or_return; 
-        c.kernels[index].type = kernel.type;
-    }
     c.eat_pos = 0;
 
     return c, nil;
@@ -88,8 +57,6 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     if c^.audio_buffer_out != nil do delete_buffer(c^.audio_buffer_out);
     if c^.audio_buffer_out_host != nil do delete(c^.audio_buffer_out_host);
     c^.eat_pos = 0;
-    for kernel in c^.kernels do delete_kernel(kernel.kernel);
-    delete(c^.kernels);
 }
 
 pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
@@ -363,19 +330,6 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
     //    }
     //}
 
-    cl_context_log_kernels :: proc(c: ^OpenCL_Context, b: ^strings.Builder) {
-        strings.write_string(b, "\tKernels:\n");
-        for kernel in c^.kernels {
-            log_sz: uint;
-            if ret := cl.GetKernelInfo(kernel.kernel, cl.KERNEL_FUNCTION_NAME, 0, nil, &log_sz); ret == cl.SUCCESS {
-                name := make([]byte, log_sz);
-                defer delete(name);
-                cl.GetKernelInfo(kernel.kernel, cl.KERNEL_FUNCTION_NAME, log_sz, &name[0], nil);
-                fmt.sbprintfln(b, "\t  - %s", cast(string)name);
-            }
-        }
-    }
-
     builder: strings.Builder;
     strings.builder_init(&builder);
 
@@ -387,7 +341,6 @@ cl_context_log :: proc(c: ^OpenCL_Context, loc := #caller_location) -> string {
     if c^.program != nil      do cl_context_log_program(c, &builder);
     if c^.queue != nil        do cl_context_log_queue(c, &builder);
     //if len(c^.buffers) != 0   do cl_context_log_buffers(c, &builder);
-    if len(c^.kernels) != 0   do cl_context_log_kernels(c, &builder);
 
     return strings.to_string(builder);
 }

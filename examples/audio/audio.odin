@@ -34,7 +34,7 @@ Audio_Manager :: struct {
     device: ma.device,
     guarded_decoder: ^Audio_Decoder_Guard,
     opencl: ^OpenCL_Context,
-    settings: Audio_Operation_Settings,
+    operations: AOK_Operations,
 }
 
 delete_wavebuffer :: #force_inline proc(wb: ^Wave_Buffer) {
@@ -192,19 +192,30 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
     output_buffer := &opencl^.audio_buffer_out;
     first_kernel := true;
 
-    if am^.settings.distortion {
+    deferred_compile_kernel :: #force_inline proc(opencl: ^OpenCL_Context, kernel: ^cl.Kernel, name: cstring) {
+        /* deferred kernel initialization */
+        if kernel^ == nil {
+            err: Error;
+            kernel^, err = compile_kernel(opencl, AOK_DISTORTION_NAME);
+            fmt.assertf(err == nil, "Failed to compile %s kernel!", AOK_DISTORTION_NAME);
+        }
+    }
+
+    if am^.operations.distortion.base.enabled {
+        deferred_compile_kernel(opencl, &am^.operations.distortion.base.kernel, AOK_DISTORTION_NAME);
+
         if first_kernel == true do first_kernel = false;
         else { unreachable(/* copy output_buffer -> input_buffer */); }
 
-        ret := cl.SetKernelArg(opencl^.kernels[0].kernel, 0, size_of(cl.Mem), input_buffer);
+        ret := cl.SetKernelArg(am^.operations.distortion.base.kernel, 0, size_of(cl.Mem), input_buffer);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-        ret = cl.SetKernelArg(opencl^.kernels[0].kernel, 1, size_of(cl.Mem), output_buffer);
+        ret  = cl.SetKernelArg(am^.operations.distortion.base.kernel, 1, size_of(cl.Mem), output_buffer);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         ret = cl.EnqueueNDRangeKernel(
             opencl^.queue,
-            opencl^.kernels[0].kernel,
+            am^.operations.distortion.base.kernel,
             1,
             nil,
             &buffer_size,
@@ -215,45 +226,6 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         );
         fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
     }
-
-    if am^.settings.echo {
-        if first_kernel == true do first_kernel = false;
-        else {
-            /* copy output_buffer -> input_buffer */
-            ret := cl.EnqueueCopyBuffer(opencl^.queue, output_buffer^, input_buffer^, 0, 0, buffer_size, 0, nil, nil);
-            fmt.assertf(ret == cl.SUCCESS, "Failed to copy output_buffer -> input_buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
-        }
-
-        ret := cl.SetKernelArg(opencl^.kernels[1].kernel, 0, size_of(cl.Mem), input_buffer); // input
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
-
-        ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 1, size_of(cl.Mem), output_buffer); // output
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
-
-        alpha: c.float = 0.3;
-        ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 2, size_of(c.float), &alpha); // alpha
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
-
-        dt: cl.Uint = device.sampleRate / 2;
-        assert(cast(uint)dt <= buffer_size);
-        ret = cl.SetKernelArg(opencl^.kernels[1].kernel, 3, size_of(cl.Uint), &dt); // dt
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
-
-        ret = cl.EnqueueNDRangeKernel(
-            opencl^.queue,
-            opencl^.kernels[1].kernel,
-            1,
-            nil,
-            &buffer_size,
-            nil,
-            0,
-            nil,
-            nil
-        );
-        fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
-    }
-
-    if am^.settings.fft do assert(false, "TODO(GowardSilk): Implement FFT!");
 
     assert(opencl^.eat_pos == 0);
     ret := cl.EnqueueReadBuffer(
@@ -375,22 +347,23 @@ delete_audio_manager :: proc(am: ^Audio_Manager) {
     delete_opencl(am);
     delete_decoder(am);
 
+    // TODO(GowardSilk): perhaps it would be better to manage the kernels via a separate tracker (like a hash map inside OpenCL_Context with keys being the names of the kernels?)
+    // rather than doing it manually here...
+    if am^.operations.distortion.base.kernel != nil do delete_kernel(am^.operations.distortion.base.kernel);
+
     free(am);
 }
 
-Audio_Operation :: enum {
-    Distortion,
-    Echo,
-    FFT,
-}
-
-Audio_Operation_Settings :: struct #no_copy {
-    distortion: bool,
-    echo: bool,
-    fft: bool,
-}
-
 // [A]udio_[O]peration_[K]ernel
+
+AOK_Operation_Base :: struct #no_copy {
+    kernel: cl.Kernel,
+    enabled: bool,
+}
+
+AOK_Distortion_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+}
 
 AOK_DISTORTION: cstring: `
     __kernel void distortion(
@@ -404,37 +377,422 @@ AOK_DISTORTION: cstring: `
 AOK_DISTORTION_SIZE: uint: len(AOK_DISTORTION);
 AOK_DISTORTION_NAME: cstring: "distortion";
 
-AOK_ECHO: cstring: `
-    // I(x) + I(x - dt)*alpha; alpha is cca. <0.3; 0.7>
-    __kernel void echo(
-        __global short* input,
-        __global short* output,
-        const float alpha,
-        const uint dt)
-    {
-        int idx = get_global_id(0);
-        short current = input[idx];
-        short echoed = 0;
-        
-        if (idx >= dt)
-            echoed = (short)(alpha * (float)input[idx - dt]);
+AOK_Clip_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+}
 
-        // note: len(input) == len(output)
-        current += echoed;
-        output[idx] = clamp(current, (short)-32768, (short)32767);
-    }
-`;
-AOK_ECHO_SIZE: uint: len(AOK_ECHO);
-AOK_ECHO_NAME: cstring: "echo";
-
-AOK_FFT: cstring: `
-    __kernel void fft(
+AOK_CLIP: cstring: `
+    __kernel void clip(
         __global short* input,
         __global short* output)
     {
         int idx = get_global_id(0);
-        output[idx] = abs(input[idx]);
+        
     }
 `;
-AOK_FFT_SIZE: uint: len(AOK_FFT);
-AOK_FFT_NAME: cstring: "fft";
+AOK_CLIP_SIZE: uint: len(AOK_CLIP);
+AOK_CLIP_NAME: cstring: "clip";
+
+AOK_Gain_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    gain:    cl.Float, /**< gain multiplier */
+}
+
+AOK_GAIN: cstring: `
+    __kernel void gain(
+        __global short* input,
+        __global short* output)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_GAIN_SIZE: uint: len(AOK_GAIN);
+AOK_GAIN_NAME: cstring: "gain";
+
+AOK_Pan_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    pan:     cl.Float, /**< -1.0 (left) to 1.0 (right) */
+}
+
+AOK_PAN: cstring: `
+    __kernel void pan(
+        __global short* inputL,
+        __global short* inputR,
+        __global short* outputL,
+        __global short* outputR)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_PAN_SIZE: uint: len(AOK_PAN);
+AOK_PAN_NAME: cstring: "pan";
+
+AOK_Lowpass_IIR_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    cutoff:     cl.Float,
+    resonance:  cl.Float,
+}
+
+AOK_LOWPASS_IIR: cstring: `
+    __kernel void lowpass_iir(
+        __global short* input,
+        __global short* output,
+        __global float* state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_LOWPASS_IIR_SIZE: uint: len(AOK_LOWPASS_IIR);
+AOK_LOWPASS_IIR_NAME: cstring: "lowpass_iir";
+
+AOK_Compress_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    threshold: cl.Float,
+    ratio:     cl.Float,
+    attack:    cl.Float,
+    release:   cl.Float,
+}
+
+AOK_COMPRESS: cstring: `
+    __kernel void compress(
+        __global short* input,
+        __global short* output,
+        __global float* env_state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_COMPRESS_SIZE: uint: len(AOK_COMPRESS);
+AOK_COMPRESS_NAME: cstring: "compress";
+
+AOK_Delay_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    time:     cl.Float, /**< seconds */
+    feedback: cl.Float, /**< 0.0 to 1.0 */
+    mix:      cl.Float, /**< dry/wet mix 0.0 to 1.0 */
+}
+
+AOK_DELAY: cstring: `
+    __kernel void delay(
+        __global short* input,
+        __global short* output,
+        __global short* delay_line)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_DELAY_SIZE: uint: len(AOK_DELAY);
+AOK_DELAY_NAME: cstring: "delay";
+
+
+AOK_Flanger_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    rate:     cl.Float, /**< Hz */
+    depth:    cl.Float, /**< seconds */
+    feedback: cl.Float, /**< -1.0 to 1.0 */
+    mix:      cl.Float, /**< 0.0 to 1.0 */
+}
+
+AOK_FLANGER: cstring: `
+    __kernel void flanger(
+        __global short* input,
+        __global short* output,
+        __global short* delay_line,
+        __global float* lfo_state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_FLANGER_SIZE: uint: len(AOK_FLANGER);
+AOK_FLANGER_NAME: cstring: "flanger";
+
+AOK_Chorus_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    rate:    cl.Float, /**< Hz */
+    depth:   cl.Float, /**< seconds */
+    mix:     cl.Float, /**< 0.0 to 1.0 */
+}
+
+AOK_CHORUS: cstring: `
+    __kernel void chorus(
+        __global short* input,
+        __global short* output,
+        __global short* delay_line,
+        __global float* mod_state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_CHORUS_SIZE: uint: len(AOK_CHORUS);
+AOK_CHORUS_NAME: cstring: "chorus";
+
+AOK_Comb_Filter_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    delay_time: cl.Float, /**< seconds */
+    feedback:   cl.Float, /**< 0.0 to 1.0 */
+}
+
+AOK_COMB_FILTER: cstring: `
+    __kernel void comb_filter(
+        __global short* input,
+        __global short* output,
+        __global short* delay_line)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_COMB_FILTER_SIZE: uint: len(AOK_COMB_FILTER);
+AOK_COMB_FILTER_NAME: cstring: "comb_filter";
+
+AOK_Reverb_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    room_size:  cl.Float, /**< 0.0 to 1.0 */
+    damping:    cl.Float, /**< 0.0 to 1.0 */
+    width:      cl.Float, /**< 0.0 to 1.0 */
+    wet:        cl.Float, /**< 0.0 to 1.0 */
+}
+
+AOK_REVERB: cstring: `
+    __kernel void reverb(
+        __global short* input,
+        __global short* output,
+        __global short* delay_lines,
+        __global float* matrix)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_REVERB_SIZE: uint: len(AOK_REVERB);
+AOK_REVERB_NAME: cstring: "reverb";
+
+AOK_Envelope_Follow_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+}
+
+AOK_ENVELOPE_FOLLOW: cstring: `
+    __kernel void envelope_follow(
+        __global short* input,
+        __global short* output,
+        __global float* state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_ENVELOPE_FOLLOW_SIZE: uint: len(AOK_ENVELOPE_FOLLOW);
+AOK_ENVELOPE_FOLLOW_NAME: cstring: "envelope_follow";
+
+AOK_RMS_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+}
+
+AOK_RMS: cstring: `
+    __kernel void rms(
+        __global short* input,
+        __global float* output)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_RMS_SIZE: uint: len(AOK_RMS);
+AOK_RMS_NAME: cstring: "rms";
+
+AOK_Normalize_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    target_level: cl.Float,
+}
+
+AOK_NORMALIZE: cstring: `
+    __kernel void normalize(
+        __global short* input,
+        __global short* output,
+        float gain)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_NORMALIZE_SIZE: uint: len(AOK_NORMALIZE);
+AOK_NORMALIZE_NAME: cstring: "normalize";
+
+AOK_Resample_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    target_rate: cl.Float,
+}
+
+AOK_RESAMPLE: cstring: `
+    __kernel void resample(
+        __global short* input,
+        __global short* output,
+        float ratio)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_RESAMPLE_SIZE: uint: len(AOK_RESAMPLE);
+AOK_RESAMPLE_NAME: cstring: "resample";
+
+AOK_Convolve_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+}
+
+AOK_CONVOLVE: cstring: `
+    __kernel void convolve(
+        __global short* input,
+        __global short* output,
+        __global float* ir_fft)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_CONVOLVE_SIZE: uint: len(AOK_CONVOLVE);
+AOK_CONVOLVE_NAME: cstring: "convolve";
+
+
+AOK_Generate_LFO_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    rate:    cl.Float,
+    shape:   int,
+}
+
+AOK_GENERATE_LFO: cstring: `
+    __kernel void generate_lfo(
+        __global float* output,
+        __global float* lfo_state)
+    {
+        int idx = get_global_id(0);
+        
+    }
+`;
+AOK_GENERATE_LFO_SIZE: uint: len(AOK_GENERATE_LFO);
+AOK_GENERATE_LFO_NAME: cstring: "generate_lfo";
+
+AOK_Apply_ADSR_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    attack:  cl.Float,
+    decay:   cl.Float,
+    sustain: cl.Float,
+    release: cl.Float,
+}
+
+AOK_APPLY_ADSR: cstring: `
+    __kernel void apply_adsr(
+        __global short* input,
+        __global short* output,
+        __global float* adsr_state,
+        __global int* gate)
+    {
+        int idx = get_global_id(0);
+    }
+`;
+AOK_APPLY_ADSR_SIZE: uint: len(AOK_APPLY_ADSR);
+AOK_APPLY_ADSR_NAME: cstring: "apply_adsr";
+
+AOK_Operations :: struct #no_copy {
+	distortion:      AOK_Distortion_Settings,
+	clip:            AOK_Clip_Settings,
+	gain:            AOK_Gain_Settings,
+	pan:             AOK_Pan_Settings,
+	lowpass_iir:     AOK_Lowpass_IIR_Settings,
+	compress:        AOK_Compress_Settings,
+	delay:           AOK_Delay_Settings,
+	flanger:         AOK_Flanger_Settings,
+	chorus:          AOK_Chorus_Settings,
+	comb_filter:     AOK_Comb_Filter_Settings,
+	reverb:          AOK_Reverb_Settings,
+	envelope_follow: AOK_Envelope_Follow_Settings,
+	rms:             AOK_RMS_Settings,
+	normalize:       AOK_Normalize_Settings,
+	resample:        AOK_Resample_Settings,
+	convolve:        AOK_Convolve_Settings,
+	generate_lfo:    AOK_Generate_LFO_Settings,
+	apply_adsr:      AOK_Apply_ADSR_Settings,
+}
+
+AOK := [?]cstring {
+	AOK_DISTORTION,
+	// AOK_CLIP,
+	// AOK_GAIN,
+	// AOK_PAN,
+	// AOK_LOWPASS_IIR,
+	// AOK_COMPRESS,
+	// AOK_DELAY,
+	// AOK_FLANGER,
+	// AOK_CHORUS,
+	// AOK_COMB_FILTER,
+	// AOK_REVERB,
+	// AOK_ENVELOPE_FOLLOW,
+	// AOK_RMS,
+	// AOK_NORMALIZE,
+	// AOK_RESAMPLE,
+	// AOK_CONVOLVE,
+	// AOK_GENERATE_LFO,
+	// AOK_APPLY_ADSR,
+}
+
+AOK_NAMES := [?]cstring{
+	AOK_DISTORTION_NAME,
+	// AOK_CLIP_NAME,
+	// AOK_GAIN_NAME,
+	// AOK_PAN_NAME,
+	// AOK_LOWPASS_IIR_NAME,
+	// AOK_COMPRESS_NAME,
+	// AOK_DELAY_NAME,
+	// AOK_FLANGER_NAME,
+	// AOK_CHORUS_NAME,
+	// AOK_COMB_FILTER_NAME,
+	// AOK_REVERB_NAME,
+	// AOK_ENVELOPE_FOLLOW_NAME,
+	// AOK_RMS_NAME,
+	// AOK_NORMALIZE_NAME,
+	// AOK_RESAMPLE_NAME,
+	// AOK_CONVOLVE_NAME,
+	// AOK_GENERATE_LFO_NAME,
+	// AOK_APPLY_ADSR_NAME,
+};
+
+AOK_SIZES := [?]uint{
+	AOK_DISTORTION_SIZE,
+	// AOK_CLIP_SIZE,
+	// AOK_GAIN_SIZE,
+	// AOK_PAN_SIZE,
+	// AOK_LOWPASS_IIR_SIZE,
+	// AOK_COMPRESS_SIZE,
+	// AOK_DELAY_SIZE,
+	// AOK_FLANGER_SIZE,
+	// AOK_CHORUS_SIZE,
+	// AOK_COMB_FILTER_SIZE,
+	// AOK_REVERB_SIZE,
+	// AOK_ENVELOPE_FOLLOW_SIZE,
+	// AOK_RMS_SIZE,
+	// AOK_NORMALIZE_SIZE,
+	// AOK_RESAMPLE_SIZE,
+	// AOK_CONVOLVE_SIZE,
+	// AOK_GENERATE_LFO_SIZE,
+	// AOK_APPLY_ADSR_SIZE,
+};
