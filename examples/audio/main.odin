@@ -116,11 +116,24 @@ main :: proc() {
             // mu.checkbox(uim.ctx, "FFT", &operations[.FFT]);
             // sync.atomic_store_explicit(&am.settings.fft, operations[.FFT], .Relaxed);
 
-            if .SUBMIT in mu.button(uim.ctx, "Submit") {
-                // no need for a lock, this can "race" however it wants
+            sync.lock(&am.guarded_decoder.guard);
+            if am.guarded_decoder.decoder.frames != nil && .SUBMIT in mu.button(uim.ctx, "Submit") {
                 am.guarded_decoder.decoder.launch_kernel = true;
             }
-            if .SUBMIT in mu.button(uim.ctx, "Clear") do am.guarded_decoder.decoder.launch_kernel = false;
+            sync.unlock(&am.guarded_decoder.guard);
+
+            if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in mu.button(uim.ctx, "Clear") {
+                am.guarded_decoder.decoder.launch_kernel = false;
+                am.settings.distortion = false;
+                am.settings.echo = false;
+                am.settings.fft = false;
+            }
+
+            sync.lock(&am.guarded_decoder.guard);
+            if am.guarded_decoder.decoder.frames != nil && .SUBMIT in mu.button(uim.ctx, "Stop") {
+                delete_wavebuffer(&am.guarded_decoder.decoder.wb);
+            }
+            sync.unlock(&am.guarded_decoder.guard);
         }
         mu.end(uim.ctx);
 
