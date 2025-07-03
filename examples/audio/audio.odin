@@ -339,6 +339,7 @@ init_audio_manager :: proc() -> (am: ^Audio_Manager, err: Error) {
     init_opencl(am) or_return;
     init_audio_device(am) or_return;
     init_decoder(am) or_return;
+    init_all_aok_settings(&am^.operations);
     return am, nil;
 }
 
@@ -383,6 +384,10 @@ AOK_Clip_Settings :: struct #no_copy {
     threshold: c.short,
 }
 
+init_clip_settings :: proc(settings: ^AOK_Clip_Settings) {
+	settings.threshold = 3000;
+}
+
 AOK_CLIP: cstring: `
     __kernel void clip(
         __global short* input,
@@ -400,6 +405,10 @@ AOK_Gain_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
     gain:    cl.Float, /**< gain multiplier */
+}
+
+init_gain_settings :: proc(settings: ^AOK_Gain_Settings) {
+	settings.gain = 1.0;
 }
 
 AOK_GAIN: cstring: `
@@ -421,6 +430,10 @@ AOK_Pan_Settings :: struct #no_copy {
     pan:     cl.Float, /**< -1.0 (left) to 1.0 (right) */
 }
 
+init_pan_settings :: proc(settings: ^AOK_Pan_Settings) {
+	settings.pan = 0.0;
+}
+
 AOK_PAN: cstring: `
     __kernel void pan(
         __global short* inputL,
@@ -440,6 +453,11 @@ AOK_Lowpass_IIR_Settings :: struct #no_copy {
 
     cutoff:     cl.Float,
     resonance:  cl.Float,
+}
+
+init_lowpass_iir_settings :: proc(settings: ^AOK_Lowpass_IIR_Settings) {
+	settings.cutoff = 1000.0;
+	settings.resonance = 0.7;
 }
 
 AOK_LOWPASS_IIR: cstring: `
@@ -464,6 +482,13 @@ AOK_Compress_Settings :: struct #no_copy {
     release:   cl.Float,
 }
 
+init_compress_settings :: proc(settings: ^AOK_Compress_Settings) {
+	settings.threshold = 0.5;
+	settings.ratio = 2.0;
+	settings.attack = 0.01;
+	settings.release = 0.1;
+}
+
 AOK_COMPRESS: cstring: `
     __kernel void compress(
         __global short* input,
@@ -483,6 +508,12 @@ AOK_Delay_Settings :: struct #no_copy {
     time:     cl.Float, /**< seconds */
     feedback: cl.Float, /**< 0.0 to 1.0 */
     mix:      cl.Float, /**< dry/wet mix 0.0 to 1.0 */
+}
+
+init_delay_settings :: proc(settings: ^AOK_Delay_Settings) {
+	settings.time = 0.3;
+	settings.feedback = 0.4;
+	settings.mix = 0.5;
 }
 
 AOK_DELAY: cstring: `
@@ -508,6 +539,13 @@ AOK_Flanger_Settings :: struct #no_copy {
     mix:      cl.Float, /**< 0.0 to 1.0 */
 }
 
+init_flanger_settings :: proc(settings: ^AOK_Flanger_Settings) {
+	settings.rate = 0.25;
+	settings.depth = 0.002;
+	settings.feedback = 0.2;
+	settings.mix = 0.5;
+}
+
 AOK_FLANGER: cstring: `
     __kernel void flanger(
         __global short* input,
@@ -528,6 +566,12 @@ AOK_Chorus_Settings :: struct #no_copy {
     rate:    cl.Float, /**< Hz */
     depth:   cl.Float, /**< seconds */
     mix:     cl.Float, /**< 0.0 to 1.0 */
+}
+
+init_chorus_settings :: proc(settings: ^AOK_Chorus_Settings) {
+	settings.rate = 0.25;
+	settings.depth = 0.005;
+	settings.mix = 0.4;
 }
 
 AOK_CHORUS: cstring: `
@@ -551,6 +595,11 @@ AOK_Comb_Filter_Settings :: struct #no_copy {
     feedback:   cl.Float, /**< 0.0 to 1.0 */
 }
 
+init_comb_filter_settings :: proc(settings: ^AOK_Comb_Filter_Settings) {
+	settings.delay_time = 0.05;
+	settings.feedback = 0.6;
+}
+
 AOK_COMB_FILTER: cstring: `
     __kernel void comb_filter(
         __global short* input,
@@ -571,6 +620,13 @@ AOK_Reverb_Settings :: struct #no_copy {
     damping:    cl.Float, /**< 0.0 to 1.0 */
     width:      cl.Float, /**< 0.0 to 1.0 */
     wet:        cl.Float, /**< 0.0 to 1.0 */
+}
+
+init_reverb_settings :: proc(settings: ^AOK_Reverb_Settings) {
+	settings.room_size = 0.8;
+	settings.damping = 0.5;
+	settings.width = 1.0;
+	settings.wet = 0.3;
 }
 
 AOK_REVERB: cstring: `
@@ -626,6 +682,10 @@ AOK_Normalize_Settings :: struct #no_copy {
     target_level: cl.Float,
 }
 
+init_normalize_settings :: proc(settings: ^AOK_Normalize_Settings) {
+	settings.target_level = 0.9;
+}
+
 AOK_NORMALIZE: cstring: `
     __kernel void normalize(
         __global short* input,
@@ -643,6 +703,10 @@ AOK_Resample_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
     target_rate: cl.Float,
+}
+
+init_resample_settings :: proc(settings: ^AOK_Resample_Settings) {
+	settings.target_rate = 44100.0;
 }
 
 AOK_RESAMPLE: cstring: `
@@ -683,6 +747,11 @@ AOK_Generate_LFO_Settings :: struct #no_copy {
     shape:   int,
 }
 
+init_generate_lfo_settings :: proc(settings: ^AOK_Generate_LFO_Settings) {
+	settings.rate = 1.0;
+	settings.shape = 0; // TODO(GowardSilk): enum
+}
+
 AOK_GENERATE_LFO: cstring: `
     __kernel void generate_lfo(
         __global float* output,
@@ -702,6 +771,13 @@ AOK_Apply_ADSR_Settings :: struct #no_copy {
     decay:   cl.Float,
     sustain: cl.Float,
     release: cl.Float,
+}
+
+init_apply_adsr_settings :: proc(settings: ^AOK_Apply_ADSR_Settings) {
+	settings.attack = 0.01;
+	settings.decay = 0.1;
+	settings.sustain = 0.7;
+	settings.release = 0.3;
 }
 
 AOK_APPLY_ADSR: cstring: `
@@ -736,6 +812,23 @@ AOK_Operations :: struct #no_copy {
 	convolve:        AOK_Convolve_Settings,
 	generate_lfo:    AOK_Generate_LFO_Settings,
 	apply_adsr:      AOK_Apply_ADSR_Settings,
+}
+
+init_all_aok_settings :: proc(all: ^AOK_Operations) {
+    init_clip_settings(&all.clip);
+    init_gain_settings(&all.gain);
+    init_pan_settings(&all.pan);
+    init_lowpass_iir_settings(&all.lowpass_iir);
+    init_compress_settings(&all.compress);
+    init_delay_settings(&all.delay);
+    init_flanger_settings(&all.flanger);
+    init_chorus_settings(&all.chorus);
+    init_comb_filter_settings(&all.comb_filter);
+    init_reverb_settings(&all.reverb);
+    init_normalize_settings(&all.normalize);
+    init_resample_settings(&all.resample);
+    init_generate_lfo_settings(&all.generate_lfo);
+    init_apply_adsr_settings(&all.apply_adsr);
 }
 
 AOK := [?]cstring {

@@ -1,5 +1,6 @@
 package audio;
 
+import "core:strconv/decimal"
 import "base:runtime"
 
 import "core:c"
@@ -8,6 +9,7 @@ import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:strings"
+import "core:strconv"
 import "core:reflect"
 
 import cl "shared:opencl"
@@ -29,6 +31,10 @@ Common :: struct {
     am: ^Audio_Manager,
     uim: UI_Manager,
     curr_dir_handle: os.Handle,
+    popup: #type struct {
+        enabled: bool,
+        name: string,
+    },
 }
 
 init_common :: proc() -> (co: Common) {
@@ -90,6 +96,7 @@ main :: proc() {
 show_windows :: #force_inline proc(co: ^Common) {
     show_sound_list_window(co);
     show_aok_settings_window(co);
+    show_popup_window(co);
 }
 
 show_sound_list_window :: proc(using co: ^Common) {
@@ -193,8 +200,27 @@ show_aok_settings_window :: proc(using co: ^Common) {
                             mu.label(uim.ctx, field_info.names[i]);
                             textbox_id := mu.get_id_string(uim.ctx, field_info.names[i]);
                             text_buf, ok := &uim.text_bufs[textbox_id];
-                            if !ok do text_buf = map_insert(&uim.text_bufs, textbox_id, Text_Buf{});
-                            mu.textbox_raw(uim.ctx, text_buf.buf[:], &text_buf.len, textbox_id, mu.layout_next(uim.ctx), {});
+                            if !ok {
+                                text_buf = map_insert(&uim.text_bufs, textbox_id, Text_Buf{});
+                                log.infof("Querying key (%d); With value: %f", textbox_id, cast(f64)(reflect_get_generic_float(&am^.operations, field, field_info.offsets[i])^));
+                                result := strconv.ftoa(
+                                    text_buf.buf[:],
+                                    cast(f64)(reflect_get_generic_float(&am^.operations, field, field_info.offsets[i])^),
+                                    'f', 5, field_info.types[i].size * 8
+                                );
+                                text_buf.len = copy_from_string(text_buf.buf[:], result);
+                            }
+                            if .SUBMIT in mu.textbox_raw(uim.ctx, text_buf.buf[:], &text_buf.len, textbox_id, mu.layout_next(uim.ctx), {}) {
+                                rwstr := mem.Raw_String { data=&text_buf.buf[0], len=text_buf.len };
+                                val, ok := strconv.parse_f64(transmute(string)rwstr);
+                                if !ok {
+                                    popup.enabled = true;
+                                    popup.name = "Invalid float value!";
+                                    delete_key(&uim.text_bufs, textbox_id);
+                                } else {
+                                    reflect_set_generic_float(&am^.operations, field, field_info.offsets[i], cast(f32)val);
+                                }
+                            }
                         }
                     }
 
@@ -209,6 +235,25 @@ show_aok_settings_window :: proc(using co: ^Common) {
             }
         }
     }
+}
+
+show_popup_window :: proc(using co: ^Common) {
+    if popup.enabled {
+        if mu.window(uim.ctx, "Modal Window", {0, 0, 200, 200}, {.NO_SCROLL}) {
+            widths := [1]i32 {200};
+            mu.layout_row(uim.ctx, widths[:], 0);
+            mu.label(uim.ctx, popup.name);
+        } else do popup.enabled = false;
+    }
+}
+
+reflect_get_generic_float :: #force_inline proc(base: ^AOK_Operations, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {
+    return (cast(^f32)(cast(uintptr)base + setting.offset + field_offset));
+}
+
+reflect_set_generic_float :: #force_inline proc(base: ^AOK_Operations, setting: reflect.Struct_Field, field_offset: uintptr, src: f32) {
+    dst := reflect_get_generic_float(base, setting, field_offset);
+    dst^ = src;
 }
 
 is_sound_file :: proc(fi: os.File_Info) -> bool {
