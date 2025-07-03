@@ -357,8 +357,8 @@ delete_audio_manager :: proc(am: ^Audio_Manager) {
 // [A]udio_[O]peration_[K]ernel
 
 AOK_Operation_Base :: struct #no_copy {
-    kernel: cl.Kernel,
     enabled: bool,
+    kernel: cl.Kernel,
 }
 
 AOK_Distortion_Settings :: struct #no_copy {
@@ -379,15 +379,18 @@ AOK_DISTORTION_NAME: cstring: "distortion";
 
 AOK_Clip_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
+
+    threshold: c.short,
 }
 
 AOK_CLIP: cstring: `
     __kernel void clip(
         __global short* input,
-        __global short* output)
+        __global short* output,
+        const short threshold)
     {
         int idx = get_global_id(0);
-        
+        output[idx] = min(threshold, input[idx]);
     }
 `;
 AOK_CLIP_SIZE: uint: len(AOK_CLIP);
@@ -402,10 +405,11 @@ AOK_Gain_Settings :: struct #no_copy {
 AOK_GAIN: cstring: `
     __kernel void gain(
         __global short* input,
-        __global short* output)
+        __global short* output,
+        const float gain)
     {
         int idx = get_global_id(0);
-        
+        output[idx] = short((float)input[idx] * gain);
     }
 `;
 AOK_GAIN_SIZE: uint: len(AOK_GAIN);
@@ -445,7 +449,7 @@ AOK_LOWPASS_IIR: cstring: `
         __global float* state)
     {
         int idx = get_global_id(0);
-        
+
     }
 `;
 AOK_LOWPASS_IIR_SIZE: uint: len(AOK_LOWPASS_IIR);

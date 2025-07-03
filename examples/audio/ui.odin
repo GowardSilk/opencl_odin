@@ -4,9 +4,15 @@ import "base:runtime"
 
 import "core:c"
 import "core:log"
+import "core:strings"
 
 import mu "vendor:microui"
 import sdl3 "vendor:sdl3"
+
+Text_Buf :: struct {
+    buf: [16]byte,
+    len: int,
+}
 
 UI_Manager :: struct {
     should_close: bool,
@@ -19,6 +25,7 @@ UI_Manager :: struct {
     },
 
     ctx: ^mu.Context,
+    text_bufs: map[mu.Id]Text_Buf,
 }
 
 UI_Error :: enum {
@@ -77,10 +84,15 @@ init_ui_manager :: proc() -> (uim: UI_Manager, err: Error) {
     }
     sdl3.SetTextureBlendMode(uim.atlas_texture.texture, sdl3.BLENDMODE_BLEND_PREMULTIPLIED);
 
+    /// microui TEXTBOX BUFFERS
+    uim.text_bufs = make(map[mu.Id]Text_Buf);
+
     return uim, nil;
 }
 
 ui_register_events :: proc(uim: ^UI_Manager) {
+    assert(sdl3.StartTextInput(uim.window));
+    defer assert(sdl3.StopTextInput(uim.window));
 
     to_mui_mouse_key :: proc(key: sdl3.Uint8) -> mu.Mouse {
         if key == sdl3.BUTTON_LEFT do return .LEFT;
@@ -90,9 +102,34 @@ ui_register_events :: proc(uim: ^UI_Manager) {
         unreachable();
     }
 
+    translate_sdl_key :: proc(key: sdl3.Scancode) -> Maybe(mu.Key) {
+        #partial switch key {
+            case .RETURN:      return mu.Key.RETURN;
+            case .BACKSPACE:   return mu.Key.BACKSPACE;
+            case .DELETE:      return mu.Key.DELETE;
+            case .LEFT:        return mu.Key.LEFT;
+            case .RIGHT:       return mu.Key.RIGHT;
+            case .HOME:        return mu.Key.HOME;
+            case .END:         return mu.Key.END;
+            case .LCTRL:       fallthrough;
+            case .RCTRL:       return mu.Key.CTRL;
+            case .LSHIFT:      fallthrough;
+            case .RSHIFT:      return mu.Key.SHIFT;
+            case .LALT:        fallthrough;
+            case .RALT:        return mu.Key.ALT;
+            case .A:           return mu.Key.A;
+            case .C:           return mu.Key.C;
+            case .V:           return mu.Key.V;
+            case .X:           return mu.Key.X;
+        };
+
+        return nil;
+    }
+
     event: sdl3.Event;
     for sdl3.PollEvent(&event) {
         #partial switch event.type {
+            /// MOUSE
             case .MOUSE_WHEEL:
                 mu.input_scroll(uim^.ctx, 0, cast(i32)event.wheel.y * -30);
             case .MOUSE_MOTION:
@@ -101,6 +138,19 @@ ui_register_events :: proc(uim: ^UI_Manager) {
                 mu.input_mouse_up(uim^.ctx, cast(i32)event.button.x, cast(i32)event.button.y, to_mui_mouse_key(event.button.button));
             case .MOUSE_BUTTON_DOWN:
                 mu.input_mouse_down(uim^.ctx, cast(i32)event.button.x, cast(i32)event.button.y, to_mui_mouse_key(event.button.button));
+
+            /// KEYBOARD
+            case .KEY_DOWN:
+                mu_key := translate_sdl_key(event.key.scancode);
+                if mu_key != nil do mu.input_key_down(uim^.ctx, mu_key.?);
+            case .KEY_UP:
+                mu_key := translate_sdl_key(event.key.scancode);
+                if mu_key != nil do mu.input_key_up(uim^.ctx, mu_key.?);
+            case .TEXT_INPUT:
+                text_input := strings.clone_from_cstring(event.text.text);
+                defer delete(text_input);
+                mu.input_text(uim^.ctx, text_input);
+
             case .QUIT:
                 uim^.should_close = true;
         }
@@ -155,5 +205,6 @@ delete_ui_manager :: proc(uim: ^UI_Manager) {
     sdl3.DestroyWindow(uim.window);
     sdl3.Quit();
 
+    delete(uim^.text_bufs);
     free(uim^.ctx);
 }

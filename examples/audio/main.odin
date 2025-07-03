@@ -1,11 +1,14 @@
 package audio;
 
+import "base:runtime"
+
 import "core:c"
 import "core:os"
 import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:strings"
+import "core:reflect"
 
 import cl "shared:opencl"
 import mu "vendor:microui"
@@ -164,7 +167,47 @@ show_sound_list_window :: proc(using co: ^Common) {
 
 show_aok_settings_window :: proc(using co: ^Common) {
     if mu.window(uim.ctx, "Operations", {512, 0, 512, 512}, {.NO_CLOSE}) {
-        mu.checkbox(uim.ctx, "Distortion", &am^.operations.distortion.base.enabled);
+        window_pos := [?]i32 {0, 512};
+        window_max_height: i32 = 0;
+
+        struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
+        struct_info := struct_info_named.base.variant.(runtime.Type_Info_Struct);
+        for i in 0..<struct_info.field_count {
+            name := struct_info.names[i];
+
+            // set the checkbox's name by the struct field
+            field := reflect.struct_field_by_name(type_of(am^.operations), name);
+            base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
+            base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
+            mu.checkbox(uim.ctx, name, base_enabled_field);
+
+            // also append new window with additional settings
+            // if it was set
+            // this can be set iff there are other members besides "base"
+            field_info_named := field.type.variant.(runtime.Type_Info_Named);
+            field_info := field_info_named.base.variant.(runtime.Type_Info_Struct);
+            if base_enabled_field^ == true && field_info.field_count > 1 {
+                if mu.window(uim.ctx, name, {window_pos.x, window_pos.y, 0, 0}, {.AUTO_SIZE, .NO_CLOSE}) {
+                    for i in 0..<field_info.field_count {
+                        if (reflect.is_float(field_info.types[i])) {
+                            mu.label(uim.ctx, field_info.names[i]);
+                            textbox_id := mu.get_id_string(uim.ctx, field_info.names[i]);
+                            text_buf, ok := &uim.text_bufs[textbox_id];
+                            if !ok do text_buf = map_insert(&uim.text_bufs, textbox_id, Text_Buf{});
+                            mu.textbox_raw(uim.ctx, text_buf.buf[:], &text_buf.len, textbox_id, mu.layout_next(uim.ctx), {});
+                        }
+                    }
+
+                    rect := mu.get_current_container(uim.ctx).rect;
+                    if rect.h > window_max_height do window_max_height = rect.h;
+                    if window_pos.x + rect.w > 1024 {
+                        window_pos.x = 0;
+                        window_pos.y += window_max_height;
+                        window_max_height = 0;
+                    } else do window_pos.x += rect.w;
+                }
+            }
+        }
     }
 }
 
