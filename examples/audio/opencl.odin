@@ -177,6 +177,8 @@ delete_kernel :: #force_inline proc(kernel: cl.Kernel) {
 cl_context_errlog :: #force_inline proc(c: ^OpenCL_Context, $msg: string, ret: cl.Int, loc := #caller_location) {
     log_str := cl_context_log(c, loc);
     err_name, err_desc := err_to_name(ret);
+    // TODO(GowardSilk): It seems that not everywhere this actually gets printed in time
+    // (os.flush(os.stderr) does not help ....)
     log.errorf("%s Error value: %d (aka %s; \"%s\")\n%s\n", msg, ret, err_name, err_desc, log_str, location=loc);
     delete(log_str);
 }

@@ -201,7 +201,7 @@ show_aok_settings_window :: proc(using co: ^Common) {
             if base_enabled_field^ == true && field_info.field_count > 1 {
                 if mu.window(uim.ctx, name, {window_pos.x, window_pos.y, 0, 0}, {.AUTO_SIZE, .NO_CLOSE}) {
                     for i in 0..<field_info.field_count {
-                        if (reflect.is_float(field_info.types[i])) {
+                        if (is_float_type(field_info.types[i])) {
                             mu.label(uim.ctx, field_info.names[i]);
                             textbox_id := mu.get_id_string(uim.ctx, field_info.names[i]);
                             text_buf, ok := &uim.text_bufs[textbox_id];
@@ -226,6 +226,12 @@ show_aok_settings_window :: proc(using co: ^Common) {
                                     reflect_set_generic_float(&am^.operations, field, field_info.offsets[i], cast(f32)val);
                                 }
                             }
+                        } else if (is_range_type(field_info.types[i])) {
+                            mu.label(uim.ctx, field_info.names[i]);
+                            min     := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, min))^;
+                            max     := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, max))^;
+                            actual  := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, actual));
+                            mu.slider(uim.ctx, actual, min, max);
                         }
                     }
 
@@ -242,6 +248,12 @@ show_aok_settings_window :: proc(using co: ^Common) {
     }
 }
 
+is_range_type :: #force_inline proc(type: ^runtime.Type_Info) -> bool {
+    return type.id == type_info_of(Range).id;
+}
+
+is_float_type :: reflect.is_float;
+
 show_popup_window :: proc(using co: ^Common) {
     if popup.enabled {
         if mu.window(uim.ctx, "Modal Window", {0, 0, 200, 200}, {.NO_SCROLL}) {
@@ -252,11 +264,11 @@ show_popup_window :: proc(using co: ^Common) {
     }
 }
 
-reflect_get_generic_float :: #force_inline proc(base: ^AOK_Operations, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {
+reflect_get_generic_float :: #force_inline proc(base: rawptr, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {
     return (cast(^f32)(cast(uintptr)base + setting.offset + field_offset));
 }
 
-reflect_set_generic_float :: #force_inline proc(base: ^AOK_Operations, setting: reflect.Struct_Field, field_offset: uintptr, src: f32) {
+reflect_set_generic_float :: #force_inline proc(base: rawptr, setting: reflect.Struct_Field, field_offset: uintptr, src: f32) {
     dst := reflect_get_generic_float(base, setting, field_offset);
     dst^ = src;
 }

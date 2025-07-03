@@ -283,6 +283,21 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         enqueue_basic(opencl, kernel, &buffer_size);
     }
 
+    if am^.operations.pan.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.pan.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+
+        set_input_output_args(kernel, input_buffer, output_buffer);
+
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.pan.pan.actual);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        mono_buffer_size := buffer_size >> 1;
+        enqueue_basic(opencl, kernel, &mono_buffer_size);
+    }
+
     assert(opencl^.eat_pos == 0);
     ret := cl.EnqueueReadBuffer(
         opencl^.queue,
@@ -361,7 +376,7 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
 init_audio_device :: proc(am: ^Audio_Manager) -> ma.result {
     device_config := ma.device_config_init(.playback);
     device_config.playback.format    = .s16;
-    device_config.playback.channels  = 0;
+    device_config.playback.channels  = 2;
     device_config.sampleRate         = 0;
     device_config.dataCallback       = device_data_proc;
     device_config.pUserData          = am;
@@ -471,7 +486,7 @@ AOK_Gain_Settings :: struct #no_copy {
 
 init_gain_settings :: proc(settings: ^AOK_Gain_Settings) {
     settings.base.kernel_name = AOK_GAIN_NAME;
-    settings.gain = 1.2;
+    settings.gain = 3.2;
 }
 
 AOK_GAIN: cstring: `
@@ -488,26 +503,39 @@ AOK_GAIN: cstring: `
 AOK_GAIN_SIZE: uint: len(AOK_GAIN);
 AOK_GAIN_NAME: cstring: "gain";
 
+/** @brief type used to signify min/max range of some float value (its representation in UI is altered from textbox to slider) */
+Range :: struct {
+    min: cl.Float,
+    max: cl.Float,
+    actual: cl.Float,
+}
+
 AOK_Pan_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
-    pan:     cl.Float, /**< -1.0 (left) to 1.0 (right) */
+    pan:     Range, /**< -1.0 (left) to 1.0 (right) */
 }
 
 init_pan_settings :: proc(settings: ^AOK_Pan_Settings) {
     settings.base.kernel_name = AOK_PAN_NAME;
-    settings.pan = 0.0;
+    settings.pan = Range {min=-1.0, max=1.0, actual=0.0};
 }
 
 AOK_PAN: cstring: `
     __kernel void pan(
-        __global short* inputL,
-        __global short* inputR,
-        __global short* outputL,
-        __global short* outputR)
+        __global short* input,
+        __global short* output,
+        const float pan)
     {
         int idx = get_global_id(0);
+        int iL = 2 * idx;
+        int iR = iL + 1;
 
+        float panL = 1.0f - (pan + 1.0f) * 0.5f;
+        float panR = (pan + 1.0f) * 0.5f;
+
+        output[iL] = (short)(panL * (float)input[iL]);
+        output[iR] = (short)(panR * (float)input[iR]);
     }
 `;
 AOK_PAN_SIZE: uint: len(AOK_PAN);
@@ -927,7 +955,7 @@ AOK := [?]cstring {
 	AOK_DISTORTION,
 	AOK_CLIP,
 	AOK_GAIN,
-	// AOK_PAN,
+	AOK_PAN,
 	// AOK_LOWPASS_IIR,
 	// AOK_COMPRESS,
 	// AOK_DELAY,
@@ -948,7 +976,7 @@ AOK_SIZES := [?]uint{
 	AOK_DISTORTION_SIZE,
 	AOK_CLIP_SIZE,
 	AOK_GAIN_SIZE,
-	// AOK_PAN_SIZE,
+	AOK_PAN_SIZE,
 	// AOK_LOWPASS_IIR_SIZE,
 	// AOK_COMPRESS_SIZE,
 	// AOK_DELAY_SIZE,
