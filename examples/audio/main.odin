@@ -99,8 +99,25 @@ show_windows :: #force_inline proc(co: ^Common) {
     show_popup_window(co);
 }
 
+label    :: mu.label;
+button   :: mu.button;
+window   :: mu.window;
+checkbox :: mu.checkbox;
+slider   :: mu.slider;
+
 show_sound_list_window :: proc(using co: ^Common) {
-    if mu.window(uim.ctx, "Sound List", {0, 0, 512, 512}, {.NO_CLOSE}) {
+    w_opened := window(
+        uim.ctx,
+        "Sound List",
+        {
+            0,
+            0,
+            relative_window_size(512, FONT_WIDTH_SCALE_FACTOR),
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR)
+        },
+        {.NO_CLOSE}
+    );
+    if w_opened {
         err: Error;
 
         // query all files and play sound files
@@ -109,7 +126,7 @@ show_sound_list_window :: proc(using co: ^Common) {
         defer os.file_info_slice_delete(infos);
 
         for info in infos do if is_sound_file(info) {
-            if .SUBMIT in mu.button(uim.ctx, info.name) {
+            if .SUBMIT in button(uim.ctx, info.name) {
                 info_cname := make([]byte, len(info.name) + size_of("audio/") + 1);
                 defer delete(info_cname);
                 copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
@@ -159,18 +176,18 @@ show_sound_list_window :: proc(using co: ^Common) {
         }
 
         sync.lock(&am.guarded_decoder.guard);
-        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in mu.button(uim.ctx, "Submit") {
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Submit") {
             am.guarded_decoder.decoder.launch_kernel = true;
         }
         sync.unlock(&am.guarded_decoder.guard);
 
-        if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in mu.button(uim.ctx, "Clear") {
+        if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(uim.ctx, "Clear") {
             am.guarded_decoder.decoder.launch_kernel = false;
             am.operations.distortion.base.enabled = false;
         }
 
         sync.lock(&am.guarded_decoder.guard);
-        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in mu.button(uim.ctx, "Stop") {
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Stop") {
             delete_wavebuffer(&am.guarded_decoder.decoder.wb);
         }
         sync.unlock(&am.guarded_decoder.guard);
@@ -178,8 +195,19 @@ show_sound_list_window :: proc(using co: ^Common) {
 }
 
 show_aok_settings_window :: proc(using co: ^Common) {
-    if mu.window(uim.ctx, "Operations", {512, 0, 512, 512}, {.NO_CLOSE}) {
-        window_pos := [?]i32 {0, 512};
+    w_opened := window(
+        uim.ctx,
+        "Operations",
+        {
+            relative_window_size(512, FONT_WIDTH_SCALE_FACTOR),
+            0,
+            relative_window_size(512, FONT_WIDTH_SCALE_FACTOR),
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR),
+        },
+        {.NO_CLOSE}
+    );
+    if w_opened {
+        window_pos := [?]i32 {0, relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR)};
         window_max_height: i32 = 0;
 
         struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
@@ -191,7 +219,7 @@ show_aok_settings_window :: proc(using co: ^Common) {
             field := reflect.struct_field_by_name(type_of(am^.operations), name);
             base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
             base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
-            mu.checkbox(uim.ctx, name, base_enabled_field);
+            checkbox(uim.ctx, name, base_enabled_field);
 
             // also append new window with additional settings
             // if were set
@@ -199,10 +227,10 @@ show_aok_settings_window :: proc(using co: ^Common) {
             field_info_named := field.type.variant.(runtime.Type_Info_Named);
             field_info := field_info_named.base.variant.(runtime.Type_Info_Struct);
             if base_enabled_field^ == true && field_info.field_count > 1 {
-                if mu.window(uim.ctx, name, {window_pos.x, window_pos.y, 0, 0}, {.AUTO_SIZE, .NO_CLOSE}) {
+                if window(uim.ctx, name, {window_pos.x, window_pos.y, 0, 0}, {.AUTO_SIZE, .NO_CLOSE}) {
                     for i in 0..<field_info.field_count {
                         if (is_float_type(field_info.types[i])) {
-                            mu.label(uim.ctx, field_info.names[i]);
+                            label(uim.ctx, field_info.names[i]);
                             textbox_id := mu.get_id_string(uim.ctx, field_info.names[i]);
                             text_buf, ok := &uim.text_bufs[textbox_id];
                             if !ok {
@@ -227,11 +255,11 @@ show_aok_settings_window :: proc(using co: ^Common) {
                                 }
                             }
                         } else if (is_range_type(field_info.types[i])) {
-                            mu.label(uim.ctx, field_info.names[i]);
+                            label(uim.ctx, field_info.names[i]);
                             min     := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, min))^;
                             max     := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, max))^;
                             actual  := reflect_get_generic_float(&am^.operations, field, field_info.offsets[i] + offset_of(Range, actual));
-                            mu.slider(uim.ctx, actual, min, max);
+                            slider(uim.ctx, actual, min, max);
                         }
                     }
 
@@ -256,10 +284,8 @@ is_float_type :: reflect.is_float;
 
 show_popup_window :: proc(using co: ^Common) {
     if popup.enabled {
-        if mu.window(uim.ctx, "Modal Window", {0, 0, 200, 200}, {.NO_SCROLL}) {
-            widths := [1]i32 {200};
-            mu.layout_row(uim.ctx, widths[:], 0);
-            mu.label(uim.ctx, popup.name);
+        if window(uim.ctx, "Modal Window", {0, 0, 200, 200}, {.NO_SCROLL}) {
+            label(uim.ctx, popup.name);
         } else do popup.enabled = false;
     }
 }

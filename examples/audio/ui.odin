@@ -38,12 +38,46 @@ UI_Error :: enum {
     Texture_Creation_Fail,
 }
 
+FONT_WIDTH_SCALE_FACTOR  :: 1;
+FONT_HEIGHT_SCALE_FACTOR :: 1;
+ATLAS_WIDTH :: mu.DEFAULT_ATLAS_WIDTH * FONT_WIDTH_SCALE_FACTOR;
+ATLAS_HEIGHT :: mu.DEFAULT_ATLAS_HEIGHT * FONT_HEIGHT_SCALE_FACTOR;
+SCALED_STYLE := mu.Style{
+    font = nil,
+
+    size = mu.Vec2{
+        i32(68 * FONT_WIDTH_SCALE_FACTOR),
+        i32(10 * FONT_HEIGHT_SCALE_FACTOR),
+    },
+    padding         = i32(5 * FONT_WIDTH_SCALE_FACTOR),
+    spacing         = i32(4 * FONT_WIDTH_SCALE_FACTOR),
+    indent          = i32(24 * FONT_WIDTH_SCALE_FACTOR),
+    title_height    = i32(24 * FONT_HEIGHT_SCALE_FACTOR),
+    footer_height   = i32(20 * FONT_HEIGHT_SCALE_FACTOR),
+    scrollbar_size  = i32(12 * FONT_WIDTH_SCALE_FACTOR),
+    thumb_size      = i32(8  * FONT_WIDTH_SCALE_FACTOR),
+    colors = mu.default_style.colors,
+};
+
+relative_window_size :: #force_inline proc($base: i32, $scale: i32) -> i32 {
+    return base + i32((scale - 1.0) * base / 8);
+}
+WINDOW_WIDTH  := relative_window_size(1024, FONT_WIDTH_SCALE_FACTOR); 
+WINDOW_HEIGHT := relative_window_size(1024, FONT_HEIGHT_SCALE_FACTOR);
+
+atlas_text_width_proc :: proc(font: mu.Font, text: string) -> (width: i32) {
+    return mu.default_atlas_text_width(font, text) * FONT_WIDTH_SCALE_FACTOR;
+}
+atlas_text_height_proc :: proc(font: mu.Font) -> i32 {
+    return mu.default_atlas_text_height(font) * FONT_HEIGHT_SCALE_FACTOR;
+}
+
 init_ui_manager :: proc() -> (uim: UI_Manager, err: Error) {
     if !sdl3.Init({.VIDEO}) {
         log.errorf("SDL3 Init error: %s", sdl3.GetError());
         return {}, .Init_Fail;
     }
-    uim.window = sdl3.CreateWindow("OpenCL Audio Example", 1024, 1024, {});
+    uim.window = sdl3.CreateWindow("OpenCL Audio Example", WINDOW_WIDTH, WINDOW_HEIGHT, {});
     if uim.window == nil {
         log.errorf("SDL3 Window Init error: %s", sdl3.GetError());
         return {}, .Window_Creation_Fail;
@@ -61,18 +95,80 @@ init_ui_manager :: proc() -> (uim: UI_Manager, err: Error) {
     mu.init(uim.ctx);
 
     // microui FONT_ATLAS
-    uim.ctx^.text_width = mu.default_atlas_text_width;
-    uim.ctx^.text_height = mu.default_atlas_text_height;
+    uim.ctx^._style = SCALED_STYLE;
+    uim.ctx^.style = &uim.ctx^._style;
+    uim.ctx^.text_width  = atlas_text_width_proc;
+    uim.ctx^.text_height = atlas_text_height_proc;
 
     pixels: [][4]byte;
-    pixels, merr = make([][4]byte, mu.DEFAULT_ATLAS_WIDTH * mu.DEFAULT_ATLAS_HEIGHT);
+    pixels, merr = make([][4]byte, ATLAS_WIDTH * ATLAS_HEIGHT);
     assert(merr == .None);
-	for alpha, i in mu.default_atlas_alpha {
-		pixels[i] = {alpha, alpha, alpha, alpha};
-	}
 	defer delete(pixels);
-		
-    uim.atlas_texture.surface = sdl3.CreateSurfaceFrom(mu.DEFAULT_ATLAS_WIDTH, mu.DEFAULT_ATLAS_HEIGHT, .RGBA8888, raw_data(pixels), mu.DEFAULT_ATLAS_WIDTH*4);
+    for y in 0..<mu.DEFAULT_ATLAS_HEIGHT {
+        for x in 0..<mu.DEFAULT_ATLAS_WIDTH {
+            a := mu.default_atlas_alpha[y * mu.DEFAULT_ATLAS_WIDTH + x];
+            color := [4]byte{a, a, a, a};
+
+            base_x := x * FONT_WIDTH_SCALE_FACTOR;
+            base_y := y * FONT_HEIGHT_SCALE_FACTOR;
+
+            for j in 0..<FONT_HEIGHT_SCALE_FACTOR {
+                for i in 0..<FONT_WIDTH_SCALE_FACTOR {
+                    pixels[(base_y + j) * ATLAS_WIDTH + (base_x + i)] = color;
+                }
+            }
+        }
+    }
+
+    // such scaled text looks like garbage, use SSAA 4x
+    // what an irony that this is not GPU accelerated but it is not that slow
+    when FONT_WIDTH_SCALE_FACTOR > 1 || FONT_HEIGHT_SCALE_FACTOR > 1 {
+        gauss_kernel_7x7 := [49]f64{
+            0.00000067, 0.00002292, 0.00019117, 0.00038771, 0.00019117, 0.00002292, 0.00000067,
+            0.00002292, 0.00078634, 0.00655603, 0.01330373, 0.00655603, 0.00078634, 0.00002292,
+            0.00019117, 0.00655603, 0.05472157, 0.11116501, 0.05472157, 0.00655603, 0.00019117,
+            0.00038771, 0.01330373, 0.11116501, 0.22508352, 0.11116501, 0.01330373, 0.00038771,
+            0.00019117, 0.00655603, 0.05472157, 0.11116501, 0.05472157, 0.00655603, 0.00019117,
+            0.00002292, 0.00078634, 0.00655603, 0.01330373, 0.00655603, 0.00078634, 0.00002292,
+            0.00000067, 0.00002292, 0.00019117, 0.00038771, 0.00019117, 0.00002292, 0.00000067,
+        };
+
+        for y in 0..<ATLAS_HEIGHT {
+            for x in 0..<ATLAS_WIDTH {
+                r, g, b, a: f64 = 0.0, 0.0, 0.0, 0.0;
+
+                for ky in 0..<7 {
+                    for kx in 0..<7 {
+                        ix := clamp(x + kx - 3, 0, ATLAS_WIDTH-1);
+                        iy := clamp(y + ky - 3, 0, ATLAS_HEIGHT-1);
+
+                        sample := pixels[iy * ATLAS_WIDTH + ix];
+                        weight := gauss_kernel_7x7[ky * 7 + kx];
+
+                        r += f64(sample[0]) * weight;
+                        g += f64(sample[1]) * weight;
+                        b += f64(sample[2]) * weight;
+                        a += f64(sample[3]) * weight;
+                    }
+                }
+
+                pixels[y * ATLAS_WIDTH + x] = [4]byte{
+                    byte(clamp(r, 0.0, 255.0)),
+                    byte(clamp(g, 0.0, 255.0)),
+                    byte(clamp(b, 0.0, 255.0)),
+                    byte(clamp(a, 0.0, 255.0)),
+                };
+            }
+        }
+    }
+
+    uim.atlas_texture.surface = sdl3.CreateSurfaceFrom(
+        ATLAS_WIDTH,
+        ATLAS_HEIGHT,
+        .RGBA8888,
+        raw_data(pixels),
+        ATLAS_WIDTH * 4
+    );
     if uim.atlas_texture.surface == nil {
         log.errorf("SDL3 Surface Init error: %s", sdl3.GetError());
         return {}, .Surface_Creation_Fail;
@@ -175,6 +271,10 @@ ui_render :: proc(uim: ^UI_Manager) {
                 for ch in v.str do if ch & 0xc0 != 0x80 {
                     r := min(cast(int)ch, 127);
                     rect := mu.default_atlas[mu.DEFAULT_ATLAS_FONT + r];
+                    rect.x *= FONT_WIDTH_SCALE_FACTOR;
+                    rect.w *= FONT_WIDTH_SCALE_FACTOR;
+                    rect.y *= FONT_HEIGHT_SCALE_FACTOR;
+                    rect.h *= FONT_HEIGHT_SCALE_FACTOR;
                     render_texture(uim, rect, {pos.x, pos.y, rect.w, rect.h});
                     pos.x += rect.w;
                 }
@@ -190,6 +290,10 @@ ui_render :: proc(uim: ^UI_Manager) {
 
             case ^mu.Command_Icon:
                 rect := mu.default_atlas[v.id];
+                rect.x *= FONT_WIDTH_SCALE_FACTOR;
+                rect.y *= FONT_HEIGHT_SCALE_FACTOR;
+                rect.w *= FONT_WIDTH_SCALE_FACTOR;
+                rect.h *= FONT_HEIGHT_SCALE_FACTOR;
                 render_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
             case ^mu.Command_Jump: unreachable();
         }
