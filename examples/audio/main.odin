@@ -194,7 +194,7 @@ show_aok_settings_window :: proc(using co: ^Common) {
             mu.checkbox(uim.ctx, name, base_enabled_field);
 
             // also append new window with additional settings
-            // if it was set
+            // if were set
             // this can be set iff there are other members besides "base"
             field_info_named := field.type.variant.(runtime.Type_Info_Named);
             field_info := field_info_named.base.variant.(runtime.Type_Info_Struct);

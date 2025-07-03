@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:mem"
+import "core:math"
 
 import cl "shared:opencl"
 import ma "vendor:miniaudio"
@@ -298,6 +299,23 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         enqueue_basic(opencl, kernel, &mono_buffer_size);
     }
 
+    if am^.operations.lowpass_iir.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.lowpass_iir.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+
+        set_input_output_args(kernel, input_buffer, output_buffer);
+
+        cutoff := am^.operations.lowpass_iir.cutoff;
+        x := math.exp(-2.0 * math.PI * cutoff / cast(cl.Float)device.sampleRate);
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &x);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        mono_buffer_size := buffer_size >> 1;
+        enqueue_basic(opencl, kernel, &mono_buffer_size);
+    }
+
     assert(opencl^.eat_pos == 0);
     ret := cl.EnqueueReadBuffer(
         opencl^.queue,
@@ -541,36 +559,59 @@ AOK_PAN: cstring: `
 AOK_PAN_SIZE: uint: len(AOK_PAN);
 AOK_PAN_NAME: cstring: "pan";
 
+/** @brief settings for basic (1-pole) Lowpass IIR */
 AOK_Lowpass_IIR_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
-    cutoff:     cl.Float,
-    resonance:  cl.Float,
+    cutoff: cl.Float,
 }
 
 init_lowpass_iir_settings :: proc(settings: ^AOK_Lowpass_IIR_Settings) {
     settings.base.kernel_name = AOK_LOWPASS_IIR_NAME;
-	settings.cutoff = 1000.0;
-	settings.resonance = 0.7;
+    settings.cutoff = 1000.0;
 }
 
 AOK_LOWPASS_IIR: cstring: `
     __kernel void lowpass_iir(
         __global short* input,
         __global short* output,
-        __global float* state)
+        const float resonance)
     {
         int idx = get_global_id(0);
-
+        output[idx] = (short)((1 - resonance) * (float)input[idx] + resonance * (float)output[max(idx - 1, 0)]);
     }
 `;
 AOK_LOWPASS_IIR_SIZE: uint: len(AOK_LOWPASS_IIR);
 AOK_LOWPASS_IIR_NAME: cstring: "lowpass_iir";
 
+AOK_Lowpass_Biquad_IIR_Settings :: struct #no_copy {
+    #subtype base:  AOK_Operation_Base,
+
+    cutoff:     cl.Float,
+    resonance:  cl.Float,
+}
+
+init_lowpass_biquad_iir_settings :: proc(settings: ^AOK_Lowpass_Biquad_IIR_Settings) {
+    settings.base.kernel_name = AOK_LOWPASS_BIQUAD_IIR_NAME;
+    settings.cutoff = 1000.0;
+    settings.resonance = 0.7;
+}
+
+AOK_LOWPASS_BIQUAD_IIR: cstring: `
+    __kernel void lowpass_iir(
+        __global short* input,
+        __global short* output)
+    {
+        int idx = get_global_id(0);
+    }
+`;
+AOK_LOWPASS_BIQUAD_IIR_SIZE: uint: len(AOK_LOWPASS_BIQUAD_IIR);
+AOK_LOWPASS_BIQUAD_IIR_NAME: cstring: "lowpass_iir";
+
 AOK_Compress_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
-    threshold: cl.Float,
+    threshold: decibel,
     ratio:     cl.Float,
     attack:    cl.Float,
     release:   cl.Float,
@@ -745,20 +786,35 @@ AOK_REVERB_NAME: cstring: "reverb";
 
 AOK_Envelope_Follow_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
+
+    attack: Range,
+    release: Range,
 }
 
 init_envelope_follow_settings :: proc(settings: ^AOK_Envelope_Follow_Settings) {
     settings.base.kernel_name = AOK_ENVELOPE_FOLLOW_NAME;
+
+    settings.attack  = Range{min=0.0, max=1.0, actual=1.0};
+    settings.release = Range{min=0.0, max=1.0, actual=0.0};
 }
 
 AOK_ENVELOPE_FOLLOW: cstring: `
     __kernel void envelope_follow(
         __global short* input,
         __global short* output,
-        __global float* state)
+        const float attack,
+        const float release)
     {
         int idx = get_global_id(0);
-        
+        int prev_idx = max(idx - 1, 0);
+        int prev = output[prev_idx];
+        int actual = abs(input[idx]);
+
+        if (actual > prev) {
+            output[idx] = actual * (1 - attack)  + prev * attack;
+        } else {
+            output[idx] = actual * (1 - release) + prev * release;
+        }
     }
 `;
 AOK_ENVELOPE_FOLLOW_SIZE: uint: len(AOK_ENVELOPE_FOLLOW);
@@ -956,14 +1012,14 @@ AOK := [?]cstring {
 	AOK_CLIP,
 	AOK_GAIN,
 	AOK_PAN,
-	// AOK_LOWPASS_IIR,
+	AOK_LOWPASS_IIR,
 	// AOK_COMPRESS,
 	// AOK_DELAY,
 	// AOK_FLANGER,
 	// AOK_CHORUS,
 	// AOK_COMB_FILTER,
 	// AOK_REVERB,
-	// AOK_ENVELOPE_FOLLOW,
+	AOK_ENVELOPE_FOLLOW,
 	// AOK_RMS,
 	// AOK_NORMALIZE,
 	// AOK_RESAMPLE,
@@ -977,14 +1033,14 @@ AOK_SIZES := [?]uint{
 	AOK_CLIP_SIZE,
 	AOK_GAIN_SIZE,
 	AOK_PAN_SIZE,
-	// AOK_LOWPASS_IIR_SIZE,
+	AOK_LOWPASS_IIR_SIZE,
 	// AOK_COMPRESS_SIZE,
 	// AOK_DELAY_SIZE,
 	// AOK_FLANGER_SIZE,
 	// AOK_CHORUS_SIZE,
 	// AOK_COMB_FILTER_SIZE,
 	// AOK_REVERB_SIZE,
-	// AOK_ENVELOPE_FOLLOW_SIZE,
+	AOK_ENVELOPE_FOLLOW_SIZE,
 	// AOK_RMS_SIZE,
 	// AOK_NORMALIZE_SIZE,
 	// AOK_RESAMPLE_SIZE,
