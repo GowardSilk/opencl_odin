@@ -11,9 +11,10 @@ import ma "vendor:miniaudio"
 import sync "core:sync"
 
 Wave_Buffer :: struct {
-    frames: [^]c.short,
-    frames_count: u64,
-    index: u64,
+    frames:         [^]c.short,
+    frames_count:   u64,
+    index:          u64,
+    // max_aplitude:   c.short,
 }
 
 Audio_Decorder :: struct {
@@ -192,39 +193,94 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
     output_buffer := &opencl^.audio_buffer_out;
     first_kernel := true;
 
-    deferred_compile_kernel :: #force_inline proc(opencl: ^OpenCL_Context, kernel: ^cl.Kernel, name: cstring) {
+    deferred_compile_kernel :: #force_inline proc(opencl: ^OpenCL_Context, name: cstring) -> cl.Kernel {
         /* deferred kernel initialization */
-        if kernel^ == nil {
-            err: Error;
-            kernel^, err = compile_kernel(opencl, AOK_DISTORTION_NAME);
-            fmt.assertf(err == nil, "Failed to compile %s kernel!", AOK_DISTORTION_NAME);
+        if name not_in opencl.kernels {
+            kernel, err := compile_kernel(opencl, name);
+            fmt.assertf(err == nil, "Failed to compile %s kernel!", name);
+            map_insert(&opencl.kernels, name, kernel);
+
+            return kernel;
         }
+
+        return opencl.kernels[name];
     }
 
-    if am^.operations.distortion.base.enabled {
-        deferred_compile_kernel(opencl, &am^.operations.distortion.base.kernel, AOK_DISTORTION_NAME);
-
-        if first_kernel == true do first_kernel = false;
-        else { unreachable(/* copy output_buffer -> input_buffer */); }
-
-        ret := cl.SetKernelArg(am^.operations.distortion.base.kernel, 0, size_of(cl.Mem), input_buffer);
+    set_input_output_args :: #force_inline proc(kernel: cl.Kernel, input_buffer: ^cl.Mem, output_buffer: ^cl.Mem) {
+        ret := cl.SetKernelArg(kernel, 0, size_of(cl.Mem), input_buffer);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-        ret  = cl.SetKernelArg(am^.operations.distortion.base.kernel, 1, size_of(cl.Mem), output_buffer);
+        ret  = cl.SetKernelArg(kernel, 1, size_of(cl.Mem), output_buffer);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+    }
 
-        ret = cl.EnqueueNDRangeKernel(
+    copy_out_to_in :: #force_inline proc(opencl: ^OpenCL_Context, input_buffer: ^cl.Mem, output_buffer: ^cl.Mem, buffer_size: c.size_t) {
+        // NOTE(GowardSilk): we want to copy the result (aka output_buffer) into input again
+        ret := cl.EnqueueCopyBuffer(
             opencl^.queue,
-            am^.operations.distortion.base.kernel,
+            output_buffer^,
+            input_buffer^,
+            0,
+            0,
+            buffer_size,
+            0,
+            nil,
+            nil,
+        );
+        fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue copy buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
+    }
+
+    enqueue_basic :: proc(opencl: ^OpenCL_Context, kernel: cl.Kernel, buffer_size: ^c.size_t) {
+        ret := cl.EnqueueNDRangeKernel(
+            opencl^.queue,
+            kernel,
             1,
             nil,
-            &buffer_size,
+            buffer_size,
             nil,
             0,
             nil,
             nil
         );
         fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
+    }
+
+    if am^.operations.distortion.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.distortion.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else { unreachable(/* copy output_buffer -> input_buffer */); }
+
+        set_input_output_args(kernel, input_buffer, output_buffer);
+        enqueue_basic(opencl, kernel, &buffer_size);
+    }
+
+    if am^.operations.clip.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.clip.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+
+        set_input_output_args(kernel, input_buffer, output_buffer);
+
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.clip.threshold);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        enqueue_basic(opencl, kernel, &buffer_size);
+    }
+
+    if am^.operations.gain.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.gain.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+
+        set_input_output_args(kernel, input_buffer, output_buffer);
+
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.gain.gain);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        enqueue_basic(opencl, kernel, &buffer_size);
     }
 
     assert(opencl^.eat_pos == 0);
@@ -348,22 +404,24 @@ delete_audio_manager :: proc(am: ^Audio_Manager) {
     delete_opencl(am);
     delete_decoder(am);
 
-    // TODO(GowardSilk): perhaps it would be better to manage the kernels via a separate tracker (like a hash map inside OpenCL_Context with keys being the names of the kernels?)
-    // rather than doing it manually here...
-    if am^.operations.distortion.base.kernel != nil do delete_kernel(am^.operations.distortion.base.kernel);
-
     free(am);
 }
 
 // [A]udio_[O]peration_[K]ernel
 
+decibel :: distinct cl.Float;
+
 AOK_Operation_Base :: struct #no_copy {
     enabled: bool,
-    kernel: cl.Kernel,
+    kernel_name: cstring,
 }
 
 AOK_Distortion_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
+}
+
+init_distortion_settings :: proc(settings: ^AOK_Distortion_Settings) {
+    settings.base.kernel_name = AOK_DISTORTION_NAME;
 }
 
 AOK_DISTORTION: cstring: `
@@ -381,21 +439,25 @@ AOK_DISTORTION_NAME: cstring: "distortion";
 AOK_Clip_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
-    threshold: c.short,
+    threshold: decibel, /**< from -100.0 to 0.0 dBFS; clip is symmetric */
 }
 
 init_clip_settings :: proc(settings: ^AOK_Clip_Settings) {
-	settings.threshold = 3000;
+    settings.base.kernel_name = AOK_CLIP_NAME;
+    settings.threshold = -6.0;
 }
 
 AOK_CLIP: cstring: `
     __kernel void clip(
         __global short* input,
         __global short* output,
-        const short threshold)
+        const float threshold)
     {
         int idx = get_global_id(0);
-        output[idx] = min(threshold, input[idx]);
+        // TODO(GowardSilk): When the operations will fuse together
+        // we should make a function for dBFS -> c.short sample value
+        const short th = (short)((float)SHRT_MAX * pow(10, threshold / 10.f));
+        output[idx] = clamp((short)input[idx], (short)-th, (short)+th);
     }
 `;
 AOK_CLIP_SIZE: uint: len(AOK_CLIP);
@@ -404,11 +466,12 @@ AOK_CLIP_NAME: cstring: "clip";
 AOK_Gain_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 
-    gain:    cl.Float, /**< gain multiplier */
+    gain:    decibel, /**< gain multiplier */
 }
 
 init_gain_settings :: proc(settings: ^AOK_Gain_Settings) {
-	settings.gain = 1.0;
+    settings.base.kernel_name = AOK_GAIN_NAME;
+    settings.gain = 1.2;
 }
 
 AOK_GAIN: cstring: `
@@ -418,7 +481,8 @@ AOK_GAIN: cstring: `
         const float gain)
     {
         int idx = get_global_id(0);
-        output[idx] = short((float)input[idx] * gain);
+        const float g = pow(10, gain / 20.f);
+        output[idx] = (short)((float)input[idx] * g);
     }
 `;
 AOK_GAIN_SIZE: uint: len(AOK_GAIN);
@@ -431,7 +495,8 @@ AOK_Pan_Settings :: struct #no_copy {
 }
 
 init_pan_settings :: proc(settings: ^AOK_Pan_Settings) {
-	settings.pan = 0.0;
+    settings.base.kernel_name = AOK_PAN_NAME;
+    settings.pan = 0.0;
 }
 
 AOK_PAN: cstring: `
@@ -442,7 +507,7 @@ AOK_PAN: cstring: `
         __global short* outputR)
     {
         int idx = get_global_id(0);
-        
+
     }
 `;
 AOK_PAN_SIZE: uint: len(AOK_PAN);
@@ -456,6 +521,7 @@ AOK_Lowpass_IIR_Settings :: struct #no_copy {
 }
 
 init_lowpass_iir_settings :: proc(settings: ^AOK_Lowpass_IIR_Settings) {
+    settings.base.kernel_name = AOK_LOWPASS_IIR_NAME;
 	settings.cutoff = 1000.0;
 	settings.resonance = 0.7;
 }
@@ -483,6 +549,7 @@ AOK_Compress_Settings :: struct #no_copy {
 }
 
 init_compress_settings :: proc(settings: ^AOK_Compress_Settings) {
+    settings.base.kernel_name = AOK_COMPRESS_NAME;
 	settings.threshold = 0.5;
 	settings.ratio = 2.0;
 	settings.attack = 0.01;
@@ -511,6 +578,7 @@ AOK_Delay_Settings :: struct #no_copy {
 }
 
 init_delay_settings :: proc(settings: ^AOK_Delay_Settings) {
+    settings.base.kernel_name = AOK_DELAY_NAME;
 	settings.time = 0.3;
 	settings.feedback = 0.4;
 	settings.mix = 0.5;
@@ -540,6 +608,7 @@ AOK_Flanger_Settings :: struct #no_copy {
 }
 
 init_flanger_settings :: proc(settings: ^AOK_Flanger_Settings) {
+    settings.base.kernel_name = AOK_FLANGER_NAME;
 	settings.rate = 0.25;
 	settings.depth = 0.002;
 	settings.feedback = 0.2;
@@ -569,6 +638,7 @@ AOK_Chorus_Settings :: struct #no_copy {
 }
 
 init_chorus_settings :: proc(settings: ^AOK_Chorus_Settings) {
+    settings.base.kernel_name = AOK_CHORUS_NAME;
 	settings.rate = 0.25;
 	settings.depth = 0.005;
 	settings.mix = 0.4;
@@ -596,6 +666,7 @@ AOK_Comb_Filter_Settings :: struct #no_copy {
 }
 
 init_comb_filter_settings :: proc(settings: ^AOK_Comb_Filter_Settings) {
+    settings.base.kernel_name = AOK_COMB_FILTER_NAME;
 	settings.delay_time = 0.05;
 	settings.feedback = 0.6;
 }
@@ -623,6 +694,7 @@ AOK_Reverb_Settings :: struct #no_copy {
 }
 
 init_reverb_settings :: proc(settings: ^AOK_Reverb_Settings) {
+    settings.base.kernel_name = AOK_REVERB_NAME;
 	settings.room_size = 0.8;
 	settings.damping = 0.5;
 	settings.width = 1.0;
@@ -647,6 +719,10 @@ AOK_Envelope_Follow_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
 }
 
+init_envelope_follow_settings :: proc(settings: ^AOK_Envelope_Follow_Settings) {
+    settings.base.kernel_name = AOK_ENVELOPE_FOLLOW_NAME;
+}
+
 AOK_ENVELOPE_FOLLOW: cstring: `
     __kernel void envelope_follow(
         __global short* input,
@@ -662,6 +738,10 @@ AOK_ENVELOPE_FOLLOW_NAME: cstring: "envelope_follow";
 
 AOK_RMS_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
+}
+
+init_rms_settings :: proc(settings: ^AOK_RMS_Settings) {
+    settings.base.kernel_name = AOK_RMS_NAME;
 }
 
 AOK_RMS: cstring: `
@@ -683,6 +763,7 @@ AOK_Normalize_Settings :: struct #no_copy {
 }
 
 init_normalize_settings :: proc(settings: ^AOK_Normalize_Settings) {
+    settings.base.kernel_name = AOK_NORMALIZE_NAME;
 	settings.target_level = 0.9;
 }
 
@@ -706,6 +787,7 @@ AOK_Resample_Settings :: struct #no_copy {
 }
 
 init_resample_settings :: proc(settings: ^AOK_Resample_Settings) {
+    settings.base.kernel_name = AOK_RESAMPLE_NAME;
 	settings.target_rate = 44100.0;
 }
 
@@ -724,6 +806,10 @@ AOK_RESAMPLE_NAME: cstring: "resample";
 
 AOK_Convolve_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
+}
+
+init_convolve_settings :: proc(settings: ^AOK_Convolve_Settings) {
+    settings.base.kernel_name = AOK_CONVOLVE_NAME;
 }
 
 AOK_CONVOLVE: cstring: `
@@ -748,6 +834,7 @@ AOK_Generate_LFO_Settings :: struct #no_copy {
 }
 
 init_generate_lfo_settings :: proc(settings: ^AOK_Generate_LFO_Settings) {
+    settings.base.kernel_name = AOK_GENERATE_LFO_NAME;
 	settings.rate = 1.0;
 	settings.shape = 0; // TODO(GowardSilk): enum
 }
@@ -774,6 +861,7 @@ AOK_Apply_ADSR_Settings :: struct #no_copy {
 }
 
 init_apply_adsr_settings :: proc(settings: ^AOK_Apply_ADSR_Settings) {
+    settings.base.kernel_name = AOK_APPLY_ADSR_NAME;
 	settings.attack = 0.01;
 	settings.decay = 0.1;
 	settings.sustain = 0.7;
@@ -815,6 +903,7 @@ AOK_Operations :: struct #no_copy {
 }
 
 init_all_aok_settings :: proc(all: ^AOK_Operations) {
+    init_distortion_settings(&all.distortion);
     init_clip_settings(&all.clip);
     init_gain_settings(&all.gain);
     init_pan_settings(&all.pan);
@@ -825,16 +914,19 @@ init_all_aok_settings :: proc(all: ^AOK_Operations) {
     init_chorus_settings(&all.chorus);
     init_comb_filter_settings(&all.comb_filter);
     init_reverb_settings(&all.reverb);
+    init_envelope_follow_settings(&all.envelope_follow);
+    init_rms_settings(&all.rms);
     init_normalize_settings(&all.normalize);
     init_resample_settings(&all.resample);
+    init_convolve_settings(&all.convolve);
     init_generate_lfo_settings(&all.generate_lfo);
     init_apply_adsr_settings(&all.apply_adsr);
 }
 
 AOK := [?]cstring {
 	AOK_DISTORTION,
-	// AOK_CLIP,
-	// AOK_GAIN,
+	AOK_CLIP,
+	AOK_GAIN,
 	// AOK_PAN,
 	// AOK_LOWPASS_IIR,
 	// AOK_COMPRESS,
@@ -852,31 +944,10 @@ AOK := [?]cstring {
 	// AOK_APPLY_ADSR,
 }
 
-AOK_NAMES := [?]cstring{
-	AOK_DISTORTION_NAME,
-	// AOK_CLIP_NAME,
-	// AOK_GAIN_NAME,
-	// AOK_PAN_NAME,
-	// AOK_LOWPASS_IIR_NAME,
-	// AOK_COMPRESS_NAME,
-	// AOK_DELAY_NAME,
-	// AOK_FLANGER_NAME,
-	// AOK_CHORUS_NAME,
-	// AOK_COMB_FILTER_NAME,
-	// AOK_REVERB_NAME,
-	// AOK_ENVELOPE_FOLLOW_NAME,
-	// AOK_RMS_NAME,
-	// AOK_NORMALIZE_NAME,
-	// AOK_RESAMPLE_NAME,
-	// AOK_CONVOLVE_NAME,
-	// AOK_GENERATE_LFO_NAME,
-	// AOK_APPLY_ADSR_NAME,
-};
-
 AOK_SIZES := [?]uint{
 	AOK_DISTORTION_SIZE,
-	// AOK_CLIP_SIZE,
-	// AOK_GAIN_SIZE,
+	AOK_CLIP_SIZE,
+	AOK_GAIN_SIZE,
 	// AOK_PAN_SIZE,
 	// AOK_LOWPASS_IIR_SIZE,
 	// AOK_COMPRESS_SIZE,

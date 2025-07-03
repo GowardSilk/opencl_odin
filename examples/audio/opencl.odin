@@ -36,6 +36,8 @@ OpenCL_Context :: struct {
     audio_buffer_out: cl.Mem,
     audio_buffer_out_host: []c.short, /**< array of latest processed frames */
     eat_pos: u64, /**< how much data has already been read from audio_buffer_out_host by device_data_proc */
+
+    kernels: map[cstring]cl.Kernel,
 }
 
 init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
@@ -44,6 +46,7 @@ init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {
     create_context(&c) or_return;
     assemble_program(&c, AOK[:], AOK_SIZES[:]) or_return;
     create_command_queue(&c) or_return;
+    c.kernels = make(map[cstring]cl.Kernel);
     c.eat_pos = 0;
 
     return c, nil;
@@ -56,6 +59,8 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     if c^.audio_buffer_in  != nil do delete_buffer(c^.audio_buffer_in);
     if c^.audio_buffer_out != nil do delete_buffer(c^.audio_buffer_out);
     if c^.audio_buffer_out_host != nil do delete(c^.audio_buffer_out_host);
+    for _, kernel in c^.kernels do delete_kernel(kernel);
+    delete(c^.kernels);
     c^.eat_pos = 0;
 }
 

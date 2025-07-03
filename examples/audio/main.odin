@@ -132,20 +132,25 @@ show_sound_list_window :: proc(using co: ^Common) {
                 // decode the file
                 // note: this actually need not be locked, `frames_out' is just an out ptr
                 // the pPCMframes is handled internally and allocated anew, so this is "thread-safe"
-                frames_out: rawptr;
+                frames_out: [^]c.short;
                 frames_count: u64;
                 res := ma.decode_file(cast(cstring)&info_cname[0],
                     &frames_config,
                     &frames_count,
-                    &frames_out,
+                    cast(^rawptr)&frames_out,
                 );
                 if res != .SUCCESS do notify_error("Failed to decode selected file", res);
                 assert(frames_out != nil);
 
+                // max_ampltitude: c.short;
+                // for i in 0..<frames_count do if max_ampltitude < frames_out[i] {
+                //     max_ampltitude = frames_out[i];
+                // }
+
                 // play the new sound
                 sync.mutex_lock(&am.guarded_decoder.guard);
                 {
-                    am.guarded_decoder.decoder.frames = cast([^]c.short)frames_out;
+                    am.guarded_decoder.decoder.frames = frames_out;
                     am.guarded_decoder.decoder.frames_count = frames_count;
                     am.guarded_decoder.decoder.index = 0;
                 }
