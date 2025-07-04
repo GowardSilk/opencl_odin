@@ -24,6 +24,11 @@ OpenCL_Error :: enum {
     Kernel_Creation_Fail,
 }
 
+OpenCL_Audio_Buffer :: struct {
+    mem: cl.Mem,
+    size: c.size_t,
+}
+
 /** @brief contains the data for a whole OpenCL pipeline */
 OpenCL_Context :: struct {
     platform:   cl.Platform_ID,
@@ -32,9 +37,9 @@ OpenCL_Context :: struct {
     program:    cl.Program,
     queue:      cl.Command_Queue,
 
-    audio_buffer_in: cl.Mem,
-    audio_buffer_out: cl.Mem,
-    audio_buffer_out_host: []c.short, /**< array of latest processed frames */
+    audio_buffer_in: OpenCL_Audio_Buffer,
+    audio_buffer_out: OpenCL_Audio_Buffer,
+    audio_buffer_out_host: []c.short, /**< latest chunk of processed samples */
     eat_pos: u64, /**< how much data has already been read from audio_buffer_out_host by device_data_proc */
 
     kernels: map[cstring]cl.Kernel,
@@ -56,12 +61,16 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     delete_context(c^._context);
     delete_program(c^.program);
     delete_command_queue(c^.queue);
-    if c^.audio_buffer_in  != nil do delete_buffer(c^.audio_buffer_in);
-    if c^.audio_buffer_out != nil do delete_buffer(c^.audio_buffer_out);
-    if c^.audio_buffer_out_host != nil do delete(c^.audio_buffer_out_host);
+
+    if c^.audio_buffer_in.mem   != nil do delete_buffer(&c^.audio_buffer_in);
+    if c^.audio_buffer_out.mem  != nil do delete_buffer(&c^.audio_buffer_out);
+    if c^.audio_buffer_out_host != nil {
+	delete(c^.audio_buffer_out_host);
+	c^.eat_pos = 0;
+    }
+
     for _, kernel in c^.kernels do delete_kernel(kernel);
     delete(c^.kernels);
-    c^.eat_pos = 0;
 }
 
 pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
@@ -75,7 +84,7 @@ pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
 
 pick_device :: proc(c: ^OpenCL_Context) -> (err: Error) {
     if ret := cl.GetDeviceIDs(c^.platform, cl.DEVICE_TYPE_GPU, 1, &c^.device, nil); ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to query device id!", ret);
+	cl_context_errlog(c, "Failed to query device id!", ret);
         return .Device_Query_Fail;
     }
 
@@ -128,29 +137,31 @@ delete_program :: #force_inline proc(program: cl.Program) {
     cl.ReleaseProgram(program);
 }
 
-create_buffer :: proc(c: ^OpenCL_Context, mem: ^$T, mem_sz: uint, mem_flags: cl.Mem_Flags = cl.MEM_COPY_HOST_PTR) -> (buf: cl.Mem, err: Error) {
+create_buffer :: proc(c: ^OpenCL_Context, mem: ^$T, mem_sz: uint, mem_flags: cl.Mem_Flags = cl.MEM_COPY_HOST_PTR) -> (buf: OpenCL_Audio_Buffer, err: Error) {
     ret: cl.Int;
-    buf = cl.CreateBuffer(c^._context, mem_flags, mem_sz, cast(rawptr)mem, &ret);
-    fmt.assertf(ret == cl.SUCCESS, "Failed to create output buffer(%v; %v)! %v; %s; %s", mem, (cast([^]i16)mem)[0], ret, err_to_name(ret));
+    buf.mem = cl.CreateBuffer(c^._context, mem_flags, mem_sz, cast(rawptr)mem, &ret);
     if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create output buffer!", ret);
+	cl_context_errlog(c, "Failed to create output buffer!", ret);
         return nil, .Buffer_Allocation_Fail;
     }
 
+    buf.size = mem_sz;
     return buf, nil;
 }
 
-delete_buffer :: #force_inline proc(buf: cl.Mem) {
-    cl.ReleaseMemObject(buf);
+delete_buffer :: #force_inline proc(buf: ^OpenCL_Audio_Buffer) {
+    cl.ReleaseMemObject(buf.mem);
+    buf.size = 0;
+    buf.mem  = nil;
 }
 
 create_command_queue :: proc(c: ^OpenCL_Context) -> (err: Error) {
-	ret: cl.Int;
-	c^.queue = cl.CreateCommandQueue(c^._context, c^.device, 0, &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create Command Queue!", ret);
-		return .Command_Queue_Allocation_Fail;
-	}
+    ret: cl.Int;
+    c^.queue = cl.CreateCommandQueue(c^._context, c^.device, 0, &ret);
+    if ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to create Command Queue!", ret);
+	return .Command_Queue_Allocation_Fail;
+    }
 
     return nil;
 }
@@ -160,14 +171,14 @@ delete_command_queue :: #force_inline proc(queue: cl.Command_Queue) {
 }
 
 compile_kernel :: proc(c: ^OpenCL_Context, name: cstring) -> (kernel: cl.Kernel, err: Error) {
-	ret: cl.Int;
-	kernel = cl.CreateKernel(c^.program, name, &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create kernel!", ret);
-		return nil, .Kernel_Creation_Fail;
-	}
+    ret: cl.Int;
+    kernel = cl.CreateKernel(c^.program, name, &ret);
+    if ret != cl.SUCCESS {
+	    cl_context_errlog(c, "Failed to create kernel!", ret);
+	    return nil, .Kernel_Creation_Fail;
+    }
 
-	return kernel, nil;
+    return kernel, nil;
 }
 
 delete_kernel :: #force_inline proc(kernel: cl.Kernel) {

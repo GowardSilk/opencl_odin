@@ -239,6 +239,8 @@ ui_register_events :: proc(uim: ^UI_Manager) {
             case .KEY_DOWN:
                 mu_key := translate_sdl_key(event.key.scancode);
                 if mu_key != nil do mu.input_key_down(uim^.ctx, mu_key.?);
+
+                if event.key.scancode == .ESCAPE do uim^.should_close = true;
             case .KEY_UP:
                 mu_key := translate_sdl_key(event.key.scancode);
                 if mu_key != nil do mu.input_key_up(uim^.ctx, mu_key.?);

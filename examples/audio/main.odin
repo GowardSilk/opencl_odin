@@ -1,6 +1,5 @@
 package audio;
 
-import "core:strconv/decimal"
 import "base:runtime"
 
 import "core:c"
@@ -183,7 +182,16 @@ show_sound_list_window :: proc(using co: ^Common) {
 
         if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(uim.ctx, "Clear") {
             am.guarded_decoder.decoder.launch_kernel = false;
-            am.operations.distortion.base.enabled = false;
+
+            struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
+            struct_info := struct_info_named.base.variant.(runtime.Type_Info_Struct);
+            for i in 0..<struct_info.field_count {
+                field := reflect.struct_field_by_name(type_of(am^.operations), struct_info.names[i]);
+                base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
+                base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
+                base_enabled_field^ = false;
+            }
+
         }
 
         sync.lock(&am.guarded_decoder.guard);

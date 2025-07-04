@@ -6,16 +6,16 @@ import "core:c"
 import "core:fmt"
 import "core:mem"
 import "core:math"
+import "core:sync"
 
 import cl "shared:opencl"
 import ma "vendor:miniaudio"
-import sync "core:sync"
 
 Wave_Buffer :: struct {
     frames:         [^]c.short,
     frames_count:   u64,
     index:          u64,
-    // max_aplitude:   c.short,
+    max_amplitude:  u64, /**< index of the frame with the peak amplitude (note: when eq to ~0, amplitutde has not been calculate yet) */
 }
 
 Audio_Decorder :: struct {
@@ -37,6 +37,7 @@ Audio_Manager :: struct {
     guarded_decoder: ^Audio_Decoder_Guard,
     opencl: ^OpenCL_Context,
     operations: AOK_Operations,
+    operations_hash: int,
 }
 
 delete_wavebuffer :: #force_inline proc(wb: ^Wave_Buffer) {
@@ -64,7 +65,7 @@ delete_decoder :: proc(am: ^Audio_Manager) {
 }
 
 MAX_DEVICE_DATA_FRAME_COUNT :: 4096;
-MAX_OPENCL_BUFFER_FRAME_COUNT :: 10 * MAX_DEVICE_DATA_FRAME_COUNT;
+MAX_OUT_HOST_FRAME_COUNT :: 64 * MAX_DEVICE_DATA_FRAME_COUNT;
 
 @(private="file")
 increment_decoder_index :: #force_inline proc(guarded_decoder: ^Audio_Decoder_Guard, incr: u64) {
@@ -74,7 +75,7 @@ increment_decoder_index :: #force_inline proc(guarded_decoder: ^Audio_Decoder_Gu
 }
 
 @(private="file")
-device_data_proc_request_outbuffer :: proc(device: ^ma.device, frame_count: u64, out: [^]c.short) {
+device_data_proc_request_outbuffer :: proc(device: ^ma.device, expected_buffer_size: c.size_t, frame_count: u64, out: [^]c.short) {
     am := cast(^Audio_Manager)(device.pUserData);
     assert(am != nil);
 
@@ -82,68 +83,144 @@ device_data_proc_request_outbuffer :: proc(device: ^ma.device, frame_count: u64,
     sample_size := cast(u64)ma.get_bytes_per_sample(device.playback.playback_format);
     channels    := cast(u64)device.playback.channels;
 
-    // NOTE(GowardSilk): For the allocations to really make sense, it will be better to initialize the buffers to a larger
-    // size than just MAX_DEVICE_DATA_FRAME_COUNT
-    buffer_size: c.size_t = MAX_OPENCL_BUFFER_FRAME_COUNT * cast(c.size_t)(sample_size * channels);
-    eat_byte_pos := opencl^.eat_pos * channels;
+    host_out_chunk_size := MAX_OUT_HOST_FRAME_COUNT * cast(c.size_t)channels;
+    eat_sample_pos := opencl^.eat_pos * channels;
     frame_byte_count := frame_count * channels;
 
     // Initialize input/output audio buffers when needed
-    if opencl^.audio_buffer_in == nil {
+    init_opencl_audio_buffers :: proc(using am: ^Audio_Manager, expected_buffer_size: c.size_t) {
+        // AUDIO INPUT BUFFER
         ret: cl.Int;
-        opencl^.audio_buffer_in = cl.CreateBuffer(
+        opencl^.audio_buffer_in.mem = cl.CreateBuffer(
             opencl^._context,
             cl.MEM_ALLOC_HOST_PTR | cl.MEM_READ_ONLY,
-            buffer_size,
+            expected_buffer_size,
             nil,
             &ret
         );
         fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
-        assert(opencl^.audio_buffer_in != nil);
+        assert(opencl^.audio_buffer_in.mem != nil);
+        opencl^.audio_buffer_in.size = expected_buffer_size;
 
-        opencl^.audio_buffer_out = cl.CreateBuffer(
+        // MAP AUDIO INPUT BUFFER
+        sync.mutex_lock(&guarded_decoder.guard);
+        {
+            src := &guarded_decoder.decoder.frames[0];
+
+            buf_map := cl.EnqueueMapBuffer(
+                opencl^.queue,
+                opencl^.audio_buffer_in.mem,
+                cl.TRUE,
+                cl.MAP_WRITE,
+                0,
+                expected_buffer_size,
+                0,
+                nil,
+                nil,
+                &ret
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to map buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            mem.copy(buf_map, src, int(expected_buffer_size));
+
+            ret = cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_in.mem, buf_map, 0, nil, nil);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to unmap buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+        }
+        sync.mutex_unlock(&am^.guarded_decoder.guard);
+
+        // AUDIO OUTPUT BUFFER
+        opencl^.audio_buffer_out.mem = cl.CreateBuffer(
             opencl^._context,
-            cl.MEM_WRITE_ONLY,
-            buffer_size,
+            cl.MEM_ALLOC_HOST_PTR | cl.MEM_WRITE_ONLY,
+            expected_buffer_size,
             nil,
             &ret
         );
         fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
-        assert(opencl^.audio_buffer_out != nil);
+        assert(opencl^.audio_buffer_out.mem != nil);
+        opencl^.audio_buffer_out.size = expected_buffer_size;
+    }
 
-        opencl^.audio_buffer_out_host = make([]c.short, buffer_size);
+    @static
+    last_ops := AOK_Operations{};
+
+    if opencl^.audio_buffer_in.mem == nil {
+        init_opencl_audio_buffers(am, expected_buffer_size);
+
+        // allocate the CPU (aka host) output buffer
+        assert(opencl^.audio_buffer_out_host == nil);
+        opencl^.audio_buffer_out_host = make([]c.short, host_out_chunk_size);
         assert(opencl^.audio_buffer_out_host != nil);
 
         // process the first frames
-        device_data_proc_process_buffer(device);
+        device_data_proc_process_buffer(device, 0);
 
-        mem.copy(out, &opencl^.audio_buffer_out_host[eat_byte_pos], cast(int)frame_byte_count);
+        mem.copy(out, &opencl^.audio_buffer_out_host[eat_sample_pos], cast(int)frame_byte_count);
         opencl^.eat_pos += frame_count;
         increment_decoder_index(am^.guarded_decoder, frame_count);
-        fmt.eprintfln("Initial Index: %d; Added: %d; Len: %d", am^.guarded_decoder.decoder.index, frame_count, len(opencl^.audio_buffer_out_host));
+
+        mem.copy(&last_ops, &am^.operations, size_of(AOK_Operations));
+
+        return;
+    } else if mem.compare_ptrs(&last_ops, &am^.operations, size_of(AOK_Operations)) != 0 {
+        if opencl^.audio_buffer_in.size < expected_buffer_size {
+            // "reallocate"
+            delete_buffer(&opencl^.audio_buffer_in);
+            delete_buffer(&opencl^.audio_buffer_out);
+            mem.zero_slice(opencl^.audio_buffer_out_host);
+            opencl^.eat_pos = 0;
+
+            init_opencl_audio_buffers(am, expected_buffer_size);
+        }
+
+        // process frames
+        sync.mutex_lock(&am^.guarded_decoder.guard);
+        index := am^.guarded_decoder.decoder.index;
+        sync.mutex_unlock(&am^.guarded_decoder.guard);
+        device_data_proc_process_buffer(
+            device,
+            cast(c.size_t)(index * channels * sample_size)
+        );
+
+        // copy to out
+        mem.copy(out, &opencl^.audio_buffer_out_host[opencl^.eat_pos], cast(int)frame_byte_count);
+        opencl^.eat_pos += frame_count;
+        increment_decoder_index(am^.guarded_decoder, frame_count);
+
+        // reset last_ops
+        mem.copy(&last_ops, &am^.operations, size_of(AOK_Operations));
 
         return;
     }
 
-    if opencl^.eat_pos + frame_count >= MAX_OPENCL_BUFFER_FRAME_COUNT {
+    if opencl^.eat_pos + frame_count >= MAX_OUT_HOST_FRAME_COUNT {
         fmt.eprintfln("Eat pos: %d; Frame count: %d; Len/Sum: %d/%d",
             opencl^.eat_pos, frame_count, len(opencl^.audio_buffer_out_host), opencl^.eat_pos + frame_count)
-        // eat the rest of the buffer and read next chunk of which 
-        // <<len_of_host_ptr - eat_pos - frame_count>> will
-        // be copied again to the output
-        delta := MAX_OPENCL_BUFFER_FRAME_COUNT - opencl^.eat_pos;
+        delta := MAX_OUT_HOST_FRAME_COUNT - opencl^.eat_pos;
         fmt.eprintfln("Delta: %d", delta);
-        mem.copy(out, &opencl^.audio_buffer_out_host[eat_byte_pos], cast(int)(delta * sample_size * channels));
+        if delta != 0 {
+            mem.copy(out, &opencl^.audio_buffer_out_host[eat_sample_pos], cast(int)(delta * sample_size * channels));
+        }
         opencl^.eat_pos = 0;
 
-        device_data_proc_process_buffer(device);
+        // read new chunk
+        sync.mutex_lock(&am^.guarded_decoder.guard);
+        index := am^.guarded_decoder.decoder.index;
+        sync.mutex_unlock(&am^.guarded_decoder.guard);
+        host_len := cast(c.size_t)(u64(len(opencl^.audio_buffer_out_host)) * sample_size);
+        device_data_proc_copy_to_host(
+            am,
+            min(host_len, opencl^.audio_buffer_out.size - cast(c.size_t)(index * sample_size * channels)),
+            cast(c.size_t)(index * channels * sample_size)
+        );
+
         rest := frame_count - delta;
         if rest != 0 {
             fmt.assertf(
-                rest > 0 && rest < MAX_OPENCL_BUFFER_FRAME_COUNT,
+                rest > 0 && rest < MAX_OUT_HOST_FRAME_COUNT,
                 "The frame count (%d) is %dx larger than the maximal buffer size (%d)!",
                 frame_count,
-                frame_count / MAX_OPENCL_BUFFER_FRAME_COUNT,
+                frame_count / MAX_OUT_HOST_FRAME_COUNT,
                 len(opencl^.audio_buffer_out_host)
             );
             mem.copy(&out[delta * channels], &opencl^.audio_buffer_out_host[0], cast(int)(rest * sample_size * channels));
@@ -155,44 +232,64 @@ device_data_proc_request_outbuffer :: proc(device: ^ma.device, frame_count: u64,
         return;
     }
 
-    mem.copy(out, &opencl^.audio_buffer_out_host[eat_byte_pos], cast(int)(frame_byte_count * sample_size));
+    mem.copy(out, &opencl^.audio_buffer_out_host[eat_sample_pos], cast(int)(frame_byte_count * sample_size));
     opencl^.eat_pos += frame_count;
     increment_decoder_index(am^.guarded_decoder, frame_count);
-    fmt.eprintfln("Eat: %d; Index: %d; Added: %d; Len: %d", opencl^.eat_pos, am^.guarded_decoder.decoder.index, frame_count, len(opencl^.audio_buffer_out_host));
+    //fmt.eprintfln("Eat: %d; Index: %d; Added: %d; Len: %d", opencl^.eat_pos, am^.guarded_decoder.decoder.index, frame_count, len(opencl^.audio_buffer_out_host));
+}
+
+/**
+ * @param host_len length of to be copied from OpenCL outbuffer to host (in bytes)
+ * @param offset how many bytes should be skipped from the beginning of the copy of the OpenCL outbuffer
+ *
+ * @note host_len has to be lower or equal as the byte length of the host buffer! host_len param is not to be offsetted in any way externally
+ */
+@(private="file")
+device_data_proc_copy_to_host :: proc(using am: ^Audio_Manager, host_len, offset: c.size_t) {
+    assert(host_len <= len(opencl^.audio_buffer_out_host) * size_of(c.short));
+
+    ret: cl.Int;
+    buf_map := cl.EnqueueMapBuffer(
+        opencl^.queue,
+        opencl^.audio_buffer_out.mem,
+        cl.TRUE,
+        cl.MAP_READ,
+        offset,
+        host_len,
+        0,
+        nil,
+        nil,
+        &ret
+    );
+    fmt.eprintfln("Host len: %d; Offset: %d; Bufsize: %d", host_len, offset, opencl^.audio_buffer_out.size);
+    fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue map buffer for read! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+    sync.lock(&guarded_decoder.guard);
+    channels := guarded_decoder.decoder.config.channels;
+    sync.unlock(&guarded_decoder.guard);
+    eat_sample_pos := opencl^.eat_pos * u64(channels);
+    mem.copy(&opencl^.audio_buffer_out_host[eat_sample_pos], buf_map, cast(int)host_len);
+
+    ret = cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_out.mem, buf_map, 0, nil, nil);
+    fmt.assertf(ret == cl.SUCCESS, "Failed to unmap buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
 }
 
 @(private="file")
-device_data_proc_process_buffer :: proc(device: ^ma.device) {
+device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.size_t) {
     am := cast(^Audio_Manager)(device.pUserData);
     assert(am != nil);
 
     opencl := am^.opencl;
     sample_size := cast(u64)ma.get_bytes_per_sample(device.playback.playback_format);
     channels := cast(u64)device.playback.channels;
-    buffer_size := cast(c.size_t)len(opencl^.audio_buffer_out_host);
 
     // TODO(GowardSilk): make sure we have some kind of Error pipeline established for the main thread!
-    {
-        sync.mutex_lock(&am^.guarded_decoder.guard);
-        src := &am^.guarded_decoder.decoder.frames[am^.guarded_decoder.decoder.index * channels];
 
-        assert(opencl^.audio_buffer_in != nil);
-
-        ret: cl.Int;
-        buf_map := cl.EnqueueMapBuffer(opencl^.queue, opencl^.audio_buffer_in, cl.TRUE, cl.MAP_WRITE, 0, buffer_size, 0, nil, nil, &ret);
-        fmt.assertf(ret == cl.SUCCESS, "Failed to map buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
-
-        mem.copy(buf_map, src, auto_cast buffer_size);
-
-        ret = cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_in, buf_map, 0, nil, nil);
-        assert(ret == cl.SUCCESS);
-
-        sync.mutex_unlock(&am^.guarded_decoder.guard);
-    }
-
-    input_buffer := &opencl^.audio_buffer_in;
-    output_buffer := &opencl^.audio_buffer_out;
-    first_kernel := true;
+    input_buffer  := opencl^.audio_buffer_in;
+    output_buffer := opencl^.audio_buffer_out;
+    assert(opencl^.audio_buffer_in.size == opencl^.audio_buffer_out.size);
+    buffer_size   := cast(c.size_t)opencl^.audio_buffer_in.size - process_offset;
+    first_kernel  := true;
 
     deferred_compile_kernel :: #force_inline proc(opencl: ^OpenCL_Context, name: cstring) -> cl.Kernel {
         /* deferred kernel initialization */
@@ -215,14 +312,18 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
     }
 
-    copy_out_to_in :: #force_inline proc(opencl: ^OpenCL_Context, input_buffer: ^cl.Mem, output_buffer: ^cl.Mem, buffer_size: c.size_t) {
+    copy_out_to_in :: #force_inline proc(
+        opencl: ^OpenCL_Context,
+        input_buffer, output_buffer: OpenCL_Audio_Buffer,
+        buffer_size, offset: c.size_t)
+    {
         // NOTE(GowardSilk): we want to copy the result (aka output_buffer) into input again
         ret := cl.EnqueueCopyBuffer(
             opencl^.queue,
-            output_buffer^,
-            input_buffer^,
+            output_buffer.mem,
+            input_buffer.mem,
             0,
-            0,
+            offset,
             buffer_size,
             0,
             nil,
@@ -252,7 +353,7 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         if first_kernel == true do first_kernel = false;
         else { unreachable(/* copy output_buffer -> input_buffer */); }
 
-        set_input_output_args(kernel, input_buffer, output_buffer);
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
         enqueue_basic(opencl, kernel, &buffer_size);
     }
 
@@ -260,9 +361,9 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         kernel := deferred_compile_kernel(opencl, am^.operations.clip.base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
-        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        set_input_output_args(kernel, input_buffer, output_buffer);
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
         ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.clip.threshold);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
@@ -274,9 +375,9 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         kernel := deferred_compile_kernel(opencl, am^.operations.gain.base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
-        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        set_input_output_args(kernel, input_buffer, output_buffer);
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
         ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.gain.gain);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
@@ -288,9 +389,9 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         kernel := deferred_compile_kernel(opencl, am^.operations.pan.base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
-        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        set_input_output_args(kernel, input_buffer, output_buffer);
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
         ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.pan.pan.actual);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
@@ -303,32 +404,66 @@ device_data_proc_process_buffer :: proc(device: ^ma.device) {
         kernel := deferred_compile_kernel(opencl, am^.operations.lowpass_iir.base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
-        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size);
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        set_input_output_args(kernel, input_buffer, output_buffer);
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
         cutoff := am^.operations.lowpass_iir.cutoff;
         x := math.exp(-2.0 * math.PI * cutoff / cast(cl.Float)device.sampleRate);
         ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &x);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-        mono_buffer_size := buffer_size >> 1;
-        enqueue_basic(opencl, kernel, &mono_buffer_size);
+        enqueue_basic(opencl, kernel, &buffer_size);
     }
 
-    assert(opencl^.eat_pos == 0);
-    ret := cl.EnqueueReadBuffer(
-        opencl^.queue,
-        output_buffer^,
-        cl.TRUE,
-        0,
-        buffer_size,
-        &opencl^.audio_buffer_out_host[0],
-        0,
-        nil,
-        nil
-    );
-    fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue read buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
+    if am^.operations.envelope_follow.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.envelope_follow.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
+
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
+
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.envelope_follow.attack);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        ret  = cl.SetKernelArg(kernel, 3, size_of(cl.Float), &am^.operations.envelope_follow.release);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        enqueue_basic(opencl, kernel, &buffer_size);
+
+        //{
+        //    ret := cl.EnqueueReadBuffer(
+        //        opencl^.queue,
+        //        output_buffer.mem,
+        //        cl.TRUE,
+        //        0,
+        //        output_buffer.size,
+        //        &opencl^.audio_buffer_out_host[0],
+        //        0,
+        //        nil,
+        //        nil
+        //    );
+        //
+        //    @static was_init := false;
+        //    @static encoder: ma.encoder;
+        //
+        //    if !was_init {
+        //        config := ma.encoder_config_init(.wav, device.playback.playback_format, cast(u32)channels, device.sampleRate);
+        //        err := ma.encoder_init_file("skuska.wav", &config, &encoder);
+        //        fmt.assertf(err == .SUCCESS, "Failed to init encoder for a `skuska.wav` file! Error: %v", err);
+        //        was_init = true;
+        //    }
+        //    written: u64;
+        //    err := ma.encoder_write_pcm_frames(&encoder, &opencl^.audio_buffer_out_host[0], cast(u64)buffer_size, &written);
+        //    fmt.assertf(err == .SUCCESS, "Failed to encoder pcm frames into `skuska.wav`! Error: %v", err);
+        //    fmt.eprintfln("Written: %d", written);
+        //}
+    }
+
+    eat_byte_pos := opencl^.eat_pos * sample_size * channels;
+    host_len := cast(c.size_t)(u64(len(opencl^.audio_buffer_out_host)) * sample_size - eat_byte_pos);
+    device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
 }
 
 device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, frame_count_u32: u32) {
@@ -364,7 +499,7 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
     dst := cast([^]c.short)output;
 
     if decoder.launch_kernel {
-        device_data_proc_request_outbuffer(device, frames_to_copy, dst);
+        device_data_proc_request_outbuffer(device, cast(c.size_t)(decoder.frames_count * channels * sample_size), frames_to_copy, dst);
     } else {
         // increment the wave buffer's index
         // and copy the final contents from wave buffer
@@ -443,6 +578,14 @@ delete_audio_manager :: proc(am: ^Audio_Manager) {
 // [A]udio_[O]peration_[K]ernel
 
 decibel :: distinct cl.Float;
+
+// helper AOK
+AOK_PEAK: cstring: `
+    __kernel void peak(__global short* input, __global TODO) {
+    }
+`;
+AOK_PEAK_SIZE: uint: len(AOK_PEAK);
+AOK_PEAK_NAME: cstring: "find_peak";
 
 AOK_Operation_Base :: struct #no_copy {
     enabled: bool,
@@ -855,10 +998,12 @@ AOK_NORMALIZE: cstring: `
     __kernel void normalize(
         __global short* input,
         __global short* output,
-        float gain)
+        float target,
+        short peak)
     {
         int idx = get_global_id(0);
-        
+        float t = ((float)SHRT_MAX * pow(10, target / 10.f)) / (float)peak;
+        output[idx] = clamp((short)((float)input[idx] * t), (short)SHRT_MIN, (short)SHRT_MAX);
     }
 `;
 AOK_NORMALIZE_SIZE: uint: len(AOK_NORMALIZE);
@@ -1021,7 +1166,7 @@ AOK := [?]cstring {
 	// AOK_REVERB,
 	AOK_ENVELOPE_FOLLOW,
 	// AOK_RMS,
-	// AOK_NORMALIZE,
+	AOK_NORMALIZE,
 	// AOK_RESAMPLE,
 	// AOK_CONVOLVE,
 	// AOK_GENERATE_LFO,
@@ -1042,7 +1187,7 @@ AOK_SIZES := [?]uint{
 	// AOK_REVERB_SIZE,
 	AOK_ENVELOPE_FOLLOW_SIZE,
 	// AOK_RMS_SIZE,
-	// AOK_NORMALIZE_SIZE,
+	AOK_NORMALIZE_SIZE,
 	// AOK_RESAMPLE_SIZE,
 	// AOK_CONVOLVE_SIZE,
 	// AOK_GENERATE_LFO_SIZE,
