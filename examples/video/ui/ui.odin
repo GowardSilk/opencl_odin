@@ -62,13 +62,13 @@ Draw_Proc :: #type proc "odin" (w: Window);
 register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> General_Error {
     w := prepare_window(size, name, draw) or_return;
     if w.handle == nil do return .Window_Creation;
-    
+
     // deferred batch renderer initialization
     ctx := get_context();
     if ctx^.ren.perwindow == nil {
-        ctx^.ren = batch_renderer_new(cast(Batch_Renderer_Window_ID)w.handle) or_return;
+        ctx^.ren = batch_renderer_new(cast(Window_ID)w.handle, ctx^.ren.backend) or_return;
     } else {
-        batch_renderer_clone(&ctx^.ren, cast(Batch_Renderer_Window_ID)w.handle) or_return;
+        batch_renderer_clone(&ctx^.ren, cast(Window_ID)w.handle) or_return;
     }
 
     append(&ctx^.queue.windows, w);
@@ -76,23 +76,23 @@ register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> Gener
     return nil;
 }
 
-init :: proc(usr_data: rawptr = nil) -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
-    glfw_error_callback :: proc "cdecl" (error: c.int, description: cstring) {
-        context = runtime.default_context();
-        log.errorf("Error encountered (%d): %s", error, description);
+init :: proc(backend: Backend_Kind, usr_data: rawptr = nil) -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
+    switch backend {
+        case .GL:
+            if glfw.Init() != glfw.TRUE {
+                log.error("Error: failed to initialize glfw!");
+                return nil, .None;
+            }
+        case .D3D11:
+            assert(false, "TODO");
     }
-    glfw.SetErrorCallback(glfw_error_callback);
-
-	if(glfw.Init() != glfw.TRUE){
-        log.error("Error: failed to initialize glfw!");
-		return nil, .None;
-	}
 
     ctx = new(Draw_Context) or_return;
 
     // batch renderer
     // NOTE: since we do not have any active window, we cannot create and compile shaders...
     ctx^.ren = Batch_Renderer{};
+    ctx^.ren.backend = backend; // store it preemptively here...
 
     // render queue
     ctx^.queue.windows = make_dynamic_array([dynamic]Window) or_return;
@@ -161,14 +161,14 @@ draw_image :: proc(size_hint: [2]c.int, img_path: string) -> (err: General_Error
     if img_pos.x + size_hint.x > window_width {
         img_pos = draw_cursor_descend();
     }
-    
+
     defer draw_cursor_next(size_hint); // move to the next "slot"
 
     ctx := get_context();
     // we cannot batch images properly, so they are loaded "in-place"
     return batch_renderer_register_image(
         &ctx^.ren,
-        cast(Batch_Renderer_Window_ID)ctx^.queue.active_window^.handle,
+        cast(Window_ID)ctx^.queue.active_window^.handle,
         img_pos,
         {1, 1, 0, 0},
         img_path
@@ -200,7 +200,7 @@ draw :: proc() {
                 // signal to the draw function that the window is being closed
                 w.signal = .Should_Close;
                 w->draw_proc();
-                batch_renderer_unload(&ctx^.ren, cast(Batch_Renderer_Window_ID)w.handle);
+                batch_renderer_unload(&ctx^.ren, cast(Window_ID)w.handle);
                 glfw.DestroyWindow(w.handle);
                 ordered_remove(&queue^.windows, i);
                 l -= 1;
@@ -229,7 +229,7 @@ get_data :: #force_inline proc($T: typeid) -> ^T {
  * @param img_path path to the original img
  * @return OpenGL texture2D id
  */
-get_image_id :: #force_inline proc(img_path: string) -> u32 {
+get_image_id :: #force_inline proc(img_path: string) -> Image_Request_Result {
     return batch_renderer_handle_image_request(&get_context()^.ren, img_path);
 }
 
@@ -238,7 +238,7 @@ get_image_id :: #force_inline proc(img_path: string) -> u32 {
  * @param img_path path to the original img
  * @param new_img_id new OpenGL texture2D id
  */
-reset_image_id :: #force_inline proc(img_path: string, new_img_id: u32) {
+reset_image_id :: #force_inline proc(img_path: string, new_img_id: Image_Request_Result) {
     batch_renderer_invalidate_image_and_reset(&get_context()^.ren, img_path, new_img_id);
 }
 

@@ -29,7 +29,7 @@ OpenCL_Context :: struct {
     operations: Compute_Operations,
 }
 
-cl_context_init :: proc() -> (c: OpenCL_Context, err: Error) {
+cl_context_init :: proc(platform: cl.Platform_ID, context_properties: []cl.Context_Properties) -> (c: OpenCL_Context, err: Error) {
     @(static)
     kernels      := [?]cstring { CF_GAUSSIAN_BLUR, };
     @(static)
@@ -40,9 +40,9 @@ cl_context_init :: proc() -> (c: OpenCL_Context, err: Error) {
         {name=CF_GAUSSIAN_BLUR_KERNEL2_NAME, type=.Convolution_Filter_Gauss_Vertical},
     };
 
-    pick_platform(&c) or_return;
+    c.platform = platform;
     pick_device(&c) or_return;
-    create_context(&c) or_return;
+    create_context(&c, context_properties) or_return;
     assemble_program(&c, kernels[:], kernel_sizes[:]) or_return;
     create_command_queue(&c) or_return;
     c.buffers = make([dynamic]cl.Mem);
@@ -65,46 +65,16 @@ cl_context_delete :: proc(c: ^OpenCL_Context) {
     delete(c^.kernels);
 }
 
-pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
-	if ret := cl.GetPlatformIDs(1, &c^.platform, nil); ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to query platform id!", ret);
-		return .Platform_Query_Fail;
-	}
-
-    log_sz: uint;
-    cl.GetPlatformInfo(c^.platform, cl.PLATFORM_EXTENSIONS, 0, nil, &log_sz);
-    log_msg := make([]byte, log_sz);
-    defer delete(log_msg);
-    cl.GetPlatformInfo(c^.platform, cl.PLATFORM_EXTENSIONS, log_sz, &log_msg[0], nil);
-    exts, serr := strings.split(cast(string)log_msg, " ");
-    assert(serr == .None);
-    defer delete(exts);
-
-    has_gl_support := false;
-    for ext in exts {
-        if ext == cl.KHR_GL_SHARING_EXTENSION_NAME {
-            has_gl_support = true;
-            break;
-        }
-    }
-
-    if !has_gl_support {
-        log.errorf("This platform does not support OpenGL interop with OpenCL!");
-        return .No_GL_Interop_Support;
-    }
-    return .None;
-}
-
 pick_device :: proc(c: ^OpenCL_Context) -> (err: Error) {
     if ret := cl.GetDeviceIDs(c^.platform, cl.DEVICE_TYPE_GPU, 1, &c^.device, nil); ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to query device id!", ret);
+	cl_context_errlog(c, "Failed to query device id!", ret);
         return .Device_Query_Fail;
     }
 
     return .None;
 }
 
-create_context :: proc(c: ^OpenCL_Context) -> (err: Error) {
+create_context :: proc(c: ^OpenCL_Context, context_properties: []cl.Context_Properties) -> (err: Error) {
     when ODIN_DEBUG {
         ctx_error_callback :: proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr) {
             context = runtime.default_context()
@@ -114,15 +84,14 @@ create_context :: proc(c: ^OpenCL_Context) -> (err: Error) {
         ctx_error_callback: #type proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr): nil;
     }
 
-	ret: cl.Int;
-    props := cl.Context_Properties(cl.GL_CONTEXT_KHR);
-	c^._context = cl.CreateContext(&props, 1, &c^.device, ctx_error_callback, nil, &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create Context!", ret);
-		return .Context_Creation_Fail;
-	}
+    ret: cl.Int;
+    c^._context = cl.CreateContext(&context_properties[0], 0, &c^.device, ctx_error_callback, nil, &ret);
+    if ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to create Context!", ret);
+	return .Context_Creation_Fail;
+    }
 
-	return .None;
+    return .None;
 }
 
 delete_context :: #force_inline proc(_context: cl.Context) {
@@ -131,18 +100,18 @@ delete_context :: #force_inline proc(_context: cl.Context) {
 
 assemble_program :: proc(c: ^OpenCL_Context, sources: []cstring, source_sizes: []uint) -> (err: Error) {
     ret: cl.Int;
-	c^.program = cl.CreateProgramWithSource(c^._context, cast(u32)len(sources), &sources[0], &source_sizes[0], &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create program!", ret);
-		return .Program_Allocation_Fail;
-	}
+    c^.program = cl.CreateProgramWithSource(c^._context, cast(u32)len(sources), &sources[0], &source_sizes[0], &ret);
+    if ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to create program!", ret);
+	return .Program_Allocation_Fail;
+    }
 
-	if ret = cl.BuildProgram(c^.program, 1, &c^.device, nil, nil, nil); ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to compile program!", ret);
-		return .Program_Compilation_Fail;
-	}
+    if ret = cl.BuildProgram(c^.program, 1, &c^.device, nil, nil, nil); ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to compile program!", ret);
+	return .Program_Compilation_Fail;
+    }
 
-	return .None;
+    return .None;
 }
 
 delete_program :: #force_inline proc(program: cl.Program) {
@@ -155,7 +124,7 @@ create_buffer :: proc(c: ^OpenCL_Context, mem: $T, mem_sz: uint) -> (err: Error)
     ret: cl.Int;
     buf := cl.CreateBuffer(c^._context, cl.MEM_COPY_HOST_PTR, mem_sz, cast(rawptr)&mem, &ret);
     if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create output buffer!", ret);
+	cl_context_errlog(c, "Failed to create output buffer!", ret);
         return .Buffer_Allocation_Fail;
     }
 

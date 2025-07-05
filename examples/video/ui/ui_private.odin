@@ -106,26 +106,26 @@ pos_to_ndc :: proc(r: Rect) -> Rect {
 
 prepare_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> (win: Window, err: General_Error) {
     glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE);
-	glfw.WindowHint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
-	glfw.WindowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
-	glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, 4);
-	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, 6);
+    glfw.WindowHint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
+    glfw.WindowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
+    glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, 4);
+    glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, 6);
     when ODIN_DEBUG do glfw.WindowHint(glfw.OPENGL_DEBUG_CONTEXT, glfw.TRUE);
-	
+
     ctx := get_context();
     window_share: glfw.WindowHandle = nil;
     if len(ctx.queue.windows) > 0 do window_share = ctx.queue.windows[0].handle;
-	win.handle = glfw.CreateWindow(size.x, size.y, name, nil, window_share);
+    win.handle = glfw.CreateWindow(size.x, size.y, name, nil, window_share);
 
-	if win.handle == nil {
-        log.error("Error: failed to initialize window!");
-		return win, .Window_Creation;
-	}
-	
-	glfw.MakeContextCurrent(win.handle);
-	glfw.SwapInterval(1);
-	// ?? glfw.SetKeyCallback(window_handle, key_callback);
-	// ?? glfw.SetFramebufferSizeCallback(window_handle, size_callback);
+    if win.handle == nil {
+    log.error("Error: failed to initialize window!");
+        return win, .Window_Creation;
+    }
+
+    glfw.MakeContextCurrent(win.handle);
+    glfw.SwapInterval(1);
+    // ?? glfw.SetKeyCallback(window_handle, key_callback);
+    // ?? glfw.SetFramebufferSizeCallback(window_handle, size_callback);
 
     when ODIN_DEBUG {
         debug_callback :: proc "c" (source: u32, type: u32, id: u32, severity: u32, length: i32, message: cstring, userParam: rawptr) {
@@ -185,5 +185,5 @@ execute_draw_commands :: proc() {
         }
     }
 
-    batch_renderer_construct(ren, cast(Batch_Renderer_Window_ID)ctx^.queue.active_window^.handle);
+    batch_renderer_construct(ren, cast(Window_ID)ctx^.queue.active_window^.handle);
 }
