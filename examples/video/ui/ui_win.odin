@@ -5,6 +5,7 @@ package ui;
 import "base:runtime"
 
 import "core:c"
+import "core:log"
 import "core:mem"
 import "core:strings"
 
@@ -151,25 +152,38 @@ draw_win :: proc() {
         l := len(q^.windows);
         for i := 0; i < l; i += 1 {
             w := q^.windows[i];
+            w_handle := cast(^_Window)w.handle;
 
-            if (cast(^_Window)w.handle)^.should_close {
+            if w_handle.should_close {
                 // signal to the draw function that the window is being closed
                 w.signal = .Should_Close;
                 w->draw_proc();
-                batch_renderer_unload(&ctx^.ren, cast(Window_ID)w.handle);
-                delete_window(cast(^_Window)w.handle);
+                batch_renderer_unload(&ctx^.ren, cast(Window_ID)w_handle.hwnd);
+                delete_window(w_handle);
                 ordered_remove(&q^.windows, i);
                 l -= 1;
             } else {
                 q^.active_window = &w;
 
-                assert(false, "D3D11 Clear color");
+                msg: win.MSG;
+                for win.PeekMessageW(&msg, w_handle.hwnd, 0, 0, win.PM_REMOVE) != win.FALSE {
+                    win.TranslateMessage(&msg);
+                    win.DispatchMessageW(&msg);
+                }
+
+                perwindow, ok := ctx.ren.perwindow[cast(Window_ID)w_handle.hwnd];
+                assert(ok);
+                color := [4]f32{0.1, 0.1, 0.1, 1.0};
+                ctx^.ren.persistent.device_context->ClearRenderTargetView(
+                    perwindow.d3d11.framebuffer_view,
+                    &color
+                );
 
                 w->draw_proc();
                 execute_draw_commands();
                 reset_state();
 
-                assert(false, "Swap buffers");
+                perwindow.d3d11.swapchain->Present(1, {});
             }
         }
 
@@ -179,7 +193,7 @@ draw_win :: proc() {
 
 delete_window :: #force_inline proc(window: ^_Window) {
     assert(window != nil);
-    win.DestroyWindow(window^.hwnd); 
+    if window^.hwnd != nil do win.DestroyWindow(window^.hwnd); 
     mem.free(window);
 }
 
@@ -202,7 +216,14 @@ window_proc :: proc "system" (hwnd: win.HWND, msg: win.UINT, wparam: win.WPARAM,
     }
 
     switch msg {
-        case win.WM_CLOSE:          return window_proc_close(window);
+        case win.WM_CLOSE:
+            win.DestroyWindow(hwnd);
+            window^.hwnd = nil;
+            window^.should_close = true;
+            return 0;
+        case win.WM_DESTROY:
+            win.PostQuitMessage(0);
+            return 0;
         case:                       return win.DefWindowProcW(hwnd, msg, wparam, lparam);
     }
 }

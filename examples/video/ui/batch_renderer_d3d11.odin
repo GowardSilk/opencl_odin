@@ -1,7 +1,7 @@
 /**
  * @file batch_renderer_d3d11.odin
  *
- * @brief 
+ * @brief
  *
  * @ingroup ui
  *
@@ -11,27 +11,39 @@ package ui;
 
 import "core:log"
 import "core:fmt"
+import "core:mem"
+import "core:strings"
+import "core:c/libc"
 
 import d3dc  "vendor:directx/d3d_compiler"
 import d3d11 "vendor:directx/d3d11"
 import dxgi  "vendor:directx/dxgi"
 
+import stbi "vendor:stb/image"
+
 Image_Vertex_Buffer_D3D11 :: struct {
+    vb:      ^d3d11.IBuffer,
     texture: ^d3d11.ITexture2D,
+    width: f32, height: f32,
+    srv:     ^d3d11.IShaderResourceView,
 }
 
 Font_Atlas_Vertex_Buffer_D3D11 :: struct {
+    vb:         ^d3d11.IBuffer,
     vertices:   [dynamic]Image_Vertex,
+    ib:         ^d3d11.IBuffer,
     indexes:    [dynamic]u32,
 }
 
 Font_Atlas_Texture_Buffer_D3D11 :: struct {
     texture: ^d3d11.ITexture2D,
-    texture_resource: ^d3d11.IShaderResourceView,
+    srv:     ^d3d11.IShaderResourceView,
 }
 
 Rect_Vertex_Buffer_D3D11 :: struct {
+    vb:       ^d3d11.IBuffer,
     vertices: [dynamic]Rect_Vertex,
+    ib:       ^d3d11.IBuffer,
     indexes:  [dynamic]u32,
 }
 
@@ -42,8 +54,9 @@ PerWindow_Memory_D3D11 :: struct {
 }
 
 Shader_D3D11 :: struct {
-    vertex: ^d3d11.IVertexShader,
-    pixel:  ^d3d11.IPixelShader,
+    vertex:       ^d3d11.IVertexShader,
+    pixel:        ^d3d11.IPixelShader,
+    input_layout: ^d3d11.IInputLayout,
 }
 
 Shader_Desc_D3D11 :: struct {
@@ -90,6 +103,12 @@ shader_load_common :: proc(device: ^d3d11.IDevice, shader_desc: Shader_Desc_D3D1
         &error_message
     );
     if res != 0 {
+        if error_message != nil {
+            msg_ptr := error_message->GetBufferPointer();
+            msg_len := error_message->GetBufferSize();
+            msg := transmute(string)mem.Raw_String{cast([^]u8)msg_ptr, int(msg_len)};
+            fmt.eprintfln("D3D11 shader compile error: %s", msg);
+        }
         fmt.eprintfln(
             "Error during D3D11 shader (%s) compilation: %v",
             shader_desc.file_name,
@@ -121,7 +140,7 @@ shader_load_pix_d3d11 :: proc(device: ^d3d11.IDevice, shader_desc: Shader_Desc_D
 }
 
 @(private="file")
-shader_load_vert_d3d11 :: proc(device: ^d3d11.IDevice, shader_desc: Shader_Desc_D3D11) -> (vert: ^d3d11.IVertexShader, err: General_Error) {
+shader_load_vert_d3d11 :: proc(device: ^d3d11.IDevice, shader_desc: Shader_Desc_D3D11) -> (vert: ^d3d11.IVertexShader, il: ^d3d11.IInputLayout, err: General_Error) {
     blob := shader_load_common(device, shader_desc) or_return;
     // construct shader object
     res := device->CreateVertexShader(
@@ -133,29 +152,28 @@ shader_load_vert_d3d11 :: proc(device: ^d3d11.IDevice, shader_desc: Shader_Desc_
     if res != 0 {
         vert->Release();
         blob->Release();
-        return nil, .Shader_Compile;
+        return nil, nil, .Shader_Compile;
     }
 
-    assert(false, "TODO: D3D11.IInputLayout");
     res = device->CreateInputLayout(
         &shader_desc.input_layout[0], u32(len(shader_desc.input_layout)),
         blob->GetBufferPointer(), blob->GetBufferSize(),
-        /* TODO: HERE */ nil,
+        &il,
     );
     if res != 0 {
         fmt.printf("\x1b[31mErr: %v;\nDesc: %v;\n\x1b[0m", res, shader_desc.input_layout);
         vert->Release();
         blob->Release();
-        return nil, .Shader_Compile;
+        return nil, nil, .Shader_Compile;
     }
 
-    return vert, nil;
+    return vert, il, nil;
 }
 
 @(private="file")
 shader_assemble_d3d11 :: #force_inline proc(device: ^d3d11.IDevice, vertex_desc: Shader_Desc_D3D11, pixel_desc: Shader_Desc_D3D11) -> (shader: Shader_D3D11, err: General_Error) {
     shader.pixel  = shader_load_pix_d3d11(device, pixel_desc) or_return;
-    shader.vertex = shader_load_vert_d3d11(device, vertex_desc) or_return;
+    shader.vertex, shader.input_layout = shader_load_vert_d3d11(device, vertex_desc) or_return;
     return shader, nil;
 }
 
@@ -166,7 +184,7 @@ FONT_SHADER_SRC_D3D11 :: #load("../resources/shaders/font.hlsl", cstring);
 FONT_VERTEX_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = FONT_SHADER_SRC_D3D11,
     file_name     = "font.hlsl",
-    func_name     = "main",
+    func_name     = "vs_main",
     version       = "vs_5_0",
     len           = len(FONT_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -176,7 +194,7 @@ FONT_VERTEX_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
 FONT_PIXEL_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = FONT_SHADER_SRC_D3D11,
     file_name     = "font.hlsl",
-    func_name     = "main",
+    func_name     = "ps_main",
     version       = "ps_5_0",
     len           = len(FONT_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -189,7 +207,7 @@ IMG_SHADER_SRC_D3D11 :: #load("../resources/shaders/img.hlsl", cstring);
 IMG_VERTEX_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = IMG_SHADER_SRC_D3D11,
     file_name     = "img.hlsl",
-    func_name     = "main",
+    func_name     = "vs_main",
     version       = "vs_5_0",
     len           = len(IMG_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -202,7 +220,7 @@ IMG_PIXEL_SRC_D3D11 :: #load("../resources/shaders/img.hlsl", cstring);
 IMG_PIXEL_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = IMG_SHADER_SRC_D3D11,
     file_name     = "img.hlsl",
-    func_name     = "main",
+    func_name     = "ps_main",
     version       = "ps_5_0",
     len           = len(IMG_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -215,7 +233,7 @@ RECT_SHADER_SRC_D3D11 :: #load("../resources/shaders/rect.hlsl", cstring);
 RECT_VERTEX_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = RECT_SHADER_SRC_D3D11,
     file_name     = "rect.hlsl",
-    func_name     = "main",
+    func_name     = "vs_main",
     version       = "vs_5_0",
     len           = len(RECT_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -225,7 +243,7 @@ RECT_VERTEX_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
 RECT_PIXEL_SHADER_DESC_D3D11 := Shader_Desc_D3D11 {
     src           = RECT_SHADER_SRC_D3D11,
     file_name     = "rect.hlsl",
-    func_name     = "main",
+    func_name     = "ps_main",
     version       = "ps_5_0",
     len           = len(RECT_SHADER_SRC_D3D11),
     input_layout  = nil,
@@ -254,15 +272,32 @@ batch_renderer_new_d3d11 :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Ge
     fmt.assertf(res == 0, "Failed to get dxgi_factory; Reason: %d", res);
 
     // D3D11 pipeline: shaders
-    input_layout := make([]d3d11.INPUT_ELEMENT_DESC, 2);
-    defer delete(input_layout);
-    FONT_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout;
+    input_layout := [2]d3d11.INPUT_ELEMENT_DESC {
+        d3d11.INPUT_ELEMENT_DESC {
+            SemanticName      = "POSITION",
+            SemanticIndex     = 0,
+            Format            = .R32G32_FLOAT,
+            InputSlot         = 0,
+            AlignedByteOffset = 0,
+            InputSlotClass    = .VERTEX_DATA,
+        },
+        d3d11.INPUT_ELEMENT_DESC {
+            SemanticName      = "TEXCOORD",
+            SemanticIndex     = 0,
+            Format            = .R32G32_FLOAT,
+            InputSlot         = 0,
+            AlignedByteOffset = size_of([2]f32),
+            InputSlotClass    = .VERTEX_DATA,
+        },
+    };
+    FONT_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout[:];
     ren.persistent.font_program  = shader_assemble_d3d11(ren.persistent.device, FONT_VERTEX_SHADER_DESC_D3D11, FONT_PIXEL_SHADER_DESC_D3D11) or_return;
 
-    IMG_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout;
+    // same input layout
+    IMG_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout[:];
     ren.persistent.image_program = shader_assemble_d3d11(ren.persistent.device, IMG_VERTEX_SHADER_DESC_D3D11, IMG_PIXEL_SHADER_DESC_D3D11)  or_return;
 
-    RECT_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout;
+    RECT_VERTEX_SHADER_DESC_D3D11.input_layout = input_layout[:1];
     ren.persistent.rect_program  = shader_assemble_d3d11(ren.persistent.device, RECT_VERTEX_SHADER_DESC_D3D11, RECT_PIXEL_SHADER_DESC_D3D11) or_return
 
     ren.perwindow = make(map[Window_ID]PerWindow_Memory);
@@ -282,10 +317,40 @@ batch_renderer_new_d3d11 :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Ge
         ren.persistent.device->CreateSamplerState(&sampler_desc, &ren.persistent.sampler);
     }
 
+    // Font atlas texture initialization (D3D11)
+    {
+        ok: bool;
+        ren.images.angel_spec, ok = angel_read("video/resources/fonts/font.fnt");
+        if !ok do return ren, .Angel_Read;
+        if len(ren.images.angel_spec.pages) > 1 {
+            log.error("Angel fnt contains MORE than ONE page (now not supported)!");
+            return ren, .Angel_Read;
+        }
+        img_path := make([]byte, len(FONT_DIR) + 1 + len(ren.images.angel_spec.pages[0].file_name));
+        copy_from_string(img_path, FONT_DIR);
+        img_path[len(FONT_DIR)] = '/';
+        copy_from_string(img_path[len(FONT_DIR) + 1:], ren.images.angel_spec.pages[0].file_name);
+        x, y: i32;
+        img := stbi.load(strings.clone_to_cstring(cast(string)img_path, context.temp_allocator), &x, &y, nil, 4);
+        assert(img != nil);
+        delete(img_path);
+        defer libc.free(img);
+
+        create_texture_and_srv(
+            ren.persistent.device,
+            cast(u32)x, cast(u32)y,
+            img,
+            &ren.images.font_atlas.base.d3d11.texture,
+            &ren.images.font_atlas.base.d3d11.srv
+        );
+    }
+
     return ren, nil;
 }
 
 batch_renderer_clone_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) -> (err: General_Error) {
+    assert(id not_in ren^.perwindow);
+
     perwindow: PerWindow_Memory_D3D11;
     // D3D11 pipeline: swapchain
     {
@@ -295,8 +360,8 @@ batch_renderer_clone_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) -> (err:
             Format = .R8G8B8A8_UNORM,
             Stereo = false,
             SampleDesc = {
-                    Count   = 1,
-                    Quality = 0,
+                Count   = 1,
+                Quality = 0,
             },
             BufferUsage = {.RENDER_TARGET_OUTPUT},
             BufferCount = 1, // MAX_FRAMES_IN_FLIGHT,
@@ -343,7 +408,37 @@ batch_renderer_register_image_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID,
         img := load_image(img_path) or_return;
         defer delete_image(img);
 
-        assert(false, "TODO: Copy `img' into image buffer!");
+        e = map_insert(&ren^.images.image_vertices, img_path, Image_Vertex_Buffer {});
+        if img.channels == 3 {
+            rgba_buf := make([]u8, img.width * img.height * 4);
+            defer delete(rgba_buf);
+            for i in 0..<img.width * img.height {
+                rgba_buf[4 * i + 0] = img.pixels.buf[3 * i + 0];
+                rgba_buf[4 * i + 1] = img.pixels.buf[3 * i + 1];
+                rgba_buf[4 * i + 2] = img.pixels.buf[3 * i + 2];
+                rgba_buf[4 * i + 3] = 255;
+            }
+            create_texture_and_srv(
+                ren.persistent.device,
+                cast(u32)img.width,
+                cast(u32)img.height,
+                raw_data(rgba_buf),
+                &e^.base.d3d11.texture,
+                &e^.base.d3d11.srv
+            );
+        } else if img.channels == 4 {
+            create_texture_and_srv(
+                ren.persistent.device,
+                cast(u32)img.width,
+                cast(u32)img.height,
+                raw_data(img.pixels.buf),
+                &e^.base.d3d11.texture,
+                &e^.base.d3d11.srv
+            );
+        } else do unreachable();
+
+        e^.base.d3d11.width = cast(f32)img.width;
+        e^.base.d3d11.height = cast(f32)img.height;
         e^.window_id = id;
     }
     e^.dirty_flag = true;
@@ -351,12 +446,19 @@ batch_renderer_register_image_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID,
     // add image rectangle
     log.assertf(e^.window_id == id, "Image was created in a window: %d; but is updated through: %d. TODO: Do we consider this an issue?", e^.window_id, id);
     {
-        width, height: f32 = 0, 0; // get these via texture->GetDesc(&TEXTURE_DESC{....});
-        vertices := batch_renderer_register_image_rectangle_base(width, height, img_pos, uv_rect);
-
-        assert(false, "TODO: Copy vertices into image vertex buffer!");
+        // flip coordinates
+        uv_rect := uv_rect;
+        uv_rect.y1 = 1.0 - uv_rect.y1;
+        uv_rect.y2 = 1.0 - uv_rect.y2;
+        vertices := batch_renderer_register_image_rectangle_base(e^.base.d3d11.width, e^.base.d3d11.height, img_pos, uv_rect, .D3D11);
+        create_or_update_vertex_buffer(
+            ren^.persistent.device,
+            ren^.persistent.device_context,
+            &vertices[0],
+            len(vertices) * size_of(Image_Vertex),
+            &e^.base.d3d11.vb
+        );
     }
-
     return nil;
 }
 
@@ -373,7 +475,90 @@ batch_renderer_invalidate_image_and_reset_d3d11 :: #force_inline proc(ren: ^Batc
 }
 
 batch_renderer_construct_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {
-    assert(false, "TODO: Rendering");
+    perwindow, ok := ren^.perwindow[id];
+    log.assertf(ok, "Window of ID: %d is not registered!", id);
+    device := ren.persistent.device;
+    device_context := ren.persistent.device_context;
+
+    device_context->OMSetRenderTargets(1, &perwindow.d3d11.framebuffer_view, nil);
+    framebuffer_desc := d3d11.TEXTURE2D_DESC{};
+    perwindow.d3d11.framebuffer->GetDesc(&framebuffer_desc);
+    vp := d3d11.VIEWPORT{ TopLeftX=0, TopLeftY=0, Width=cast(f32)framebuffer_desc.Width, Height=cast(f32)framebuffer_desc.Height, MinDepth=0, MaxDepth=1 };
+    device_context->RSSetViewports(1, &vp);
+
+    // --- Draw rects ---
+    if len(ren.rects.d3d11.vertices) > 0 && len(ren.rects.d3d11.indexes) > 0 {
+        create_or_update_vertex_buffer(
+            device,
+            device_context,
+            raw_data(ren.rects.d3d11.vertices),
+            u32(len(ren.rects.d3d11.vertices) * size_of(Rect_Vertex)),
+            &ren.rects.d3d11.vb
+        );
+        create_or_update_index_buffer(
+            device,
+            device_context,
+            raw_data(ren.rects.d3d11.indexes),
+            u32(len(ren.rects.d3d11.indexes) * size_of(u32)),
+            &ren.rects.d3d11.ib
+        );
+        stride := u32(size_of(Rect_Vertex));
+        offset := u32(0);
+        device_context->IASetVertexBuffers(0, 1, &ren.rects.d3d11.vb, &stride, &offset);
+        device_context->IASetIndexBuffer(ren.rects.d3d11.ib, .R32_UINT, 0);
+        device_context->IASetPrimitiveTopology(.TRIANGLELIST);
+        device_context->IASetInputLayout(ren.persistent.rect_program.input_layout);
+        device_context->VSSetShader(ren.persistent.rect_program.vertex, nil, 0);
+        device_context->PSSetShader(ren.persistent.rect_program.pixel, nil, 0);
+        device_context->DrawIndexed(u32(len(ren.rects.d3d11.indexes)), 0, 0);
+    }
+
+    // --- Draw images ---
+    {
+        device_context->IASetInputLayout(ren.persistent.image_program.input_layout);
+        device_context->IASetPrimitiveTopology(.TRIANGLELIST);
+        device_context->VSSetShader(ren.persistent.image_program.vertex, nil, 0);
+        device_context->PSSetShader(ren.persistent.image_program.pixel, nil, 0);
+        device_context->PSSetSamplers(0, 1, &ren.persistent.sampler);
+
+        for k, &v in ren.images.image_vertices {
+            // Only render images for this window
+            if v.window_id != id do continue;
+
+            stride := u32(size_of(Image_Vertex));
+            offset := u32(0);
+            device_context->IASetVertexBuffers(0, 1, &v.base.d3d11.vb, &stride, &offset);
+            device_context->PSSetShaderResources(0, 1, &v.base.d3d11.srv);
+            device_context->Draw(6, 0);
+        }
+    }
+
+    // --- Draw font atlas/text ---
+    {
+        device_context->IASetInputLayout(ren.persistent.font_program.input_layout);
+        device_context->VSSetShader(ren.persistent.font_program.vertex, nil, 0);
+        device_context->PSSetShader(ren.persistent.font_program.pixel, nil, 0);
+        // sampler is the same: device_context->PSSetSamplers(0, 1, &ren.persistent.sampler);
+
+        base  := ren.images.font_atlas.base.d3d11.srv
+        batch := &ren^.images.font_atlas.batch.d3d11;
+        device_context->PSSetShaderResources(0, 1, &base);
+        create_or_update_vertex_buffer(
+            device,
+            device_context,
+            raw_data(batch.vertices),
+            u32(len(batch.vertices) * size_of(Image_Vertex)),
+            &batch.vb
+        );
+        create_or_update_index_buffer(
+            device,
+            device_context,
+            raw_data(batch.indexes),
+            u32(len(batch.indexes) * size_of(u32)),
+            &batch.ib,
+        );
+        device_context->DrawIndexed(u32(len(batch.indexes)), 0, 0);
+    }
 }
 
 batch_renderer_clear_d3d11 :: proc(ren: ^Batch_Renderer) {
@@ -392,10 +577,122 @@ batch_renderer_delete_texture_d3d11 :: proc(ren: ^Batch_Renderer, img_path: stri
     v, ok := ren^.images.image_vertices[img_path];
     assert(ok);
     v.base.d3d11.texture->Release();
-    assert(false, "TODO: Texture release!");
+    v.base.d3d11.srv->Release();
     delete_key(&ren^.images.image_vertices, img_path);
 }
 
 batch_renderer_delete_d3d11 :: proc(ren: ^Batch_Renderer) {
-    assert(false, "TODO: Batch renderer delete!");
+    // perwindow memory
+    for _, &perwindow in ren^.perwindow {
+        perwindow.d3d11.swapchain->Release();
+        perwindow.d3d11.framebuffer->Release();
+        perwindow.d3d11.framebuffer_view->Release();
+    }
+    delete(ren^.perwindow);
+
+    // vertex buffer
+    delete(ren^.rects.d3d11.vertices);
+    delete(ren^.rects.d3d11.indexes);
+    ren^.rects.d3d11.vb->Release();
+    ren^.rects.d3d11.ib->Release();
+
+    // image buffer(s)
+    for k in ren^.images.image_vertices do batch_renderer_delete_texture_d3d11(ren, k);
+    delete(ren^.images.image_vertices);
+
+    // font atlas
+    base  := ren^.images.font_atlas.base.d3d11;
+    batch := ren^.images.font_atlas.batch.d3d11;
+    batch.vb->Release();
+    batch.ib->Release();
+    delete(ren^.images.font_atlas.batch.gl.vertices);
+    delete(ren^.images.font_atlas.batch.gl.indexes);
+    base.texture->Release();
+    base.srv->Release();
+    angel_delete(&ren^.images.angel_spec);
+}
+
+@(private="file")
+create_or_update_vertex_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDeviceContext, data: rawptr, size: u32, buffer: ^^d3d11.IBuffer) {
+    @static sz: u32 = 0;
+
+    desc := d3d11.BUFFER_DESC {
+        ByteWidth = size,
+        Usage = .DYNAMIC,
+        BindFlags = {.VERTEX_BUFFER},
+        CPUAccessFlags = {.WRITE},
+    };
+
+    if buffer^ == nil {
+        sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
+        device->CreateBuffer(&desc, &sub, buffer);
+    } else if sz != size {
+        // buffer needs resize!
+        (buffer^)->Release();
+        sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
+        device->CreateBuffer(&desc, &sub, buffer);
+
+        sz = size;
+    } else {
+        mapped: d3d11.MAPPED_SUBRESOURCE;
+        ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped);
+        mem.copy(mapped.pData, data, cast(int)size);
+        ctx->Unmap(buffer^, 0);
+    }
+}
+
+@(private="file")
+create_or_update_index_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDeviceContext, data: rawptr, size: u32, buffer: ^^d3d11.IBuffer) {
+    @static sz: u32 = 0;
+
+    desc := d3d11.BUFFER_DESC {
+        ByteWidth = size,
+        Usage = .DYNAMIC,
+        BindFlags = {.INDEX_BUFFER},
+        CPUAccessFlags = {.WRITE},
+        MiscFlags = {},
+        StructureByteStride = 0,
+    };
+
+    if buffer^ == nil {
+        sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
+        device->CreateBuffer(&desc, &sub, buffer);
+    } else if sz != size {
+        // buffer needs resize!
+        (buffer^)->Release();
+        sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
+        device->CreateBuffer(&desc, &sub, buffer);
+
+        sz = size;
+    } else {
+        mapped: d3d11.MAPPED_SUBRESOURCE;
+        ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped);
+        mem.copy(mapped.pData, data, cast(int)size);
+        ctx->Unmap(buffer^, 0);
+    }
+}
+
+@(private="file")
+create_texture_and_srv :: proc(device: ^d3d11.IDevice, width, height: u32, data: rawptr, out_tex: ^^d3d11.ITexture2D, out_srv: ^^d3d11.IShaderResourceView) {
+    desc := d3d11.TEXTURE2D_DESC {
+        Width = width,
+        Height = height,
+        MipLevels = 1,
+        ArraySize = 1,
+        Format = .R8G8B8A8_UNORM,
+        SampleDesc = { Count = 1, Quality = 0 },
+        Usage = .DEFAULT,
+        BindFlags = {.SHADER_RESOURCE},
+        CPUAccessFlags = {},
+        MiscFlags = {.SHARED},
+    };
+
+    sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data, SysMemPitch = width * 4 };
+    assert(device->CreateTexture2D(&desc, &sub, out_tex) == 0);
+    srv_desc := d3d11.SHADER_RESOURCE_VIEW_DESC {
+        Format = .R8G8B8A8_UNORM,
+        ViewDimension = .TEXTURE2D,
+        Texture2D = { MipLevels = 1, MostDetailedMip = 0 },
+    };
+    assert(device->CreateShaderResourceView(out_tex^, &srv_desc, out_srv) == 0);
 }

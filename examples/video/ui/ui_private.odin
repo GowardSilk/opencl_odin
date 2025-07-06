@@ -88,16 +88,28 @@ create_rect64 :: proc(pos: [2]c.double, sz: [2]c.double) -> Rect64 {
     };
 }
 
-pos_to_ndc :: proc(r: Rect) -> Rect {
+pos_to_ndc :: proc(r: Rect, backend: Backend_Kind) -> Rect {
     queue := get_context()^.queue;
     active_window := queue.active_window;
 
-    size := active_window.size;
-    x1_ndc := (2.0 * r.x1 / cast(f32)size.x) - 1.0;
-    y1_ndc := 1.0 - (2.0 * r.y1 / cast(f32)size.y);
-    x2_ndc := (2.0 * r.x2 / cast(f32)size.x) - 1.0;
-    y2_ndc := 1.0 - (2.0 * r.y2 / cast(f32)size.y);
-    return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
+    switch backend {
+        case .D3D11:
+            size := active_window.size;
+            x1_ndc := (2.0 * r.x1 / cast(f32)size.x) - 1.0;
+            y1_ndc := 1.0 - 2.0 * (r.y1 / cast(f32)active_window.size.y);
+            x2_ndc := (2.0 * r.x2 / cast(f32)size.x) - 1.0;
+            y2_ndc := 1.0 - 2.0 * (r.y2 / cast(f32)active_window.size.y);
+            return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
+        case .GL:
+            size := active_window.size;
+            x1_ndc := (2.0 * r.x1 / cast(f32)size.x) - 1.0;
+            y1_ndc := 1.0 - (2.0 * r.y1 / cast(f32)size.y);
+            x2_ndc := (2.0 * r.x2 / cast(f32)size.x) - 1.0;
+            y2_ndc := 1.0 - (2.0 * r.y2 / cast(f32)size.y);
+            return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
+    }
+    
+    unreachable();
 }
 
 /* =========================================
@@ -141,5 +153,10 @@ execute_draw_commands :: proc() {
         }
     }
 
-    batch_renderer_construct(ren, cast(Window_ID)ctx^.queue.active_window^.handle);
+    handle: Window_ID;
+    switch ren^.backend {
+        case .GL: handle = cast(Window_ID)ctx.queue.active_window.handle;
+        case .D3D11: handle = cast(Window_ID)(cast(^_Window)ctx.queue.active_window.handle)^.hwnd;
+    }
+    batch_renderer_construct(ren, handle);
 }

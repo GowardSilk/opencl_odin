@@ -29,7 +29,7 @@ OpenCL_Context :: struct {
     operations: Compute_Operations,
 }
 
-cl_context_init :: proc(platform: cl.Platform_ID, context_properties: []cl.Context_Properties) -> (c: OpenCL_Context, err: Error) {
+cl_context_init :: proc(platform: cl.Platform_ID, device: cl.Device_ID, context_properties: []cl.Context_Properties) -> (c: OpenCL_Context, err: Error) {
     @(static)
     kernels      := [?]cstring { CF_GAUSSIAN_BLUR, };
     @(static)
@@ -41,7 +41,7 @@ cl_context_init :: proc(platform: cl.Platform_ID, context_properties: []cl.Conte
     };
 
     c.platform = platform;
-    pick_device(&c) or_return;
+    c.device = device;
     create_context(&c, context_properties) or_return;
     assemble_program(&c, kernels[:], kernel_sizes[:]) or_return;
     create_command_queue(&c) or_return;
@@ -85,7 +85,7 @@ create_context :: proc(c: ^OpenCL_Context, context_properties: []cl.Context_Prop
     }
 
     ret: cl.Int;
-    c^._context = cl.CreateContext(&context_properties[0], 0, &c^.device, ctx_error_callback, nil, &ret);
+    c^._context = cl.CreateContext(&context_properties[0], 1, &c^.device, ctx_error_callback, nil, &ret);
     if ret != cl.SUCCESS {
 	cl_context_errlog(c, "Failed to create Context!", ret);
 	return .Context_Creation_Fail;

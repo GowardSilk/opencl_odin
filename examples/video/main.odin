@@ -25,14 +25,55 @@ get_app_context :: proc() -> ^App_Context {
 /**
  * @brief tries to query platform that either supports khr_d3d11 or khr_gl (OpenGL favored)
  */
-try_and_pick_backend :: proc() -> (cl.Platform_ID, ui.Backend_Kind) {
+try_and_pick_backend :: proc() -> (cl.Platform_ID, cl.Device_ID, ui.Backend_Kind) {
     nof_platforms: cl.Uint;
     ret := cl.GetPlatformIDs(0, nil, &nof_platforms);
     assert(ret == cl.SUCCESS);
 
     platforms := make([]cl.Platform_ID, nof_platforms);
+    defer delete(platforms);
     ret = cl.GetPlatformIDs(nof_platforms, raw_data(platforms), nil);
     assert(ret == cl.SUCCESS);
+
+    // also need a similar loop for making sure that the device itself supports the same extension on that platform!
+    scan_devices_for_selected_backend :: proc(platform: cl.Platform_ID, backend: ui.Backend_Kind) -> cl.Device_ID {
+        nof_devices: cl.Uint;
+        ret := cl.GetDeviceIDs(platform, cl.DEVICE_TYPE_GPU, 0, nil, &nof_devices);
+        assert(ret == cl.SUCCESS);
+
+        devices := make([]cl.Device_ID, nof_devices);
+        ret  = cl.GetDeviceIDs(platform, cl.DEVICE_TYPE_GPU, nof_devices, raw_data(devices), nil);
+        assert(ret == cl.SUCCESS);
+        defer delete(devices);
+
+        for device in devices {
+            log_sz: c.size_t;
+            cl.GetDeviceInfo(
+                device,
+                cl.DEVICE_EXTENSIONS,
+                0, nil, &log_sz
+            );
+            log.assertf(ret == cl.SUCCESS && log_sz != 0, "Failed to query device info! Reason: %d; %s | %s", ret, err_to_name(ret));
+
+            log_msg := make([]byte, log_sz);
+            defer delete(log_msg);
+            cl.GetDeviceInfo(device, cl.DEVICE_EXTENSIONS, log_sz, &log_msg[0], nil);
+
+            exts := strings.split(cast(string)log_msg, " ");
+            assert(exts != nil);
+            defer delete(exts);
+
+            for ext in exts {
+                if len(ext) == len(cl.KHR_GL_SHARING_EXTENSION_NAME) && ext == cl.KHR_GL_SHARING_EXTENSION_NAME {
+                    return device;
+                } else if len(ext) == len(cl.KHR_D3D11_SHARING_EXTENSION_NAME) && ext == cl.KHR_D3D11_SHARING_EXTENSION_NAME {
+                    return device;
+                }
+            }
+        }
+
+        return nil;
+    }
 
     for platform in platforms {
         log_sz: c.size_t;
@@ -53,17 +94,17 @@ try_and_pick_backend :: proc() -> (cl.Platform_ID, ui.Backend_Kind) {
 
         for ext in exts {
             if len(ext) == len(cl.KHR_GL_SHARING_EXTENSION_NAME) && ext == cl.KHR_GL_SHARING_EXTENSION_NAME {
-                delete(platforms);
-                return platform, .GL;
+                device := scan_devices_for_selected_backend(platform, .GL);
+                if device != nil do return platform, device, .GL;
             } else if len(ext) == len(cl.KHR_D3D11_SHARING_EXTENSION_NAME) && ext == cl.KHR_D3D11_SHARING_EXTENSION_NAME {
-                delete(platforms);
-                return platform, .D3D11;
+                device := scan_devices_for_selected_backend(platform, .D3D11);
+                if device != nil do return platform, device, .D3D11;
             }
         }
     }
 
-    delete(platforms);
-    unreachable(/* No required extension supported */);
+    assert(false, "Failed to find device supporting the required extensions");
+    return nil, nil, .GL;
 }
 
 main :: proc() {
@@ -72,7 +113,7 @@ main :: proc() {
     app_context: App_Context;
     app_context.selected_image = "video/resources/images/lena_color_512.png";
 
-    platform, backend := try_and_pick_backend();
+    platform, device, backend := try_and_pick_backend();
 
     ok: runtime.Allocator_Error;
     context.user_ptr, ok = ui.init(backend, &app_context);
@@ -92,7 +133,7 @@ main :: proc() {
                 cl.GL_CONTEXT_KHR, cast(cl.Context_Properties)cast(uintptr)win.wglGetCurrentContext(),
                 0
             };
-            app_context.c, cerr = cl_context_init(platform, context_properties[:]);
+            app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
         case .D3D11:
             // TODO(GowardSilk): this is awful.... xD
             p := (cast(^ui.Draw_Context)context.user_ptr)^.ren.persistent;
@@ -101,9 +142,10 @@ main :: proc() {
             context_properties := [?]cl.Context_Properties {
                 cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
                 cl.CONTEXT_D3D11_DEVICE_KHR, cast(cl.Context_Properties)cast(uintptr)d3d11_device,
+                cl.CONTEXT_INTEROP_USER_SYNC, cast(cl.Context_Properties)cl.FALSE,
                 0
             };
-            app_context.c, cerr = cl_context_init(platform, context_properties[:]);
+            app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
     }
     log.assertf(cerr == nil, "Fatal error: %v", cerr);
     app_context.backend = backend;

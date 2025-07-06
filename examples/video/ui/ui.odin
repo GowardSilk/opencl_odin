@@ -77,10 +77,15 @@ register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> Gener
     if cast(uintptr)w.handle == 0 do return .Window_Creation;
 
     // deferred batch renderer initialization
+    hwnd: Window_ID;
+    switch ctx^.ren.backend {
+        case .GL: hwnd = cast(Window_ID)w.handle;
+        case .D3D11: hwnd = cast(Window_ID)(cast(^_Window)w.handle)^.hwnd;
+    }
     if ctx^.ren.perwindow == nil {
-        ctx^.ren = batch_renderer_new(cast(Window_ID)w.handle, ctx^.ren.backend) or_return;
+        ctx^.ren = batch_renderer_new(hwnd, ctx^.ren.backend) or_return;
     } else {
-        batch_renderer_clone(&ctx^.ren, cast(Window_ID)w.handle) or_return;
+        batch_renderer_clone(&ctx^.ren, hwnd) or_return;
     }
 
     append(&ctx^.queue.windows, w);
@@ -118,7 +123,8 @@ set_button_size :: #force_inline proc(size: [2]c.int) {
 }
 
 draw_button :: proc(name: string) -> bool {
-    queue := get_context()^.queue;
+    ctx := get_context();
+    queue := ctx^.queue;
     active_window := queue.active_window;
 
     button_pos  := draw_cursor_current();
@@ -135,6 +141,7 @@ draw_button :: proc(name: string) -> bool {
             [2]f32 { cast(f32)button_pos.x, cast(f32)button_pos.y },
             [2]f32 { cast(f32)button_size.x, cast(f32)button_size.y },
         ),
+        ctx^.ren.backend
     );
     register_draw_command(Draw_Command_Button {
         Draw_Command_Text {
@@ -222,7 +229,7 @@ destroy :: proc() {
 
     switch ctx^.ren.backend {
         case .GL:    glfw.Terminate();
-        case .D3D11: assert(false, "TODO");
+        case .D3D11:
     }
 
     // renderer

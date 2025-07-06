@@ -240,7 +240,7 @@ batch_renderer_register_image_gl :: proc(ren: ^Batch_Renderer, id: Window_ID, im
     // add image rectangle
     log.assertf(e^.window_id == id, "Image was created in a window: %d; but is updated through: %d. TODO: Do we consider this an issue?", e^.window_id, id);
     {
-        vertices := batch_renderer_register_image_rectangle_base(e^.base.gl.width, e^.base.gl.height, img_pos, uv_rect);
+        vertices := batch_renderer_register_image_rectangle_base(e^.base.gl.width, e^.base.gl.height, img_pos, uv_rect, .GL);
 
         if !ok do gl.GenBuffers(1, &e^.base.gl.vbo); // only generate buffer if entry does not yet exist
         gl.BindBuffer(gl.ARRAY_BUFFER, e^.base.gl.vbo);
