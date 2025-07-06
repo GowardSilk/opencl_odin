@@ -19,22 +19,34 @@ import "core:image"
 import "vendor:glfw"
 import gl "vendor:OpenGL"
 
-Window_Signal :: enum {
+/**
+ * @brief signals to front end about the state of window
+ * @note not to confuse with window event's like mouse move and others, these are handled internally (at least for now)
+ */
+Window_State_Signal :: enum {
     None = 0,
     Should_Close,
 }
+
+Window_Handle :: distinct uintptr;
+Window_Ops_Table :: struct {
+    get_mouse_pos:   #type proc "cdecl" (handle: Window_Handle) -> ([2]f64),
+    get_mouse_state: #type proc "cdecl" (handle: Window_Handle, button: Mouse_ID) -> Mouse_State,
+}
+
 Window :: struct {
-    size: [2]c.int,
-    name: cstring,
-    handle: glfw.WindowHandle,
-    draw_proc: Draw_Proc,
-    cursor: Draw_Cursor,
-    signal: Window_Signal,
+    size:       [2]c.int,       /**< size of the window at the time of creation (note: we do not handle window resize events, therefore this value is permanently valid) */
+    handle:     Window_Handle,  /**< pointer address to either _Window (when backend == .D3D11) or glfw.WindowHandle (when backend == .GL) */
+    draw_proc:  Draw_Proc,      /**< user defined draw procedure */
+    cursor:     Draw_Cursor,    /**< stores information about widgets' layouts */
+    signal:     Window_State_Signal,
+
+    using vtable: Window_Ops_Table,
 }
 
 Draw_Command_Text :: struct {
     text: string,
-    pos: [2]i32, /**< top left corner*/
+    pos:  [2]i32, /**< top left corner*/
     size: [2]f32,
 }
 Draw_Command_Button :: struct {
@@ -53,18 +65,18 @@ Draw_Command_Queue :: struct {
 }
 
 Draw_Context :: struct {
-    queue: Draw_Command_Queue,
-    ren: Batch_Renderer,
+    queue:    Draw_Command_Queue,
+    ren:      Batch_Renderer,
     usr_data: rawptr,
 }
 
 Draw_Proc :: #type proc "odin" (w: Window);
 register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> General_Error {
-    w := prepare_window(size, name, draw) or_return;
-    if w.handle == nil do return .Window_Creation;
+    ctx := get_context();
+    w := prepare_window(size, name, draw, ctx^.ren.backend) or_return;
+    if cast(uintptr)w.handle == 0 do return .Window_Creation;
 
     // deferred batch renderer initialization
-    ctx := get_context();
     if ctx^.ren.perwindow == nil {
         ctx^.ren = batch_renderer_new(cast(Window_ID)w.handle, ctx^.ren.backend) or_return;
     } else {
@@ -77,25 +89,19 @@ register_window :: proc(size: [2]c.int, name: cstring, draw: Draw_Proc) -> Gener
 }
 
 init :: proc(backend: Backend_Kind, usr_data: rawptr = nil) -> (ctx: ^Draw_Context, err: runtime.Allocator_Error) {
-    switch backend {
-        case .GL:
-            if glfw.Init() != glfw.TRUE {
-                log.error("Error: failed to initialize glfw!");
-                return nil, .None;
-            }
-        case .D3D11:
-            assert(false, "TODO");
+    #partial switch backend {
+        case .GL:    init_glfw();
     }
 
     ctx = new(Draw_Context) or_return;
 
     // batch renderer
-    // NOTE: since we do not have any active window, we cannot create and compile shaders...
+    // NOTE(GowardSilk): since we do not have any active window, we cannot create and compile shaders...
     ctx^.ren = Batch_Renderer{};
     ctx^.ren.backend = backend; // store it preemptively here...
 
     // render queue
-    ctx^.queue.windows = make_dynamic_array([dynamic]Window) or_return;
+    ctx^.queue.windows  = make_dynamic_array([dynamic]Window) or_return;
     ctx^.queue.commands = make_dynamic_array([dynamic]Draw_Command) or_return;
 
     ctx^.usr_data = usr_data;
@@ -119,7 +125,7 @@ draw_button :: proc(name: string) -> bool {
     button_size := active_window.cursor.button_size;
     defer draw_cursor_button_next(); // move to the next "slot"
 
-    window_width, _ := glfw.GetWindowSize(active_window^.handle);
+    window_width := active_window^.size.x;
     if button_pos.x + button_size.x > window_width {
         button_pos = draw_cursor_descend();
     }
@@ -139,16 +145,12 @@ draw_button :: proc(name: string) -> bool {
         r_ndc,
     });
 
-    button_pos64  := [2]c.double { cast(c.double)button_pos.x, cast(c.double)button_pos.y };
-    button_size64 := [2]c.double { cast(c.double)button_size.x, cast(c.double)button_size.y };
-
-    state := glfw.GetMouseButton(active_window.handle, glfw.MOUSE_BUTTON_LEFT);
-    if (state == glfw.PRESS) {
-        mouse_xpos, mouse_ypos := glfw.GetCursorPos(active_window.handle);
-        if is_inside_widget(
-            create_rect64(button_pos64, button_size64),
-            {mouse_xpos, mouse_ypos}
-        ) {
+    if (active_window^.get_mouse_state(active_window^.handle, .Left) == .Down) {
+        mouse_pos     := active_window^.get_mouse_pos(active_window^.handle);
+        button_pos64  := [2]c.double { cast(c.double)button_pos.x, cast(c.double)button_pos.y };
+        button_size64 := [2]c.double { cast(c.double)button_size.x, cast(c.double)button_size.y };
+        button_rect   := create_rect64(button_pos64, button_size64);
+        if is_inside_widget(button_rect, mouse_pos) {
             return true;
         }
     }
@@ -157,7 +159,7 @@ draw_button :: proc(name: string) -> bool {
 
 draw_image :: proc(size_hint: [2]c.int, img_path: string) -> (err: General_Error) {
     img_pos  := draw_cursor_current();
-    window_width, _ := glfw.GetWindowSize(get_context()^.queue.active_window^.handle);
+    window_width := get_context()^.queue.active_window^.size.x;
     if img_pos.x + size_hint.x > window_width {
         img_pos = draw_cursor_descend();
     }
@@ -175,38 +177,11 @@ draw_image :: proc(size_hint: [2]c.int, img_path: string) -> (err: General_Error
     );
 }
 
-draw :: proc() {
+draw :: #force_inline proc() {
     ctx := get_context();
-    queue := &ctx^.queue;
-
-    for len(queue^.windows) > 0 {
-        l := len(queue^.windows);
-        for i := 0; i < l; i += 1 {
-            w := queue^.windows[i];
-            glfw.MakeContextCurrent(w.handle);
-            glfw.PollEvents();
-
-            if (!glfw.WindowShouldClose(w.handle)) {
-                queue^.active_window = &w;
-
-                gl.ClearColor(0.1, 0.1, 0.1, 1.0);
-                gl.Clear(gl.COLOR_BUFFER_BIT);
-
-                w->draw_proc();
-                execute_draw_commands();
-                reset_state();
-                glfw.SwapBuffers(w.handle);
-            } else {
-                // signal to the draw function that the window is being closed
-                w.signal = .Should_Close;
-                w->draw_proc();
-                batch_renderer_unload(&ctx^.ren, cast(Window_ID)w.handle);
-                glfw.DestroyWindow(w.handle);
-                ordered_remove(&queue^.windows, i);
-                l -= 1;
-            }
-        }
-        batch_renderer_reset(&ctx^.ren);
+    switch ctx^.ren.backend {
+        case .GL:    draw_glfw();
+        case .D3D11: draw_win();
     }
 }
 
@@ -245,12 +220,39 @@ reset_image_id :: #force_inline proc(img_path: string, new_img_id: Image_Request
 destroy :: proc() {
     ctx := get_context();
 
-	glfw.Terminate();
-    batch_renderer_delete(&ctx^.ren);
-    for w in ctx^.queue.windows {
-        destroy_window(w);
+    switch ctx^.ren.backend {
+        case .GL:    glfw.Terminate();
+        case .D3D11: assert(false, "TODO");
     }
+
+    // renderer
+    batch_renderer_delete(&ctx^.ren);
+
+    // windows
+    switch ctx^.ren.backend {
+        case .GL:
+            for w in ctx^.queue.windows do destroy_window_glfw(w);
+        case .D3D11:
+            for w in ctx^.queue.windows do destroy_window_win(w);
+    }
+
+    // queue
     delete_dynamic_array(ctx^.queue.windows);
     delete_dynamic_array(ctx^.queue.commands);
+
     free(ctx);
+}
+
+close :: proc(w: Window) {
+    ctx := get_context();
+    switch ctx^.ren.backend {
+        case .GL:
+            glfw.SetWindowShouldClose(cast(glfw.WindowHandle)w.handle, glfw.TRUE);
+            return;
+        case .D3D11:
+            (cast(^_Window)w.handle)^.should_close = true;
+            return;
+    }
+
+    unreachable();
 }

@@ -5,9 +5,9 @@ import "base:runtime"
 import "core:c"
 import "core:log"
 import "core:strings"
+import win "core:sys/windows"
 
 import cl "shared:opencl"
-import "vendor:glfw"
 
 import "ui"
 
@@ -15,6 +15,7 @@ App_Context :: struct {
     c: OpenCL_Context,
     selected_image: string,
     options_window_opened: bool,
+    backend: ui.Backend_Kind,
 }
 
 get_app_context :: proc() -> ^App_Context {
@@ -87,7 +88,9 @@ main :: proc() {
     switch backend {
         case .GL:
             context_properties := [?]cl.Context_Properties {
-                cl.GL_CONTEXT_KHR,
+                cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
+                cl.GL_CONTEXT_KHR, cast(cl.Context_Properties)cast(uintptr)win.wglGetCurrentContext(),
+                0
             };
             app_context.c, cerr = cl_context_init(platform, context_properties[:]);
         case .D3D11:
@@ -103,6 +106,7 @@ main :: proc() {
             app_context.c, cerr = cl_context_init(platform, context_properties[:]);
     }
     log.assertf(cerr == nil, "Fatal error: %v", cerr);
+    app_context.backend = backend;
     defer cl_context_delete(&app_context.c);
     when ODIN_DEBUG {
         log_str := cl_context_log(&app_context.c);
@@ -135,14 +139,14 @@ draw_main_screen :: proc(w: ui.Window) {
         if !app_context^.options_window_opened {
             if err := ui.register_window({512, 512}, "Image Settings", draw_options); err != nil {
                 log.errorf("Failed to open auxiliary option window! (err: %v)", err);
-                glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
+                ui.close(w);
             } else do app_context^.options_window_opened = true;
         }
     }
 
     if err := ui.draw_image({512, 512}, app_context^.selected_image); err != nil {
         log.errorf("Failed to open image with path: %s; (err: %v)", app_context^.selected_image, err);
-        glfw.SetWindowShouldClose(w.handle, glfw.TRUE);
+        ui.close(w);
     }
 }
 
