@@ -14,6 +14,7 @@ package ui;
 import "core:c"
 import "core:c/libc"
 import "core:log"
+import "core:fmt"
 import "core:strings"
 
 import gl "vendor:OpenGL"
@@ -131,7 +132,6 @@ batch_renderer_add_button :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Button
         base_index: u32;
         vertices: ^[dynamic]Rect_Vertex;
         indexes: ^[dynamic]u32;
-        // CCW
         switch ren^.backend {
             case .D3D11:
                 base_index = cast(u32)len(ren^.rects.d3d11.vertices) / 2;
@@ -189,44 +189,35 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
         xpos := cast(f32)pos.x + angel_char.x_offset * scale;
         ypos := cast(f32)pos.y + (ren^.images.angel_spec.common.base - angel_char.y_offset) * scale;
 
-        uv_rect: Rect;
-        switch ren^.backend {
-            case .D3D11:
-                uv_rect = Rect {
-                    x1 = cast(f32)angel_char.x / atlas_width,
-                    y1 = cast(f32)angel_char.y / atlas_height,
-                    x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / atlas_width,
-                    y2 = (cast(f32)angel_char.y + cast(f32)angel_char.height) / atlas_height,
-                };
-            case .GL:
-                uv_rect = Rect {
-                    x1 = cast(f32)angel_char.x / atlas_width,
-                    y1 = 1 - cast(f32)angel_char.y / atlas_height,
-                    x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / atlas_width,
-                    y2 = 1 - (cast(f32)angel_char.y + cast(f32)angel_char.height) / atlas_height,
-                };
-        }
+        uv_rect := Rect {
+            x1 = cast(f32)angel_char.x / atlas_width,
+            y1 = cast(f32)angel_char.y / atlas_height,
+            x2 = (cast(f32)angel_char.x + cast(f32)angel_char.width) / atlas_width,
+            y2 = (cast(f32)angel_char.y + cast(f32)angel_char.height) / atlas_height,
+        };
 
-        r_ndc := pos_to_ndc(create_rect({xpos, ypos}, {glyph_w, glyph_h}), ren^.backend);
+        r_ndc := pos_to_ndc(create_rect({xpos, ypos}, {glyph_w, glyph_h}));
 
         base_index: u32;
         vertices: ^[dynamic]Image_Vertex;
         indexes: ^[dynamic]u32;
         switch ren^.backend {
             case .D3D11:
-                base_index = cast(u32)len(ren^.images.font_atlas.batch.d3d11.vertices);
-                vertices = &ren^.images.font_atlas.batch.d3d11.vertices;
-                indexes = &ren^.images.font_atlas.batch.d3d11.indexes;
+                using ren^.images.font_atlas.batch;
+                base_index = cast(u32)len(d3d11.vertices);
+                vertices = &d3d11.vertices;
+                indexes = &d3d11.indexes;
             case .GL:
-                base_index = cast(u32)len(ren^.images.font_atlas.batch.gl.vertices);
-                vertices = &ren^.images.font_atlas.batch.gl.vertices;
-                indexes = &ren^.images.font_atlas.batch.gl.indexes;
+                using ren^.images.font_atlas.batch;
+                base_index = cast(u32)len(gl.vertices);
+                vertices = &gl.vertices;
+                indexes = &gl.indexes;
         }
         append(vertices,
-            Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Bottom-left
-            Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y1 }, }, // Bottom-right
-            Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y2 }, }, // Top-right
-            Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y2 }, }, // Top-left
+            Image_Vertex { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y2 }, }, // Bottom-left
+            Image_Vertex { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y2 }, }, // Bottom-right
+            Image_Vertex { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y1 }, }, // Top-right
+            Image_Vertex { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y1 }, }, // Top-left
         );
         append(indexes,
             base_index + 0, base_index + 1, base_index + 2,
@@ -238,19 +229,19 @@ batch_renderer_add_text :: proc(ren: ^Batch_Renderer, cmd: Draw_Command_Text) {
 }
 
 @(private)
-batch_renderer_register_image_rectangle_base :: #force_inline proc(width, height: f32, img_pos: [2]i32, uv_rect: Rect, backend: Backend_Kind) -> [6]Image_Vertex {
+batch_renderer_register_image_rectangle_base :: #force_inline proc(width, height: f32, img_pos: [2]i32, uv_rect: Rect) -> [6]Image_Vertex {
     img_size := [2]f32 { width, height, };
     img_fpos := [2]f32 { cast(f32)img_pos.x, cast(f32)img_pos.y, };
-    r_ndc := pos_to_ndc(create_rect(img_fpos, img_size), backend);
+    r_ndc := pos_to_ndc(create_rect(img_fpos, img_size));
 
     vertices: [6]Image_Vertex;
-    vertices[0] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left
-    vertices[1] = { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }; // Bottom-right
-    vertices[2] = { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }; // Top-right
+    vertices[0] = { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }; // Bottom-right
+    vertices[1] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left
+    vertices[2] = { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }; // Top-left
 
-    vertices[3] = { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }; // Top-right
-    vertices[4] = { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }; // Top-left
-    vertices[5] = { { r_ndc.x1, r_ndc.y1 }, { uv_rect.x1, uv_rect.y2 }, }; // Bottom-left
+    vertices[3] = { { r_ndc.x1, r_ndc.y2 }, { uv_rect.x1, uv_rect.y1 }, }; // Top-left
+    vertices[4] = { { r_ndc.x2, r_ndc.y2 }, { uv_rect.x2, uv_rect.y1 }, }; // Top-right
+    vertices[5] = { { r_ndc.x2, r_ndc.y1 }, { uv_rect.x2, uv_rect.y2 }, }; // Bottom-right
 
     return vertices;
 }

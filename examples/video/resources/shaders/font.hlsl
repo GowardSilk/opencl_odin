@@ -19,5 +19,9 @@ SamplerState fontSampler : register(s0);
 
 float4 ps_main(VS_OUTPUT input) : SV_TARGET {
     float4 color = fontTex.Sample(fontSampler, input.uv);
+    if (dot(color.rgb, float3(1.0, 1.0, 1.0)) <= 0.1) {
+        discard;
+        return float4(0.4, 0.6, 0.2, 1.0);
+    }
     return color;
 }

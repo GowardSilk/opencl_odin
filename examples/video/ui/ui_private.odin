@@ -88,28 +88,18 @@ create_rect64 :: proc(pos: [2]c.double, sz: [2]c.double) -> Rect64 {
     };
 }
 
-pos_to_ndc :: proc(r: Rect, backend: Backend_Kind) -> Rect {
+pos_to_ndc :: proc(r: Rect) -> Rect {
     queue := get_context()^.queue;
     active_window := queue.active_window;
 
-    switch backend {
-        case .D3D11:
-            size := active_window.size;
-            x1_ndc := (2.0 * r.x1 / cast(f32)size.x) - 1.0;
-            y1_ndc := 1.0 - 2.0 * (r.y1 / cast(f32)active_window.size.y);
-            x2_ndc := (2.0 * r.x2 / cast(f32)size.x) - 1.0;
-            y2_ndc := 1.0 - 2.0 * (r.y2 / cast(f32)active_window.size.y);
-            return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
-        case .GL:
-            size := active_window.size;
-            x1_ndc := (2.0 * r.x1 / cast(f32)size.x) - 1.0;
-            y1_ndc := 1.0 - (2.0 * r.y1 / cast(f32)size.y);
-            x2_ndc := (2.0 * r.x2 / cast(f32)size.x) - 1.0;
-            y2_ndc := 1.0 - (2.0 * r.y2 / cast(f32)size.y);
-            return Rect { x1_ndc, y1_ndc, x2_ndc, y2_ndc };
-    }
-    
-    unreachable();
+    w := cast(f32)active_window.size.x;
+    h := cast(f32)active_window.size.y;
+    return Rect{
+        (r.x1 / w) * 2.0 - 1.0,
+        1.0 - (r.y1 / h) * 2.0,
+        (r.x2 / w) * 2.0 - 1.0,
+        1.0 - (r.y2 / h) * 2.0,
+    };
 }
 
 /* =========================================

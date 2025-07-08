@@ -140,8 +140,7 @@ draw_button :: proc(name: string) -> bool {
         create_rect(
             [2]f32 { cast(f32)button_pos.x, cast(f32)button_pos.y },
             [2]f32 { cast(f32)button_size.x, cast(f32)button_size.y },
-        ),
-        ctx^.ren.backend
+        )
     );
     register_draw_command(Draw_Command_Button {
         Draw_Command_Text {
@@ -175,9 +174,14 @@ draw_image :: proc(size_hint: [2]c.int, img_path: string) -> (err: General_Error
 
     ctx := get_context();
     // we cannot batch images properly, so they are loaded "in-place"
+    handle: Window_ID;
+    switch ctx^.ren.backend {
+        case .D3D11: handle = cast(Window_ID)(cast(^_Window)ctx^.queue.active_window^.handle)^.hwnd;
+        case .GL: handle = cast(Window_ID)ctx^.queue.active_window^.handle;
+    }
     return batch_renderer_register_image(
         &ctx^.ren,
-        cast(Window_ID)ctx^.queue.active_window^.handle,
+        handle,
         img_pos,
         {1, 1, 0, 0},
         img_path

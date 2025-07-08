@@ -14,6 +14,7 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:c/libc"
+import win "core:sys/windows"
 
 import d3dc  "vendor:directx/d3d_compiler"
 import d3d11 "vendor:directx/d3d11"
@@ -74,11 +75,19 @@ Persistent_Memory_D3D11 :: struct {
     device: ^d3d11.IDevice,
     device_context: ^d3d11.IDeviceContext,
 
-    dxgi_device:  ^dxgi.IDevice,
-    dxgi_adapter: ^dxgi.IAdapter,
-    dxgi_factory: ^dxgi.IFactory2,
+    dxgi: #type struct {
+        // device:  ^dxgi.IDevice,
+        // adapter: ^dxgi.IAdapter,
+        factory: ^dxgi.IFactory2,
+    },
 
     sampler: ^d3d11.ISamplerState,
+    using depth: #type struct {
+        state: ^d3d11.IDepthStencilState,
+        buffer: ^d3d11.IDepthStencilView,
+        buffer_texture: ^d3d11.ITexture2D,
+    },
+    rasterizer: ^d3d11.IRasterizerState,
 
     font_program:   Shader_D3D11,
     image_program:  Shader_D3D11,
@@ -264,11 +273,13 @@ batch_renderer_new_d3d11 :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Ge
         &feature_levels[0], u32(len(feature_levels)), d3d11.SDK_VERSION,
         &ren.persistent.device, nil, &ren.persistent.device_context);
     fmt.assertf(res == 0, "Failed to create device; Reason: %d", res);
-    res = ren.persistent.device->QueryInterface(dxgi.IDevice_UUID, cast(^rawptr)(&ren.persistent.dxgi_device));
+    dxgi_device: ^dxgi.IDevice;
+    dxgi_adapter: ^dxgi.IAdapter;
+    res = ren.persistent.device->QueryInterface(dxgi.IDevice_UUID, cast(^rawptr)(&dxgi_device));
     fmt.assertf(res == 0, "Failed to query dxgi_device interface; Reason: %d", res);
-    res = ren.persistent.dxgi_device->GetAdapter(&ren.persistent.dxgi_adapter);
+    res = dxgi_device->GetAdapter(&dxgi_adapter);
     fmt.assertf(res == 0, "Failed to get dxgi_adapter adapter; Reason: %d", res);
-    res = ren.persistent.dxgi_adapter->GetParent(dxgi.IFactory2_UUID, cast(^rawptr)(&ren.persistent.dxgi_factory));
+    res = dxgi_adapter->GetParent(dxgi.IFactory2_UUID, cast(^rawptr)(&ren.persistent.dxgi.factory));
     fmt.assertf(res == 0, "Failed to get dxgi_factory; Reason: %d", res);
 
     // D3D11 pipeline: shaders
@@ -301,7 +312,6 @@ batch_renderer_new_d3d11 :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Ge
     ren.persistent.rect_program  = shader_assemble_d3d11(ren.persistent.device, RECT_VERTEX_SHADER_DESC_D3D11, RECT_PIXEL_SHADER_DESC_D3D11) or_return
 
     ren.perwindow = make(map[Window_ID]PerWindow_Memory);
-    batch_renderer_clone_d3d11(&ren, id);
 
     // D3D11 pipeline: sampler
     {
@@ -316,6 +326,73 @@ batch_renderer_new_d3d11 :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Ge
         };
         ren.persistent.device->CreateSamplerState(&sampler_desc, &ren.persistent.sampler);
     }
+
+    // D3D11 pipeline: depth stencil
+    {
+        ds_desc := d3d11.DEPTH_STENCIL_DESC {
+            DepthEnable    = true,
+            DepthWriteMask = .ZERO,
+            DepthFunc      = .ALWAYS,
+            StencilEnable  = true,
+
+            StencilReadMask  = 0xFF,
+            StencilWriteMask = 0xFF,
+
+            FrontFace = d3d11.DEPTH_STENCILOP_DESC{
+                StencilFailOp      = .KEEP,
+                StencilDepthFailOp = .KEEP,
+                StencilPassOp      = .REPLACE,
+                StencilFunc        = .ALWAYS,
+            },
+
+            BackFace = d3d11.DEPTH_STENCILOP_DESC{
+                StencilFailOp      = .KEEP,
+                StencilDepthFailOp = .KEEP,
+                StencilPassOp      = .REPLACE,
+                StencilFunc        = .ALWAYS,
+            },
+        };
+        assert(ren.persistent.device->CreateDepthStencilState(&ds_desc, &ren.persistent.depth.state) == 0);
+
+        // NOTE(GowardSilk): this is potentially volatile ???
+        hwnd := cast(dxgi.HWND)id;
+        rect: win.RECT;
+        assert(win.GetWindowRect(hwnd, &rect) == win.TRUE);
+        texture_desc: d3d11.TEXTURE2D_DESC;
+        texture_desc.Width              = u32(rect.right - rect.left);
+        texture_desc.Height             = u32(rect.bottom - rect.top);
+        texture_desc.MipLevels          = 1;
+        texture_desc.ArraySize          = 1;
+        texture_desc.Format             = .D24_UNORM_S8_UINT;
+        texture_desc.SampleDesc.Count   = 1;
+        texture_desc.SampleDesc.Quality = 0;
+        texture_desc.Usage              = .DEFAULT;
+        texture_desc.BindFlags          = {.DEPTH_STENCIL};
+
+        assert(ren.persistent.device->CreateTexture2D(&texture_desc, nil, &ren.persistent.depth.buffer_texture) == 0);
+
+        dsv_desc: d3d11.DEPTH_STENCIL_VIEW_DESC;
+        dsv_desc.Format             = texture_desc.Format;
+        dsv_desc.ViewDimension      = .TEXTURE2D;
+        dsv_desc.Texture2D.MipSlice = 0;
+
+        assert(
+            ren.persistent.device->CreateDepthStencilView(
+                ren.persistent.depth.buffer_texture,
+                &dsv_desc,
+                &ren.persistent.depth.buffer) == 0
+        );
+    }
+
+    rast_desc := d3d11.RASTERIZER_DESC {
+        FillMode = .SOLID,
+        CullMode = .NONE,
+        FrontCounterClockwise = true,
+    };
+    assert(ren.persistent.device->CreateRasterizerState(&rast_desc, &ren.persistent.rasterizer) == 0);
+
+    // D3D11 pipeline: swapchain
+    batch_renderer_clone_d3d11(&ren, id);
 
     // Font atlas texture initialization (D3D11)
     {
@@ -354,9 +431,11 @@ batch_renderer_clone_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) -> (err:
     perwindow: PerWindow_Memory_D3D11;
     // D3D11 pipeline: swapchain
     {
+        tex_desc := d3d11.TEXTURE2D_DESC{};
+        ren^.persistent.depth.buffer_texture->GetDesc(&tex_desc);
         swapchain_desc := dxgi.SWAP_CHAIN_DESC1{
-            Width  = 0,
-            Height = 0,
+            Width  = tex_desc.Width,
+            Height = tex_desc.Height,
             Format = .R8G8B8A8_UNORM,
             Stereo = false,
             SampleDesc = {
@@ -370,7 +449,7 @@ batch_renderer_clone_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) -> (err:
             AlphaMode   = .UNSPECIFIED,
             Flags       = {}, // dxgi.SWAP_CHAIN_FLAG.ALLOW_MODE_SWITCH = 0x2
         };
-        res := ren.persistent.dxgi_factory->CreateSwapChainForHwnd(ren.persistent.device, cast(dxgi.HWND)id,
+        res := ren.persistent.dxgi.factory->CreateSwapChainForHwnd(ren.persistent.device, cast(dxgi.HWND)id,
             &swapchain_desc, nil, nil, &perwindow.swapchain);
         fmt.assertf(res == 0, "Could not create swap chain for window handle; Reason: %d", res);
     }
@@ -400,6 +479,8 @@ batch_renderer_unload_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {
     e.d3d11.swapchain->Release();
     e.d3d11.framebuffer->Release();
     e.d3d11.framebuffer_view->Release();
+
+    delete_key(&ren^.perwindow, id);
 }
 
 batch_renderer_register_image_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID, img_pos: [2]i32, uv_rect: Rect, img_path: string) -> (err: General_Error) {
@@ -448,9 +529,7 @@ batch_renderer_register_image_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID,
     {
         // flip coordinates
         uv_rect := uv_rect;
-        uv_rect.y1 = 1.0 - uv_rect.y1;
-        uv_rect.y2 = 1.0 - uv_rect.y2;
-        vertices := batch_renderer_register_image_rectangle_base(e^.base.d3d11.width, e^.base.d3d11.height, img_pos, uv_rect, .D3D11);
+        vertices := batch_renderer_register_image_rectangle_base(e^.base.d3d11.width, e^.base.d3d11.height, img_pos, uv_rect);
         create_or_update_vertex_buffer(
             ren^.persistent.device,
             ren^.persistent.device_context,
@@ -484,7 +563,12 @@ batch_renderer_construct_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {
     framebuffer_desc := d3d11.TEXTURE2D_DESC{};
     perwindow.d3d11.framebuffer->GetDesc(&framebuffer_desc);
     vp := d3d11.VIEWPORT{ TopLeftX=0, TopLeftY=0, Width=cast(f32)framebuffer_desc.Width, Height=cast(f32)framebuffer_desc.Height, MinDepth=0, MaxDepth=1 };
+    device_context->RSSetState(ren.persistent.rasterizer);
     device_context->RSSetViewports(1, &vp);
+
+    device_context->OMSetBlendState(nil, nil, 0xffffffff);
+    device_context->OMSetDepthStencilState(ren.persistent.depth.state, 1);
+    device_context->OMSetRenderTargets(1, &perwindow.d3d11.framebuffer_view, ren.persistent.depth.buffer);
 
     // --- Draw rects ---
     if len(ren.rects.d3d11.vertices) > 0 && len(ren.rects.d3d11.indexes) > 0 {
@@ -502,47 +586,42 @@ batch_renderer_construct_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {
             u32(len(ren.rects.d3d11.indexes) * size_of(u32)),
             &ren.rects.d3d11.ib
         );
-        stride := u32(size_of(Rect_Vertex));
+        stride := u32(2 * size_of(Rect_Vertex));
         offset := u32(0);
-        device_context->IASetVertexBuffers(0, 1, &ren.rects.d3d11.vb, &stride, &offset);
-        device_context->IASetIndexBuffer(ren.rects.d3d11.ib, .R32_UINT, 0);
+    
         device_context->IASetPrimitiveTopology(.TRIANGLELIST);
         device_context->IASetInputLayout(ren.persistent.rect_program.input_layout);
+        device_context->IASetVertexBuffers(0, 1, &ren.rects.d3d11.vb, &stride, &offset);
+        device_context->IASetIndexBuffer(ren.rects.d3d11.ib, .R32_UINT, 0);
         device_context->VSSetShader(ren.persistent.rect_program.vertex, nil, 0);
         device_context->PSSetShader(ren.persistent.rect_program.pixel, nil, 0);
         device_context->DrawIndexed(u32(len(ren.rects.d3d11.indexes)), 0, 0);
     }
 
     // --- Draw images ---
-    {
-        device_context->IASetInputLayout(ren.persistent.image_program.input_layout);
+    if len(ren.images.image_vertices) > 0 {
         device_context->IASetPrimitiveTopology(.TRIANGLELIST);
+        device_context->IASetInputLayout(ren.persistent.image_program.input_layout);
         device_context->VSSetShader(ren.persistent.image_program.vertex, nil, 0);
         device_context->PSSetShader(ren.persistent.image_program.pixel, nil, 0);
         device_context->PSSetSamplers(0, 1, &ren.persistent.sampler);
 
-        for k, &v in ren.images.image_vertices {
-            // Only render images for this window
-            if v.window_id != id do continue;
-
+        for k, &v in ren.images.image_vertices do if v.window_id == id {
             stride := u32(size_of(Image_Vertex));
             offset := u32(0);
-            device_context->IASetVertexBuffers(0, 1, &v.base.d3d11.vb, &stride, &offset);
             device_context->PSSetShaderResources(0, 1, &v.base.d3d11.srv);
+            device_context->IASetVertexBuffers(0, 1, &v.base.d3d11.vb, &stride, &offset);
             device_context->Draw(6, 0);
         }
     }
 
     // --- Draw font atlas/text ---
-    {
+    if len(ren^.images.font_atlas.batch.d3d11.vertices) > 0 {
+        device_context->IASetPrimitiveTopology(.TRIANGLELIST);
         device_context->IASetInputLayout(ren.persistent.font_program.input_layout);
-        device_context->VSSetShader(ren.persistent.font_program.vertex, nil, 0);
-        device_context->PSSetShader(ren.persistent.font_program.pixel, nil, 0);
-        // sampler is the same: device_context->PSSetSamplers(0, 1, &ren.persistent.sampler);
 
-        base  := ren.images.font_atlas.base.d3d11.srv
+        base  := ren.images.font_atlas.base;
         batch := &ren^.images.font_atlas.batch.d3d11;
-        device_context->PSSetShaderResources(0, 1, &base);
         create_or_update_vertex_buffer(
             device,
             device_context,
@@ -557,6 +636,14 @@ batch_renderer_construct_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {
             u32(len(batch.indexes) * size_of(u32)),
             &batch.ib,
         );
+        stride := u32(size_of(Image_Vertex));
+        offset := u32(0);
+        device_context->PSSetShaderResources(0, 1, &base.d3d11.srv);
+        device_context->IASetVertexBuffers(0, 1, &batch.vb, &stride, &offset);
+        device_context->IASetIndexBuffer(batch.ib, .R32_UINT, 0);
+        device_context->VSSetShader(ren.persistent.font_program.vertex, nil, 0);
+        device_context->PSSetShader(ren.persistent.font_program.pixel, nil, 0);
+        device_context->PSSetSamplers(0, 1, &ren.persistent.sampler);
         device_context->DrawIndexed(u32(len(batch.indexes)), 0, 0);
     }
 }
@@ -567,6 +654,13 @@ batch_renderer_clear_d3d11 :: proc(ren: ^Batch_Renderer) {
 
     clear(&ren^.images.font_atlas.batch.d3d11.vertices);
     clear(&ren^.images.font_atlas.batch.d3d11.indexes);
+
+    ren^.persistent.device_context->ClearDepthStencilView(
+        ren^.persistent.depth.buffer,
+        {.DEPTH},
+        1.0,
+        0
+    );
 }
 
 batch_renderer_reset_d3d11 :: #force_inline proc(ren: ^Batch_Renderer) {
@@ -615,7 +709,7 @@ batch_renderer_delete_d3d11 :: proc(ren: ^Batch_Renderer) {
 @(private="file")
 create_or_update_vertex_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDeviceContext, data: rawptr, size: u32, buffer: ^^d3d11.IBuffer) {
     @static sz: u32 = 0;
-
+    assert(size > 0, "Vertex buffer size must be > 0");
     desc := d3d11.BUFFER_DESC {
         ByteWidth = size,
         Usage = .DYNAMIC,
@@ -625,17 +719,17 @@ create_or_update_vertex_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDevi
 
     if buffer^ == nil {
         sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
-        device->CreateBuffer(&desc, &sub, buffer);
+        assert(device->CreateBuffer(&desc, &sub, buffer) == 0, "Failed to create vertex buffer");
+        sz = size;
     } else if sz != size {
         // buffer needs resize!
         (buffer^)->Release();
         sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
-        device->CreateBuffer(&desc, &sub, buffer);
-
+        assert(device->CreateBuffer(&desc, &sub, buffer) == 0, "Failed to recreate vertex buffer");
         sz = size;
     } else {
         mapped: d3d11.MAPPED_SUBRESOURCE;
-        ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped);
+        assert(ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped) == 0, "Failed to map vertex buffer");
         mem.copy(mapped.pData, data, cast(int)size);
         ctx->Unmap(buffer^, 0);
     }
@@ -644,7 +738,7 @@ create_or_update_vertex_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDevi
 @(private="file")
 create_or_update_index_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDeviceContext, data: rawptr, size: u32, buffer: ^^d3d11.IBuffer) {
     @static sz: u32 = 0;
-
+    assert(size > 0, "Index buffer size must be > 0");
     desc := d3d11.BUFFER_DESC {
         ByteWidth = size,
         Usage = .DYNAMIC,
@@ -656,17 +750,17 @@ create_or_update_index_buffer :: proc(device: ^d3d11.IDevice, ctx: ^d3d11.IDevic
 
     if buffer^ == nil {
         sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
-        device->CreateBuffer(&desc, &sub, buffer);
+        assert(device->CreateBuffer(&desc, &sub, buffer) == 0, "Failed to create index buffer");
+        sz = size;
     } else if sz != size {
         // buffer needs resize!
         (buffer^)->Release();
         sub := d3d11.SUBRESOURCE_DATA{ pSysMem = data };
-        device->CreateBuffer(&desc, &sub, buffer);
-
+        assert(device->CreateBuffer(&desc, &sub, buffer) == 0, "Failed to recreate index buffer");
         sz = size;
     } else {
         mapped: d3d11.MAPPED_SUBRESOURCE;
-        ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped);
+        assert(ctx->Map(buffer^, 0, .WRITE_DISCARD, {}, &mapped) == 0, "Failed to map index buffer");
         mem.copy(mapped.pData, data, cast(int)size);
         ctx->Unmap(buffer^, 0);
     }

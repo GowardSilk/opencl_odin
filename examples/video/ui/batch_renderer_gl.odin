@@ -153,7 +153,6 @@ batch_renderer_new_gl :: proc(id: Window_ID) -> (ren: Batch_Renderer, err: Gener
     img_path[len(FONT_DIR)] = '/';
     copy_from_string(img_path[len(FONT_DIR) + 1:], ren.images.angel_spec.pages[0].file_name);
     x, y: libc.int;
-    stbi.set_flip_vertically_on_load(1);
     img := stbi.load(strings.clone_to_cstring(cast(string)img_path, context.temp_allocator), &x, &y, nil, 4);
     delete(img_path);
     defer libc.free(img);
@@ -205,6 +204,8 @@ batch_renderer_unload_gl :: proc(ren: ^Batch_Renderer, id: Window_ID) {
     gl.DeleteProgram(e.gl.image_program);
     gl.DeleteProgram(e.gl.rect_program);
     gl.DeleteProgram(e.gl.font_program);
+
+    delete_key(&ren^.perwindow, id);
 }
 
 batch_renderer_register_image_gl :: proc(ren: ^Batch_Renderer, id: Window_ID, img_pos: [2]i32, uv_rect: Rect, img_path: string) -> (err: General_Error) {
@@ -240,7 +241,7 @@ batch_renderer_register_image_gl :: proc(ren: ^Batch_Renderer, id: Window_ID, im
     // add image rectangle
     log.assertf(e^.window_id == id, "Image was created in a window: %d; but is updated through: %d. TODO: Do we consider this an issue?", e^.window_id, id);
     {
-        vertices := batch_renderer_register_image_rectangle_base(e^.base.gl.width, e^.base.gl.height, img_pos, uv_rect, .GL);
+        vertices := batch_renderer_register_image_rectangle_base(e^.base.gl.width, e^.base.gl.height, img_pos, uv_rect);
 
         if !ok do gl.GenBuffers(1, &e^.base.gl.vbo); // only generate buffer if entry does not yet exist
         gl.BindBuffer(gl.ARRAY_BUFFER, e^.base.gl.vbo);

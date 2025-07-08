@@ -218,13 +218,13 @@ window_proc :: proc "system" (hwnd: win.HWND, msg: win.UINT, wparam: win.WPARAM,
     switch msg {
         case win.WM_CLOSE:
             win.DestroyWindow(hwnd);
-            window^.hwnd = nil;
             window^.should_close = true;
             return 0;
         case win.WM_DESTROY:
             win.PostQuitMessage(0);
             return 0;
-        case:                       return win.DefWindowProcW(hwnd, msg, wparam, lparam);
+        case:
+            return win.DefWindowProcW(hwnd, msg, wparam, lparam);
     }
 }
 
