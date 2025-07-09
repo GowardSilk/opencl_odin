@@ -31,13 +31,15 @@ OpenCL_Context :: struct {
 
 cl_context_init :: proc(platform: cl.Platform_ID, device: cl.Device_ID, context_properties: []cl.Context_Properties) -> (c: OpenCL_Context, err: Error) {
     @(static)
-    kernels      := [?]cstring { CF_GAUSSIAN_BLUR, };
+    kernels      := [?]cstring { CF_GAUSSIAN_BLUR, CF_SOBEL_FILTER, CF_UNSHARP_MASK };
     @(static)
-    kernel_sizes := [?]uint { CF_GAUSSIAN_BLUR_SIZE };
+    kernel_sizes := [?]uint { CF_GAUSSIAN_BLUR_SIZE, CF_SOBEL_FILTER_SIZE, CF_UNSHARP_MASK_SIZE, };
     @(static)
     kernel_names := [?]#type struct {name:cstring,type:Compute_Operation} {
         {name=CF_GAUSSIAN_BLUR_KERNEL1_NAME, type=.Convolution_Filter_Gauss_Horizontal},
         {name=CF_GAUSSIAN_BLUR_KERNEL2_NAME, type=.Convolution_Filter_Gauss_Vertical},
+        {name=CF_SOBEL_FILTER_KERNEL_NAME, type=.Convolution_Filter_Sobel},
+        {name=CF_UNSHARP_MASK_KERNEL_NAME, type=.Convolution_Filter_Unsharp},
     };
 
     c.platform = platform;

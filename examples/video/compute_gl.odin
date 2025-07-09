@@ -1,12 +1,19 @@
 package video;
 
+import "core:c"
+
+import gl "vendor:OpenGL"
+import cl "shared:opencl"
+
+import "ui"
+
 execute_operation_gauss_gl :: proc(app_context: ^App_Context) {
     original_texture := ui.get_image_id(app_context^.selected_image);
     // have to create new OpenGL texture (output texture)
     // note: it does not matter that we are not "in correct" window;
     // this data can be shared across all windows
     width, height, internal_format, levels: i32;
-    gl.BindTexture(gl.TEXTURE_2D, original_texture);
+    gl.BindTexture(gl.TEXTURE_2D, original_texture.gl);
     gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_WIDTH, &width);
     gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_HEIGHT, &height);
     gl.GetTexLevelParameteriv(gl.TEXTURE_2D, 0, gl.TEXTURE_INTERNAL_FORMAT, &internal_format);

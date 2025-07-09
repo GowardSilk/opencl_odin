@@ -279,6 +279,9 @@ err_to_name :: proc(err: cl.Int) -> (string, string) {
                                             return "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR", "if the GL sharegroup reference is invalid.";
         case cl.PLATFORM_NOT_FOUND_KHR:       return "CL_PLATFORM_NOT_FOUND_KHR", "if no OpenCL platforms found.";
         case cl.INVALID_D3D10_DEVICE_KHR:     return "CL_INVALID_D3D10_DEVICE_KHR", "if D3D10 device for interop is invalid.";
+        case cl.INVALID_D3D11_RESOURCE_KHR:   return "INVALID_D3D11_RESOURCE_KHR", "";
+        case cl.D3D11_RESOURCE_ALREADY_ACQUIRED_KHR: return "D3D11_RESOURCE_ALREADY_ACQUIRED_KHR", "";
+        case cl.D3D11_RESOURCE_NOT_ACQUIRED_KHR: return "D3D11_RESOURCE_NOT_ACQUIRED_KHR", "";
 
         // NVIDIA vendor-specific
         case -9999:

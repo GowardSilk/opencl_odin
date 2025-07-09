@@ -134,6 +134,8 @@ main :: proc() {
                 0
             };
             app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
+            // load necessary KHR function pointers
+            cl.LoadGLKHRFunctions(platform);
         case .D3D11:
             // TODO(GowardSilk): this is awful.... xD
             p := (cast(^ui.Draw_Context)context.user_ptr)^.ren.persistent;
@@ -146,6 +148,7 @@ main :: proc() {
                 0
             };
             app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
+            cl.LoadD3D11KHRFunctions(platform);
     }
     log.assertf(cerr == nil, "Fatal error: %v", cerr);
     app_context.backend = backend;
