@@ -128,14 +128,16 @@ Get_Supported_GL_Texture_Formats_INTEL_T :: #type proc  (
              num_texture_formats: ^Uint) -> Int
 Get_Supported_GL_Texture_Formats_INTEL_Fn :: ^Get_Supported_GL_Texture_Formats_INTEL_T
 
+GetGLContextInfoKHR: Get_GL_Context_Info_KHR_T
+CreateEventFromGLsyncKHR: Create_Event_From_G_Lsync_KHR_T
+GetSupportedGLTextureFormatsINTEL: Get_Supported_GL_Texture_Formats_INTEL_T
+LoadGLKHRFunctions :: proc(platform: Platform_ID) {
+	GetGLContextInfoKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clGetGLContextInfoKHR");
+	CreateEventFromGLsyncKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clCreateEventFromGLsyncKHR");
+	GetSupportedGLTextureFormatsINTEL = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clGetSupportedGLTextureFormatsINTEL");
+}
 @(link_prefix="cl")
 foreign opencl {
-	GetGLContextInfoKHR :: proc  (
-                              properties: ^Context_Properties,
-                              param_name: GL_Context_Info,
-                              param_value_size: c.size_t,
-                              param_value: rawptr,
-                              param_value_size_ret: ^c.size_t) -> Int ---
 	CreateFromGLBuffer :: proc  (
                              _context: Context,
                              flags: Mem_Flags,
@@ -191,12 +193,4 @@ foreign opencl {
                                 miplevel: G_Lint,
                                 texture: G_Luint,
                                 errcode_ret: ^Int) -> Mem ---
-	CreateEventFromGLsyncKHR :: proc  (_context: Context, sync: G_Lsync, errcode_ret: ^Int) -> Event ---
-	GetSupportedGLTextureFormatsINTEL :: proc  (
-                                            _context: Context,
-                                            flags: Mem_Flags,
-                                            image_type: Mem_Object_Type,
-                                            num_entries: Uint,
-                                            gl_formats: ^G_Lenum,
-                                            num_texture_formats: ^Uint) -> Int ---
 }

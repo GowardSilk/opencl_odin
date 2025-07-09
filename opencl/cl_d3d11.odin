@@ -89,53 +89,19 @@ Get_Supported_D3D11_Texture_Formats_INTEL_T :: #type proc  (
              num_texture_formats: ^Uint) -> Int
 Get_Supported_D3D11_Texture_Formats_INTEL_Fn :: ^Get_Supported_D3D11_Texture_Formats_INTEL_T
 
-@(link_prefix="cl")
-foreign opencl {
-	GetDeviceIDsFromD3D11KHR :: proc  (
-                                   platform: Platform_ID,
-                                   d3d_device_source: D3D11_Device_Source_KHR,
-                                   d3d_object: rawptr,
-                                   d3d_device_set: D3D11_Device_Set_KHR,
-                                   num_entries: Uint,
-                                   devices: ^Device_ID,
-                                   num_devices: ^Uint) -> Int ---
-	CreateFromD3D11BufferKHR :: proc  (
-                                   _context: Context,
-                                   flags: Mem_Flags,
-                                   resource: ^d3d11.IBuffer,
-                                   errcode_ret: ^Int) -> Mem ---
-	CreateFromD3D11Texture2DKHR :: proc  (
-                                      _context: Context,
-                                      flags: Mem_Flags,
-                                      resource: ^d3d11.ITexture2D,
-                                      subresource: win32.UINT,
-                                      errcode_ret: ^Int) -> Mem ---
-	CreateFromD3D11Texture3DKHR :: proc  (
-                                      _context: Context,
-                                      flags: Mem_Flags,
-                                      resource: ^d3d11.ITexture3D,
-                                      subresource: win32.UINT,
-                                      errcode_ret: ^Int) -> Mem ---
-	EnqueueAcquireD3D11ObjectsKHR :: proc  (
-                                        command_queue: Command_Queue,
-                                        num_objects: Uint,
-                                        mem_objects: ^Mem,
-                                        num_events_in_wait_list: Uint,
-                                        event_wait_list: ^Event,
-                                        event: ^Event) -> Int ---
-	EnqueueReleaseD3D11ObjectsKHR :: proc  (
-                                        command_queue: Command_Queue,
-                                        num_objects: Uint,
-                                        mem_objects: ^Mem,
-                                        num_events_in_wait_list: Uint,
-                                        event_wait_list: ^Event,
-                                        event: ^Event) -> Int ---
-	GetSupportedD3D11TextureFormatsINTEL :: proc  (
-                                               _context: Context,
-                                               flags: Mem_Flags,
-                                               image_type: Mem_Object_Type,
-                                               plane: Uint,
-                                               num_entries: Uint,
-                                               d3d11_formats: ^dxgi.FORMAT,
-                                               num_texture_formats: ^Uint) -> Int ---
+GetDeviceIDsFromD3D11KHR: Get_Device_I_Ds_From_D3D11_KHR_T
+CreateFromD3D11BufferKHR: Create_From_D3D11_Buffer_KHR_T
+CreateFromD3D11Texture2DKHR: Create_From_D3D11_Texture2D_KHR_T
+CreateFromD3D11Texture3DKHR: Create_From_D3D11_Texture3D_KHR_T
+EnqueueAcquireD3D11ObjectsKHR: Enqueue_Acquire_D3D11_Objects_KHR_T
+EnqueueReleaseD3D11ObjectsKHR: Enqueue_Release_D3D11_Objects_KHR_T
+GetSupportedD3D11TextureFormatsINTEL: Get_Supported_D3D11_Texture_Formats_INTEL_T
+LoadD3D11KHRFunctions :: proc(platform: Platform_ID) {
+	GetDeviceIDsFromD3D11KHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clGetDeviceIDsFromD3D11KHR");
+	CreateFromD3D11BufferKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clCreateFromD3D11BufferKHR");
+	CreateFromD3D11Texture2DKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clCreateFromD3D11Texture2DKHR");
+	CreateFromD3D11Texture3DKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clCreateFromD3D11Texture3DKHR");
+	EnqueueAcquireD3D11ObjectsKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clEnqueueAcquireD3D11ObjectsKHR");
+	EnqueueReleaseD3D11ObjectsKHR = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clEnqueueReleaseD3D11ObjectsKHR");
+	GetSupportedD3D11TextureFormatsINTEL = auto_cast GetExtensionFunctionAddressForPlatform(platform, "clGetSupportedD3D11TextureFormatsINTEL");
 }

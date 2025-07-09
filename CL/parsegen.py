@@ -919,11 +919,58 @@ def main(cc: str, out_dir: str, enable_d3d: bool, only_essential: bool) -> None:
             file_blob += "\n" if len(definitions) > 0 else ""
 
             if len(functions) > 0:
-                file_blob += '@(link_prefix="cl")\n'
-                file_blob += "foreign opencl {\n"
+                # khr functions have to be loaded in runtime
+                khr_functions:  list[Function] = []
+                core_functions: list[Function] = []
+
+                def is_khr_function(s: str) -> bool:
+                    s_l = s.lower()
+                    khr_endings = [
+                        "khr",
+                        "ext",
+                        "intel",
+                        "amd",
+                        "nv",
+                        "nvidia",
+                        "apple",
+                        "arm",
+                        "qcom",
+                        "img",
+                        "msft"
+                    ]
+                    return any(True for khr_ending in khr_endings if s_l.endswith(khr_ending))
+
                 for func in functions:
-                    file_blob += "\t" + func.into_odin(typed=False) + "\n"
-                file_blob += "}\n"
+                    if is_khr_function(func.name):
+                        khr_functions.append(func)
+                    else:
+                        core_functions.append(func)
+
+                if len(khr_functions):
+                    func_loader: str = ""
+                    for khr_func in khr_functions:
+                        stripped_khr_name = fmt.strip_cl_prefix(khr_func.name)
+                        for k, v in g_aliases.items():
+                            print(f"Key {k}; Val: {v}")
+
+                        khr_func_predicate_alias = f"{khr_func.name}_t"
+                        print(f"In aliases: {g_aliases[khr_func_predicate_alias]}")
+                        print(f"In reality: {khr_func.into_odin(typed=True)}")
+                        assert khr_func.into_odin(typed=True) == g_aliases[khr_func_predicate_alias]._from, "For each binding KHR function, there should be an already existing alias for the function prototype"
+                        file_blob += f"{stripped_khr_name}: {fmt.format(khr_func_predicate_alias)}\n"
+                        # NOTE(GowardSilk): khr_func.name is not stored after application of fmt.change_format,
+                        # so this should be a valid OpenCL function name
+                        func_loader += f"\t{stripped_khr_name} = auto_cast GetExtensionFunctionAddressForPlatform(platform, \"{khr_func.name}\");\n"
+
+                    # add one special procedure for loading all of the functions for this specific KHR file
+                    file_blob += f"Load{fmt.strip_cl_prefix(target_header.strip(".h")).upper()}KHRFunctions :: proc(platform: Platform_ID) {{\n{func_loader}}}\n"
+                
+                if len(core_functions):
+                    file_blob += '@(link_prefix="cl")\n'
+                    file_blob += "foreign opencl {\n"
+                    for core_func in core_functions:
+                        file_blob += "\t" + core_func.into_odin(typed=False) + "\n"
+                    file_blob += "}\n"
 
         with open(os.path.join(out_dir, target_header[:-2] + ".odin"), "w+") as file:
             file.write("package cl;\n\n")
