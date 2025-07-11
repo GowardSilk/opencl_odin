@@ -14,4 +14,6 @@ Error :: enum {
     Buffer_Allocation_Fail,
     Command_Queue_Allocation_Fail,
     Kernel_Creation_Fail,
+
+    Video_Load_Fail,
 }
