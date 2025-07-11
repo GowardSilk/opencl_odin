@@ -95,7 +95,7 @@ execute_operation_gauss_d3d11 :: proc(app_context: ^App_Context) {
         gauss_kernel_buf := cl.CreateBuffer(
             app_context^.c._context,
             cl.MEM_READ_ONLY | cl.MEM_USE_HOST_PTR,
-            size_of(f64) * len(gauss_kernel),
+            size_of(gauss_kernel[0]) * len(gauss_kernel),
             raw_data(gauss_kernel),
             &err
         );
@@ -203,7 +203,7 @@ execute_operation_sobel_d3d11 :: proc(app_context: ^App_Context) {
         log.assertf(err == cl.SUCCESS, "SetKernelArg 1 failed: %d; %s | %s", err, err_to_name(err));
 
         global_work_size := texture_size_d3d11(original_texture);
-        cl.EnqueueNDRangeKernel(
+        err = cl.EnqueueNDRangeKernel(
             app_context^.c.queue,
             sobel_kernel,
             2,
@@ -214,6 +214,7 @@ execute_operation_sobel_d3d11 :: proc(app_context: ^App_Context) {
             nil,
             nil
         );
+        log.assertf(err == cl.SUCCESS, "EnqueueNDRangeKernel failed: %d; %s | %s", err, err_to_name(err));
     }
     err = cl.EnqueueReleaseD3D11ObjectsKHR(app_context^.c.queue, 1, &original_texture_mem, 0, nil, nil);
     log.assertf(err == cl.SUCCESS, "EnqueueReleaseD3D11ObjectsKHR failed: %d; %s | %s", err, err_to_name(err));
@@ -230,7 +231,7 @@ execute_operation_unsharp_d3d11 :: proc(app_context: ^App_Context) {
         cl.ReleaseMemObject(new_texture_mem);
     }
 
-    gauss_kernel_7x7 := [49]f64{
+    gauss_kernel_7x7 := [49]cl.Float {
         0.00000067, 0.00002292, 0.00019117, 0.00038771, 0.00019117, 0.00002292, 0.00000067,
         0.00002292, 0.00078634, 0.00655603, 0.01330373, 0.00655603, 0.00078634, 0.00002292,
         0.00019117, 0.00655603, 0.05472157, 0.11116501, 0.05472157, 0.00655603, 0.00019117,
@@ -248,7 +249,7 @@ execute_operation_unsharp_d3d11 :: proc(app_context: ^App_Context) {
     {
         unsharp_kernel := query_kernel(.Convolution_Filter_Unsharp);
 
-        gauss_kernel_buf := cl.CreateBuffer(app_context^.c._context, cl.MEM_READ_ONLY | cl.MEM_COPY_HOST_PTR, size_of(f64) * len(gauss_kernel), raw_data(gauss_kernel), &err);
+        gauss_kernel_buf := cl.CreateBuffer(app_context^.c._context, cl.MEM_READ_ONLY | cl.MEM_COPY_HOST_PTR, size_of(gauss_kernel[0]) * len(gauss_kernel), raw_data(gauss_kernel), &err);
         log.assertf(err == cl.SUCCESS, "CreateBuffer failed: %d; %s | %s", err, err_to_name(err));
         defer cl.ReleaseMemObject(gauss_kernel_buf);
 

@@ -34,7 +34,7 @@ execute_operation_gauss_gl :: proc(app_context: ^App_Context) {
         create_buffer(
             &app_context^.c,
             gauss_kernel,
-            len(gauss_kernel) * size_of(f64)
+            len(gauss_kernel) * size_of(gauss_kernel[0])
         ) == .None
     );
     assert(

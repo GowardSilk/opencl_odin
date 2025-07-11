@@ -51,10 +51,10 @@ CF_UNSHARP : Compute_Operations : {.Convolution_Filter_Unsharp};
  * keeps the response tighter, preserving more details
  * @return slice (Guassian kernel) for one axis
  */
-generate_gauss_kernel :: proc(sigma: f64, allocator := context.allocator) -> []f64 {
-    gauss_function :: proc(x: int, sigma: f64) -> f64 {
-        frac := 1.0/(math.sqrt_f64(2.0*math.PI)*sigma);
-        xf := cast(f64)x;
+generate_gauss_kernel :: proc(sigma: cl.Float, allocator := context.allocator) -> []cl.Float {
+    gauss_function :: proc(x: int, sigma: cl.Float) -> cl.Float {
+        frac := 1.0/(math.sqrt_f32(2.0*math.PI)*sigma);
+        xf := cast(cl.Float)x;
         return frac * math.pow(math.E, -(xf*xf)/(2*sigma*sigma));
     }
 
@@ -63,7 +63,7 @@ generate_gauss_kernel :: proc(sigma: f64, allocator := context.allocator) -> []f
     // size*1 matrix and multiply it by its transposition (1*size matrix)
     // to get the same result
     size := cast(int)math.ceil(2 * sigma + 1);
-    gauss := make([]f64, size, allocator);
+    gauss := make([]cl.Float, size, allocator);
 
     for i in 0..<size do gauss[i] = gauss_function(i, sigma);
 
@@ -75,7 +75,7 @@ CF_GAUSSIAN_BLUR: cstring: `
 __kernel void cf_gaussian_blur_horizontal(
     read_only image2d_t input,
     write_only image2d_t output,
-    __constant double* gauss_kernel,
+    __constant float* gauss_kernel,
     const int gauss_kernel_size,
     __local float* local_tile)
 {
@@ -127,7 +127,7 @@ __kernel void cf_gaussian_blur_horizontal(
 __kernel void cf_gaussian_blur_vertical(
     __read_only image2d_t input,
     __write_only image2d_t output,
-    __constant double* gauss_kernel,
+    __constant float* gauss_kernel,
     const int gauss_kernel_size,
     __local float* local_tile)
 {
@@ -221,7 +221,7 @@ CF_SOBEL_FILTER: cstring: `
                         + read_imagef(input, input_pos + (int2)(2, 2));
 
         float4 m = sqrt(sobel_x * sobel_x + sobel_y * sobel_y);
-        write_imagef(output, input_pos, m);
+        write_imagef(output, input_pos, (float4)(m.xyz, 1.f));
     }
 `;
 CF_SOBEL_FILTER_SIZE: uint: len(CF_SOBEL_FILTER);
@@ -232,7 +232,7 @@ CF_UNSHARP_MASK: cstring: `
 
     __kernel void cf_unsharp(
         __read_only image2d_t input,
-        __constant double* gauss_kernel,
+        __constant float* gauss_kernel,
         const int gauss_kernel_size,
         const float threshold,
         __write_only image2d_t output
