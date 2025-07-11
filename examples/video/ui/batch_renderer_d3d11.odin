@@ -551,6 +551,17 @@ batch_renderer_invalidate_image_and_reset_d3d11 :: #force_inline proc(ren: ^Batc
     e, ok := &ren^.images.image_vertices[img_path];
     log.assertf(ok, "Image with path: \"%s\" is not registered! Cannot invalidate an image which does not exist!", img_path);
     e^.base.d3d11.texture = new_texture_id;
+
+    tex_desc: d3d11.TEXTURE2D_DESC;
+    new_texture_id->GetDesc(&tex_desc);
+    // create new SRV
+    assert(tex_desc.MipLevels == 1);
+    srv_desc := d3d11.SHADER_RESOURCE_VIEW_DESC {
+        Format = tex_desc.Format,
+        ViewDimension = .TEXTURE2D,
+        Texture2D = { MipLevels = 1, MostDetailedMip = 0 },
+    };
+    assert(ren^.persistent.device->CreateShaderResourceView(new_texture_id, &srv_desc, &e^.base.d3d11.srv) == 0);
 }
 
 batch_renderer_construct_d3d11 :: proc(ren: ^Batch_Renderer, id: Window_ID) {

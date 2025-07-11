@@ -96,20 +96,20 @@ __kernel void cf_gaussian_blur_horizontal(
     int local_index = ly * tile_width + lx;
 
     int2 coord = (int2)(gid_x, gid_y);
-    float4 pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, coord);
+    float4 pixel = read_imagef(input, coord);
     local_tile[local_index] = pixel.x;
 
     // left "halo"
     if (lid_x - radius < 0) {
         int2 left_coord = (int2)(clamp(gid_x - radius, 0, get_image_width(input)-1), gid_y);
-        float4 left_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, left_coord);
+        float4 left_pixel = read_imagef(input, left_coord);
         local_tile[local_index] = left_pixel.x;
     }
 
     // right "halo"
     if (lid_x >= lsize_x - radius) {
         int2 right_coord = (int2)(clamp(gid_x + radius, 0, get_image_width(input)-1), gid_y);
-        float4 right_pixel = read_imagef(input, CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, right_coord);
+        float4 right_pixel = read_imagef(input, right_coord);
         local_tile[local_index] = right_pixel.x;
     }
 
@@ -203,7 +203,7 @@ CF_SOBEL_FILTER: cstring: `
         if (x >= input_width - 2 || y >= input_height - 2) {
             return;
         }
-        
+
         int2 input_pos = (int2)(x, y);
         // horizontal
         float4 sobel_x = read_imagef(input, input_pos) * -1
@@ -243,31 +243,34 @@ CF_UNSHARP_MASK: cstring: `
         int x = get_global_id(0);
         int y = get_global_id(1);
 
-        int local_offset_x = get_local_id(0); // ??
-        int local_offset_y = get_local_id(1); // ??
-        if (local_offset_x + gauss_kernel_size >= width) {
+        if (x + gauss_kernel_size >= width) {
             // right halo
+            return;
         }
-        if (local_offset_x - gauss_kernel_size < 0) {
+        if (x - gauss_kernel_size < 0) {
             // left halo
+            return;
         }
-        if (local_offset_y + gauss_kernel_size >= height) {
+        if (y + gauss_kernel_size >= height) {
             // bottom halo
+            return;
         }
-        if (local_offset_y - gauss_kernel_size < 0) {
+        if (y - gauss_kernel_size < 0) {
             // top halo
+            return;
         }
 
         float4 blurred_rgba = (float4)(0.f, 0.f, 0.f, 0.f);
-        for (int y = 0; y < gauss_kernel_size; y++) {
-            for (int x = 0; x < gauss_kernel_size; x++) {
-                int2 pos = (int2)(local_offset_x + x, local_offset_y + y);
-                float weight = (float)gauss_kernel[gauss_kernel_size * y + x];
+        int _half = gauss_kernel_size / 2;
+        for (int i_y = -_half; i_y <= _half; i_y++) {
+            for (int i_x = -_half; i_x <= _half; i_x++) {
+                int2 pos = (int2)(i_x + x, i_y + y);
+                float weight = (float)gauss_kernel[gauss_kernel_size * i_y + i_x];
                 blurred_rgba += read_imagef(input, pos) * weight;
             }
         }
 
-        int2 pos = (int2)(local_offset_x, local_offset_y);
+        int2 pos = (int2)(x, y);
         float4 rgba = read_imagef(input, pos);
         float4 unsharp_mask_rgba = rgba - blurred_rgba;
         write_imagef(output, pos, unsharp_mask_rgba);
@@ -284,7 +287,7 @@ CF_UNSHARP_MASK_SIZE: uint: len(CF_UNSHARP_MASK);
 CF_UNSHARP_MASK_KERNEL_NAME: cstring: "cf_unsharp";
 
 execute_operations :: proc(app_context: ^App_Context) {
-    if CF_GAUSS_BIT in app_context^.c.operations {
+    if (CF_GAUSS & app_context^.c.operations) == CF_GAUSS {
         log.info("Gauss");
         execute_operation_gauss(app_context);
     }
@@ -296,6 +299,8 @@ execute_operations :: proc(app_context: ^App_Context) {
         log.info("Unsharp");
         execute_operation_unsharp(app_context);
     }
+
+    app_context^.c.operations = {};
 }
 
 execute_operation_gauss :: proc(app_context: ^App_Context) {

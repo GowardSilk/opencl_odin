@@ -50,7 +50,7 @@ cl_context_init :: proc(platform: cl.Platform_ID, device: cl.Device_ID, context_
     c.buffers = make([dynamic]cl.Mem);
     c.kernels = make([]OpenCL_Context_Kernel, len(kernel_names));
     for kernel, index in kernel_names {
-        c.kernels[index].kernel = compile_kernel(&c, kernel.name) or_return; 
+        c.kernels[index].kernel = compile_kernel(&c, kernel.name) or_return;
         c.kernels[index].type = kernel.type;
     }
 
@@ -140,12 +140,12 @@ delete_buffer :: #force_inline proc(buf: cl.Mem) {
 }
 
 create_command_queue :: proc(c: ^OpenCL_Context) -> (err: Error) {
-	ret: cl.Int;
-	c^.queue = cl.CreateCommandQueue(c^._context, c^.device, 0, &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create Command Queue!", ret);
-		return .Command_Queue_Allocation_Fail;
-	}
+    ret: cl.Int;
+    c^.queue = cl.CreateCommandQueue(c^._context, c^.device, 0, &ret);
+    if ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to create Command Queue!", ret);
+	return .Command_Queue_Allocation_Fail;
+    }
 
     return .None;
 }
@@ -155,14 +155,14 @@ delete_command_queue :: #force_inline proc(queue: cl.Command_Queue) {
 }
 
 compile_kernel :: proc(c: ^OpenCL_Context, name: cstring) -> (kernel: cl.Kernel, err: Error) {
-	ret: cl.Int;
-	kernel = cl.CreateKernel(c^.program, name, &ret);
-	if ret != cl.SUCCESS {
-		cl_context_errlog(c, "Failed to create kernel!", ret);
-		return nil, .Kernel_Creation_Fail;
-	}
+    ret: cl.Int;
+    kernel = cl.CreateKernel(c^.program, name, &ret);
+    if ret != cl.SUCCESS {
+	cl_context_errlog(c, "Failed to create kernel!", ret);
+	return nil, .Kernel_Creation_Fail;
+    }
 
-	return kernel, .None;
+    return kernel, .None;
 }
 
 delete_kernel :: #force_inline proc(kernel: cl.Kernel) {
