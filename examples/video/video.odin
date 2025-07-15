@@ -5,6 +5,7 @@ import "core:io"
 import "core:log"
 import "core:fmt"
 import "core:mem"
+import "core:math"
 import "core:sync"
 import "core:thread"
 
@@ -198,18 +199,13 @@ DQT_Chunk :: struct {
     table_data: [64]byte,
 }
 
-SOF0_Chunk_Component_Id :: enum byte {
-    Y  = 1,
-    Cb = 2,
-    Cr = 3,
-}
 SOF0_Chunk_Component :: struct {
-    id: SOF0_Chunk_Component_Id,
+    id: byte,
     sampling: byte,
     quant_table_id: byte,
 }
 
-SOF0_Chunk_Header :: struct {
+SOF0_Chunk_Header :: struct #packed {
     length:     u16be,
     precision:  byte,
     height:     u16be,
@@ -231,10 +227,6 @@ DHT_Chunk_Table_Info_High :: enum byte {
 
 DHT_Chunk_Table_Info_Low :: byte;
 
-get_dht_id :: #force_inline proc(info: DHT_Chunk_Table_Info) -> DHT_Chunk_Table_Info_Low {
-    return cast(byte)(info & 0xf);
-}
-
 DHT_Chunk :: struct {
     using header: #type struct {
         table_info:   DHT_Chunk_Table_Info, // High nibble = DC/AC; Low nibble = id
@@ -244,8 +236,8 @@ DHT_Chunk :: struct {
 }
 
 SOS_Chunk_Component :: struct {
-    id: SOF0_Chunk_Component_Id,           // Component selector
-    huff_tables: byte,  // High nibble = DC table ID, low nibble = AC table ID
+    id: byte, // Component selector
+    huff_tables: byte, // High nibble = DC table ID, low nibble = AC table ID
 }
 
 SOS_Chunk :: struct {
@@ -260,7 +252,7 @@ JPEG :: struct {
     app0:  APP0_Chunk,
     dqts:  map[byte]DQT_Chunk,
     sof0:  SOF0_Chunk,
-    dhts:  map[byte]DHT_Graph,
+    dhts:  map[DHT_Chunk_Table_Info]DHT_Graph,
     sos:   SOS_Chunk,
     compressed_data: [dynamic]byte,
 }
@@ -278,7 +270,7 @@ get_marker :: #force_inline proc(stream: io.Reader) -> (bytes: [2]byte, ioerr: i
         b, ioerr = io.read_byte(stream);
         assert(ioerr == .None);
     }
-    for b == 0xFF {
+    for b == 0xFF || b == 0x00 {
         b, ioerr = io.read_byte(stream);
         assert(ioerr == .None);
     }
@@ -325,8 +317,11 @@ decode_image :: proc(worker: ^thread.Thread) {
                 /* ignoring */
                 case 0xE0..=0xEF, COM.y: // ignore other APP(s) and comments
                     length: u16be;
-                    io.read_ptr(engine.stream, &length, size_of(length));
-                    io.seek(engine.stream, cast(i64)length, .Current);
+                    l, err := io.read_ptr(engine.stream, &length, size_of(length));
+                    assert(l == size_of(length) && err == .None);
+                    skip_len := cast(i64)(length - 2);
+                    fmt.eprintfln("Ignoring marker 0xFF%02X (skipping %d bytes)", marker.y, skip_len);
+                    io.seek(engine.stream, skip_len, .Current);
 
                 case: unreachable();
             }
@@ -335,7 +330,7 @@ decode_image :: proc(worker: ^thread.Thread) {
             assert(ioerr == .None);
         }
 
-        //decompress(engine, &jpeg);
+        decompress(engine, &jpeg);
     }
     sync.lock(&engine^.front.lock);
     if engine^.front.ready_for_request {
@@ -367,7 +362,7 @@ read_app0 :: #force_inline proc(jpeg: ^JPEG, using engine:  ^Engine) {
 
     when ODIN_DEBUG {
         fmt.eprintln("APP0:");
-        fmt.eprintfln("\tlength: %d", cast(u16le)jpeg.app0.length);
+        fmt.eprintfln("\tlength: %d", transmute(u16le)jpeg.app0.length);
         fmt.eprintfln("\tidentifier: %d", jpeg.app0.identifier);
         fmt.eprintfln("\tversion_major: %d", jpeg.app0.version_major);
         fmt.eprintfln("\tversion_minor: %d", jpeg.app0.version_minor);
@@ -396,7 +391,7 @@ read_dqt :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
         length -= l;
 
         when ODIN_DEBUG {
-            fmt.eprintfln("DQT[%v]:", dqt.table_info & 0xF);
+            fmt.eprintfln("DQT[<id: %v>]:", dqt.table_info & 0xF);
             fmt.eprintfln("\ttable_info: %d", dqt.table_info);
             fmt.eprint("\ttable_data: [\n\t\t", );
             for data, index in dqt.table_data {
@@ -421,11 +416,12 @@ read_sof0 :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
         l, err = io.read_ptr(stream, &jpeg.sof0.components[i], size_of(SOF0_Chunk_Component));
         assert(l == size_of(SOF0_Chunk_Component) && err == .None, "Failed to read whole SOF0 Component Chunk!");
     }
+    assert(jpeg.sof0.num_components == 3);
 
     when ODIN_DEBUG {
         fmt.eprintln("SOF0:");
         fmt.eprintln("\theader:");
-        fmt.eprintfln("\t\tlength: %v", cast(u16le)jpeg.sof0.length);
+        fmt.eprintfln("\t\tlength: %v", jpeg.sof0.length);
         fmt.eprintfln("\t\tprecision: %v", jpeg.sof0.precision);
         fmt.eprintfln("\t\theight: %v", cast(u16le)jpeg.sof0.height);
         fmt.eprintfln("\t\twidth: %v", cast(u16le)jpeg.sof0.width);
@@ -444,6 +440,8 @@ read_dht :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     blength: u16be;
     l, err := io.read_ptr(stream, &blength, size_of(blength));
     assert(l == size_of(blength) && err == .None);
+    // NOTE(GowardSilk): I honestly have no idea why this does not have to be transmuted into u16le first, but when it is,
+    // the values are complete garbage.... ?!?!?!
     length := cast(int)blength - size_of(u16be)
 
     for length > 0 {
@@ -464,32 +462,29 @@ read_dht :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
         dht_graph := make_dht_graph(dht, allocator);
         construct_dht_graph(dht_graph, dht, allocator);
 
-        if jpeg.dhts == nil do jpeg.dhts = make(map[byte]DHT_Graph, allocator);
-        map_insert(&jpeg.dhts, get_dht_id(dht.table_info), dht_graph);
+        if jpeg.dhts == nil do jpeg.dhts = make(map[DHT_Chunk_Table_Info]DHT_Graph, allocator);
+        assert(dht.table_info not_in jpeg.dhts);
+        map_insert(&jpeg.dhts, dht.table_info, dht_graph);
 
-        length -= l + symbols_len;
+        length -= size_of(dht.header) + symbols_len;
 
         when ODIN_DEBUG {
-            fmt.eprintfln("DHT[%v]:", get_dht_id(dht.table_info));
+            fmt.eprintfln("DHT[<%v; %v>]:", cast(DHT_Chunk_Table_Info_High)(dht.table_info & 0xF0), cast(DHT_Chunk_Table_Info_Low)dht.table_info);
 
             node_eprint :: proc(node: ^DHT_Graph_Node) {
                 if node == nil do return;
 
-                if node^.symbol != HT_NO_SYMBOL {
+                if node^.symbol != HT_NO_SYMBOL && node^.is_leaf {
                     fmt.eprintfln("\tNode:");
                     fmt.eprintfln("\t\tsymbol: %v", node^.symbol);
-                    code: u16;
-                    for i in 0..<node^.len {
-                        code |= cast(u16)(node^.code[i]) << i;
-                    }
-                    fmt.eprintfln("\t\tcode: %v", code);
+                    fmt.eprintfln("\t\tcode: %v/0b%b", node^.code, node^.code);
                 }
 
                 node_eprint(node^.left);
                 node_eprint(node^.right);
             }
 
-            node_eprint(jpeg.dhts[get_dht_id(dht.table_info)].root);
+            node_eprint(jpeg.dhts[dht.table_info].root);
         }
     }
 }
@@ -511,7 +506,7 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
 
     when ODIN_DEBUG {
         fmt.eprintln("SOS:");
-        fmt.eprintfln("\tlength: %v", cast(u16le)jpeg.sos.length);
+        fmt.eprintfln("\tlength: %v", jpeg.sos.length);
         for component in jpeg.sos.components {
             fmt.eprintfln("\tcomponent[%v]:", component.id);
             fmt.eprintfln("\t\thuff_tables: %d", component.huff_tables);
@@ -522,7 +517,8 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     }
 
     // ignore 3 bytes
-    io.seek(stream, 3, .Current);
+    _, e := io.seek(stream, 3, .Current);
+    assert(e == .None);
 
     // read SOS compressed data
     marker: [2]byte;
@@ -531,20 +527,22 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     for {
         _, err = io.read(stream, marker[:]);
         if err == .EOF do break;
-        if marker.x == 0xFF && marker.y != 0x0 && marker.y < 0xD0 && marker.y > 0xD7 {
+        // TODO(GowardSilk): This is not particularly good method of parsing the compressed data since
+        // SOS does not have to be the last chunk!
+        if marker == EOI {
             break;
         }
 
         append(&jpeg.compressed_data, marker.x, marker.y);
     }
 
-    _, e := io.seek(stream, -2, .Current);
+    _, e = io.seek(stream, -2, .Current);
     assert(e == .None);
     when ODIN_DEBUG do fmt.eprintln("\tCompressed data loaded!");
 }
 
 @(private="file")
-ZIGZAG_ORDER :: [?][2]int {
+ZIGZAG_ORDER := [?][2]int {
     {0,0},
     {0,1}, {1,0},
     {2,0}, {1,1}, {0,2},
@@ -577,13 +575,14 @@ MAT_ORDER :: [8][8]int {
 HT_NO_SYMBOL :: byte(0);
 
 DHT_Graph_Node_Code :: struct {
-    code: [16]byte, // TODO(GowardSilk): STORE THIS AS u16!!
-    len:  byte, // number of bytes stored in 'code'
+    code: u16,
 }
 
 DHT_Graph_Node_Symbol :: byte;
 
 DHT_Graph_Node :: struct {
+    is_leaf: bool,
+
     symbol:  DHT_Graph_Node_Symbol,
     using _: DHT_Graph_Node_Code,
 
@@ -598,8 +597,8 @@ DHT_Graph :: struct {
 
 make_dht_graph :: #force_inline proc(dht: DHT_Chunk, allocator: mem.Allocator) -> (graph: DHT_Graph) {
     graph.root = make_dht_node(nil, allocator);
-    graph.root^.left = make_dht_left_node(graph.root, allocator);
-    graph.root^.left = make_dht_right_node(graph.root, allocator);
+    make_dht_left_node(graph.root, allocator);
+    make_dht_right_node(graph.root, allocator);
     return graph;
 }
 
@@ -623,34 +622,29 @@ delete_dht_graph :: #force_inline proc(graph: DHT_Graph, allocator: mem.Allocato
 make_dht_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) -> ^DHT_Graph_Node {
     node, err := mem.new(DHT_Graph_Node, allocator);
     assert(err == .None);
+    mem.zero_item(node);
 
     node^.symbol = HT_NO_SYMBOL;
     node^.parent = parent;
     return node;
 }
 
-make_dht_left_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) -> ^DHT_Graph_Node {
+make_dht_left_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) {
     node := make_dht_node(parent, allocator);
-    node^.code = parent^.code;
-    node^.code[node^.len] = 0;
-    node^.len  = parent^.len + 1;
-    assert(node^.len <= 16);
-    return node;
+    node^.code = parent^.code << 1;
+    parent^.left = node;
 }
 
-make_dht_right_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) -> ^DHT_Graph_Node {
+make_dht_right_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) {
     node := make_dht_node(parent, allocator);
-    node^.code = parent^.code;
-    node^.code[node^.len] = 1;
-    node^.len  = parent^.len + 1;
-    assert(node^.len <= 16);
-    return node;
+    node^.code = parent^.code << 1 | 0x1;
+    parent^.right = node;
 }
 
 delete_dht_node :: mem.free;
 
 construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.Allocator) {
-    leftmost := graph.root^.left;
+    leftmost := graph.root.left;
     symbols  := dht.symbols;
 
     get_right_level_node :: proc(node: ^DHT_Graph_Node) -> ^DHT_Graph_Node {
@@ -676,10 +670,11 @@ construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.All
         return ptr;
     }
 
-    for count in dht.code_lengths {
+    for count, index in dht.code_lengths {
         if count > 0 {
             for symbol in symbols[:count] {
                 leftmost^.symbol = symbol;
+                leftmost^.is_leaf = true;
                 leftmost = get_right_level_node(leftmost);
             }
             symbols = symbols[count:];
@@ -687,18 +682,18 @@ construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.All
             make_dht_left_node(leftmost, allocator);
             make_dht_right_node(leftmost, allocator);
 
-            current  := get_right_level_node(leftmost);
-            leftmost := leftmost^.left;
+            current := get_right_level_node(leftmost);
+            leftmost = leftmost^.left;
             for current != nil {
-                current^.left  = make_dht_left_node(current, allocator);
-                current^.right = make_dht_right_node(current, allocator);
+                make_dht_left_node(current, allocator);
+                make_dht_right_node(current, allocator);
                 current = get_right_level_node(current);
             }
         } else {
             current := leftmost;
             for current != nil {
-                current^.left  = make_dht_left_node(current, allocator);
-                current^.right = make_dht_right_node(current, allocator);
+                make_dht_left_node(current, allocator);
+                make_dht_right_node(current, allocator);
                 current = get_right_level_node(current);
             }
 
@@ -707,32 +702,33 @@ construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.All
     }
 }
 
-query_in_dht_graph :: proc(graph: DHT_Graph, using c: DHT_Graph_Node_Code) -> DHT_Graph_Node_Symbol {
+query_in_dht_graph :: proc(graph: DHT_Graph, code: u16, code_len: byte) -> (symbol: DHT_Graph_Node_Symbol, eob: bool) {
     current := graph.root;
-    c := c;
 
-    for index := 0; current != nil && index < cast(int)len; index += 1 {
-        if code[index] == '0' do current = current^.left;
-        else if code[index] == '1' do current = current^.right;
+    for index: byte = 0; current != nil && index < code_len; index += 1 {
+        if (code >> index & 0x01) == 0 do current = current^.left;
+        else if (code >> index & 0x01) == 1 do current = current^.right;
         else do unreachable();
 
-        if current != nil {
-            is_leaf := (current^.left == nil || current^.right == nil);
-            is_code_match := mem.compare(c.code[:], current^.code[:]) == 0;
-            if is_leaf && is_code_match do return current^.symbol;
+        if current != nil && current^.is_leaf {
+            // EOB ([E]nd [O]f [B]lock is when 0 is present in the match from huffman table)
+            if current^.symbol == HT_NO_SYMBOL do return HT_NO_SYMBOL, true;
+            return current^.symbol, false;
         }
+
     }
 
-    return 0;
+    return HT_NO_SYMBOL, false;
 }
 
-YCbCr :: struct {
-    y, cb, cr: byte,
+RLE_Data :: struct {
+    data: [dynamic]int,
 }
 
 @(private="file")
-construct_mcu :: proc(jpeg: ^JPEG, rle: [3][]int) -> [64 * 4]byte {
-    yuv_pixels: [64]YCbCr;
+construct_pixel_bytes :: proc(jpeg: ^JPEG, rle: [3]RLE_Data) -> [64 * 4]byte {
+    yuv_pixels: [3][64]int;
+    zzorder: [64]int;
 
     zzindex_to_matindex :: #force_inline proc(zzindex: int) -> [2]int {
         return ZIGZAG_ORDER[zzindex];
@@ -742,26 +738,236 @@ construct_mcu :: proc(jpeg: ^JPEG, rle: [3][]int) -> [64 * 4]byte {
     dc_diff: [3]int;
 
     for rle_id in 0..<3 {
-        rle_len := len(rle[rle_id]);
+        curr_rle := rle[rle_id];
         zzskip_pos := -1;
-        for i := 0; i < rle_len - 2; i += 2 {
-            if rle[rle_id][i] == 0 && rle[rle_id][i + 1] == 0 {
-                break;
-            }
 
-            zzskip_pos += rle[rle_id][i] + 1;
-            matskip_pos := zzindex_to_matindex(zzskip_pos);
-            yuv_pixels[matskip_pos.y * rle_len + x] = rle[rle_id][i + 1];
+        for i := 0; i <= len(curr_rle.data) - 2; i += 2 {
+            nof_zeroes := curr_rle.data[i];
+            suc_symbol := curr_rle.data[i + 1]; // number succeeding 0s
+
+            zzskip_pos += nof_zeroes + 1;
+            if zzskip_pos >= 64 do break;
+
+            zzorder[zzskip_pos] = suc_symbol;
         }
 
-        dc_diff[rle_id] += yuv_pixels[0];
-        yuv_pixels[0] = dc_diff[rle_id];
+        dc_diff[rle_id] += zzorder[0];
+        zzorder[0] = dc_diff[rle_id];
+
+        find_qt :: #force_inline proc(jpeg: ^JPEG, id: int) -> byte {
+            return jpeg^.sof0.components[id].quant_table_id;
+        }
+        qt_id := find_qt(jpeg, rle_id);
+        qt := jpeg.dqts[qt_id];
+
+        for i in 0..<64 {
+            zzorder[i] *= cast(int)qt.table_data[i];
+
+            yuv_pos := zzindex_to_matindex(i);
+            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i];
+        }
     }
+
+    // ICDT coeffs calculation
+
+    icdt: [3][64]f64;
+    for i in 0..<3 {
+        for y in 0..<8 {
+            for x in 0..<8 {
+                sum: f64;
+                for u in 0..<8 {
+                    for v in 0..<8 {
+                        Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+                        Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+
+                        y := cast(f64)y;
+                        x := cast(f64)x;
+                        sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x + 1) * cast(f64)u * math.PI / 16.0) *
+                                        math.cos_f64((2 * y + 1) * cast(f64)v * math.PI / 16.0);
+                    }
+                }
+
+                icdt[i][y * 8 + x] = sum;
+            }
+        }
+    }
+
+    // Level shift
+
+    for i in 0..<3 {
+        for y in 0..<8 {
+            for x in 0..<8 {
+                yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
+            }
+        }
+    }
+
+    // YCbCr to RGB(A)
+
+    out: [64 * 4]byte;
+    for y in 0..<8 {
+        for x in 0..<8 {
+            Y  := cast(f64)yuv_pixels[0][y * 8 + x];
+            Cb := cast(f64)yuv_pixels[1][y * 8 + x];
+            Cr := cast(f64)yuv_pixels[2][y * 8 + x];
+
+            R := cast(int)math.floor(Y + 1.402 * (1.0 * Cr - 128.0));
+            G := cast(int)math.floor(Y - 0.344136 * (1.0 * Cb - 128.0) - 0.714136 * (1.0 * Cr - 128.0));
+            B := cast(int)math.floor(Y + 1.772 * (1.0 * Cb - 128.0));
+
+            R = math.max(0, math.min(R, 255));
+            G = math.max(0, math.min(G, 255));
+            B = math.max(0, math.min(B, 255));
+
+            out[y * 8 + x * 4 + 0] = cast(byte)R;
+            out[y * 8 + x * 4 + 1] = cast(byte)G;
+            out[y * 8 + x * 4 + 2] = cast(byte)B;
+            out[y * 8 + x * 4 + 3] = 255;
+        }
+    }
+
+    return out;
+}
+
+Bit_Stream :: struct {
+    buffer: []byte,
+    index:  uint, /**< index of the current byte taken, if offset==8, the next byte will be loaded and this index incremented */
+    offset: byte, /**< nof bits pushed into curr from the first element */
+    curr:   u16,
+}
+
+init_bitstream :: #force_inline proc(backing: []byte, init_bit_pos: uint) -> (bs: Bit_Stream) {
+    bs.buffer = backing;
+    bs.index  = init_bit_pos / 8;
+    bs.offset = cast(byte)(init_bit_pos % 8);
+    bs.curr   = _bitstream_next_helper(&bs);
+    return bs;
+}
+
+// NOTE(GowardSilk): THIS PERFORMS A LEFT SHIFT AFTER OBTAINING THE HIGHEST BIT
+// MEANING WE ARE "LITTLE-ENDIAZING" THE ALGORITHM, A.K.A APPENDING FROM RIGHT (LSB)
+// INSTEAD OF CONVENTIONAL LEFT (MSB)
+_bitstream_next_helper :: #force_inline proc(using bs: ^Bit_Stream) -> u16 {
+    offset_8bit := offset % 8;
+    return cast(u16)(((buffer[index] << offset_8bit) & ~byte(0x7F)) >> (7 - offset_8bit));
+}
+
+bitstream_next :: proc(using bs: ^Bit_Stream) -> u16 {
+    next_bit := _bitstream_next_helper(bs);
+    curr = curr << 1 | next_bit;
+    offset += 1;
+    if offset >= 8 {
+        index += 1;
+        assert(index < len(buffer));
+    }
+    offset %= 16;
+    return curr;
+}
+
+bitstream_skip :: #force_inline proc(using bs: ^Bit_Stream, nof_bits: uint) {
+    fmt.assertf(nof_bits <= size_of(curr) * 8, "Wants to skip by: %d bits", nof_bits);
+    // NOTE(GowardSilk): Even if this performed SAR, we do not care since we
+    // are checking from the LSB...
+    curr >>= nof_bits;
 }
 
 @(private="file")
-decompress :: proc(engine: Engine, jpeg: ^JPEG) {
-    dst       := engine.back;
+construct_rle :: proc(jpeg: ^JPEG, allocator: mem.Allocator) -> [3]RLE_Data {
+    rle_s: [3]RLE_Data;
+    for &rle in rle_s {
+        merr: mem.Allocator_Error;
+        rle.data, merr = mem.make([dynamic]int, allocator);
+        assert(merr == .None);
+    }
+
+    @(static)
+    k: uint = 0; // static position of last read from JPEG.compressed_data (IN BITS!!)
+
+    find_ht :: proc(jpeg: ^JPEG, selector_id: byte) -> (dc: DHT_Chunk_Table_Info, ac: DHT_Chunk_Table_Info) {
+        for sos in jpeg.sos.components {
+            if sos.id == selector_id {
+                return cast(DHT_Chunk_Table_Info)sos.huff_tables & 0xF0, cast(DHT_Chunk_Table_Info)sos.huff_tables & 0xF0;
+            }
+        }
+
+        unreachable();
+    }
+
+    for rle_id in 0..<3 {
+        curr_rle := &rle_s[rle_id];
+
+        bs := init_bitstream(jpeg^.compressed_data[:], k);
+        // scan DC
+        // NOTE(GowardSilk): SOF0 components should be three (0=Y, 1=Cb, 2=Cr)
+        // and we are mapping these accordingly with sof0 id
+        // TODO(GowardSilk): We should perhaps make enum array for these to signify
+        // properly their purpose
+        dc_ht_id, ac_ht_id := find_ht(jpeg, jpeg.sof0.components[rle_id].id);
+        dc_ht  := jpeg.dhts[dc_ht_id];
+        for {
+            val, eob := query_in_dht_graph(dc_ht, bs.curr, bs.offset + 1);
+            if eob {
+                append(&curr_rle.data, 0, 0);
+                k += 1;
+                bitstream_skip(&bs, 1);
+                break;
+            } else if val != HT_NO_SYMBOL {
+                nof_zeroes := cast(int)(val >> 4);
+                category := cast(uint)(val & 0x0F);
+                append(&curr_rle.data, nof_zeroes, cast(int)val);
+                k += category + 1;
+                bitstream_skip(&bs, category + 1);
+                break;
+            }
+
+            _ = bitstream_next(&bs);
+            k += 1;
+        }
+
+        // scan AC
+        nof_codes := 0;
+        ac_ht  := jpeg.dhts[ac_ht_id];
+        for nof_codes < 64 {
+            val, eob := query_in_dht_graph(ac_ht, bitstream_next(&bs), bs.offset + 1);
+            if eob {
+                append(&curr_rle.data, 0, 0);
+                k += 1;
+                break;
+            } else if val != HT_NO_SYMBOL {
+                nof_zeroes := cast(int)(val >> 4);
+                category := cast(uint)(val & 0x0F);
+                append(&curr_rle.data, nof_zeroes, cast(int)val);
+                k += category + 1;
+                bitstream_skip(&bs, category + 1);
+                nof_codes += 1;
+                continue;
+            }
+
+            k += 1;
+        }
+
+        if len(curr_rle.data) == 2 {
+            for datum in curr_rle.data {
+                if datum != 0 {
+                    pop(&curr_rle.data);
+                    pop(&curr_rle.data);
+                    break;
+                }
+            }
+        }
+    }
+
+    return rle_s;
+}
+
+@(private="file")
+deconstruct_rle :: proc(rle: [3]RLE_Data) {
+    for r in rle do mem.delete(r.data);
+}
+
+@(private="file")
+decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
+    dst       := engine.back; // assumed to be already locked
     dst_width := engine.meta.width;
 
     width  := jpeg_padded_size(jpeg^.sof0.width);
@@ -769,29 +975,24 @@ decompress :: proc(engine: Engine, jpeg: ^JPEG) {
     assert(width <= engine.meta.width);
     assert(height <= engine.meta.height);
 
-    copy_pixel :: #force_inline proc(src: [^]byte, dst: [^]byte) {
-        mem.copy(dst, src, 3 * size_of(byte));
-        // 4th element is [A]lpha channel of RGBA, this is not stored inside JPEG, default to 1
-        dst[3] = 1;
-    }
-
-    copy_from_mcu :: #force_inline proc(dst: [^]byte) {
-        for v := 0; v < 8; v += 1 {
-            for u := 0; u < 8; u += 1 {
-            }
-        }
-    }
-
     mcu_index := 0;
     for y := 0; y < height - 8; y += 8 {
+        dst_buffer := &dst.buffer[y * engine.meta.width];
         for x := 0; x < width - 8; x += 8 {
-            mcu := construct_mcu();
-            //copy_from_mcu(&dst[dst_width * y + x]);
-            mcu_index += 1;
+            rle   := construct_rle(jpeg, engine.allocator);
+            defer deconstruct_rle(rle);
+
+            bytes := construct_pixel_bytes(jpeg, rle);
+            for v in 0..<8 {
+                mcu_byte_width :: size_of(byte) * 8 * 4; // 4 == engine.meta.bytes_per_pixel
+                mem.copy(dst_buffer, &bytes[v * mcu_byte_width], mcu_byte_width);
+                dst_buffer = mem.ptr_offset(dst_buffer, engine.meta.width * 4); // offset the dst_buffer by one row
+            }
+            dst_buffer = &dst.buffer[y * engine.meta.width * 4 + x * 4];
         }
     }
 
-    if width > cast(int)jpeg^.sof0.width do assert(false, "TODO: trim");
+    if width > cast(int)jpeg^.sof0.width do fmt.assertf(false, "TODO: Padded width: %d; Actual width: %d", width, jpeg^.sof0.width);
     if height > cast(int)jpeg^.sof0.height do assert(false, "TODO: trim");
 }
 
