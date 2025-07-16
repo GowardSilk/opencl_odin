@@ -110,65 +110,56 @@ try_and_pick_backend :: proc() -> (cl.Platform_ID, cl.Device_ID, ui.Backend_Kind
 main :: proc() {
     context.logger = log.create_console_logger();
 
-    {
-        engine, e := load_video("video/skuska.jpg");
-        assert(e == .None);
-        {
-            frame := request_frame(engine);
-        }
-        unload_video(engine);
+    app_context: App_Context;
+    app_context.selected_image = "video/resources/images/lena_color_512.png";
+
+    platform, device, backend := try_and_pick_backend();
+
+    ok: runtime.Allocator_Error;
+    context.user_ptr, ok = ui.init(backend, &app_context);
+    assert(ok == .None && context.user_ptr != nil);
+    defer ui.destroy();
+
+    err := ui.register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
+    log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err);
+
+    // cl.Context creation needs to happend AFTER OpenGL's Context is initialized
+    // in case of D3D11, d3d11 device has to be present (and because of our UI abstract, the window already registered...)
+    cerr: Error;
+    switch backend {
+        case .GL:
+            context_properties := [?]cl.Context_Properties {
+                cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
+                cl.GL_CONTEXT_KHR, cast(cl.Context_Properties)cast(uintptr)win.wglGetCurrentContext(),
+                0
+            };
+            app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
+            // load necessary KHR function pointers
+            cl.LoadGLKHRFunctions(platform);
+        case .D3D11:
+            // TODO(GowardSilk): this is awful.... xD
+            p := (cast(^ui.Draw_Context)context.user_ptr)^.ren.persistent;
+            assert(p != nil);
+            d3d11_device := p.device;
+            context_properties := [?]cl.Context_Properties {
+                cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
+                cl.CONTEXT_D3D11_DEVICE_KHR, cast(cl.Context_Properties)cast(uintptr)d3d11_device,
+                cl.CONTEXT_INTEROP_USER_SYNC, cast(cl.Context_Properties)cl.FALSE,
+                0
+            };
+            app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
+            cl.LoadD3D11KHRFunctions(platform);
+    }
+    log.assertf(cerr == nil, "Fatal error: %v", cerr);
+    app_context.backend = backend;
+    defer cl_context_delete(&app_context.c);
+    when ODIN_DEBUG {
+        log_str := cl_context_log(&app_context.c);
+        log.info(log_str);
+        delete(log_str);
     }
 
-    //app_context: App_Context;
-    //app_context.selected_image = "video/resources/images/lena_color_512.png";
-    //
-    //platform, device, backend := try_and_pick_backend();
-    //
-    //ok: runtime.Allocator_Error;
-    //context.user_ptr, ok = ui.init(backend, &app_context);
-    //assert(ok == .None && context.user_ptr != nil);
-    //defer ui.destroy();
-    //
-    //err := ui.register_window({1024, 1024}, "OpenCL Video", draw_main_screen);
-    //log.assertf(err == nil, "Failed to register window (\"OpenCL Video\"): %v", err);
-    //
-    //// cl.Context creation needs to happend AFTER OpenGL's Context is initialized
-    //// in case of D3D11, d3d11 device has to be present (and because of our UI abstract, the window already registered...)
-    //cerr: Error;
-    //switch backend {
-    //    case .GL:
-    //        context_properties := [?]cl.Context_Properties {
-    //            cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
-    //            cl.GL_CONTEXT_KHR, cast(cl.Context_Properties)cast(uintptr)win.wglGetCurrentContext(),
-    //            0
-    //        };
-    //        app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
-    //        // load necessary KHR function pointers
-    //        cl.LoadGLKHRFunctions(platform);
-    //    case .D3D11:
-    //        // TODO(GowardSilk): this is awful.... xD
-    //        p := (cast(^ui.Draw_Context)context.user_ptr)^.ren.persistent;
-    //        assert(p != nil);
-    //        d3d11_device := p.device;
-    //        context_properties := [?]cl.Context_Properties {
-    //            cl.CONTEXT_PLATFORM, cast(cl.Context_Properties)cast(uintptr)platform,
-    //            cl.CONTEXT_D3D11_DEVICE_KHR, cast(cl.Context_Properties)cast(uintptr)d3d11_device,
-    //            cl.CONTEXT_INTEROP_USER_SYNC, cast(cl.Context_Properties)cl.FALSE,
-    //            0
-    //        };
-    //        app_context.c, cerr = cl_context_init(platform, device, context_properties[:]);
-    //        cl.LoadD3D11KHRFunctions(platform);
-    //}
-    //log.assertf(cerr == nil, "Fatal error: %v", cerr);
-    //app_context.backend = backend;
-    //defer cl_context_delete(&app_context.c);
-    //when ODIN_DEBUG {
-    //    log_str := cl_context_log(&app_context.c);
-    //    log.info(log_str);
-    //    delete(log_str);
-    //}
-    //
-    //ui.draw();
+    ui.draw();
 }
 
 draw_main_screen :: proc(w: ui.Window) {
