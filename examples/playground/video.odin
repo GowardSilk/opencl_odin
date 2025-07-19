@@ -10,6 +10,7 @@ import "core:mem"
 import "core:math"
 import "core:sync"
 import "core:thread"
+import "core:strings"
 
 import stbi "vendor:stb/image"
 
@@ -947,7 +948,7 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, allocator: mem.Allocator) ->
         // scan AC
         nof_codes := 0;
         ac_ht  := jpeg.dhts[ac_ht_id];
-        for nof_codes < 64 {
+        for nof_codes < 63 {
             val, eob := query_in_dht_graph(ac_ht, bitstream_next(bs), bs.len);
             if eob {
                 append(&curr_rle.data, 0, 0);
@@ -968,6 +969,10 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, allocator: mem.Allocator) ->
                 }
                 append(&curr_rle.data, nof_zeroes, cast(int)bs.curr);
 
+                if (nof_zeroes == 4 && bs.curr == 1) {
+                    bs.len =0;
+                }
+
                 bs.len = 0;
                 bs.curr = 0;
                 nof_codes += nof_zeroes + 1;
@@ -976,18 +981,22 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, allocator: mem.Allocator) ->
             }
         }
 
+        if len(curr_rle.data) == 2 {                                            
+            is_all_zero := true;                                                
+            for datum in curr_rle.data {                                        
+                if datum != 0 {                                                 
+                    is_all_zero = false;                                        
+                    break;                                                      
+                }                                                               
+            }                                                                   
+            if is_all_zero {                                                    
+                pop(&curr_rle.data);                                            
+                pop(&curr_rle.data);                                            
+            }                                                                   
+        } 
+
         bs.curr = 0;
         bs.len  = 0;
-
-        if len(curr_rle.data) == 2 {
-            for datum in curr_rle.data {
-                if datum != 0 {
-                    pop(&curr_rle.data);
-                    pop(&curr_rle.data);
-                    break;
-                }
-            }
-        }
     }
 
     return rle_s;
@@ -1012,10 +1021,61 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
     bs := init_bitstream(jpeg.compressed_data[:]);
     dc_diff: [3]int;
 
+    fmt.eprintfln("Compressed data len: %v", len(jpeg.compressed_data));
+
+    log_file, oserr := os.open("out.log", os.O_WRONLY | os.O_CREATE | os.O_TRUNC);
+    fmt.assertf(oserr == nil, "%v", oserr);
+    log_writer: io.Writer = os.stream_from_handle(log_file);
+    defer io.close(log_writer);
+
+    builder: strings.Builder;
+    strings.builder_init(&builder);
+    defer strings.builder_destroy(&builder);
+
+    node_eprint :: proc(node: ^DHT_Graph_Node, builder: ^strings.Builder) {
+        if node == nil do return;
+
+        if node^.symbol != HT_NO_SYMBOL && node^.is_leaf {
+            fmt.sbprintfln(builder, "\tNode:\n\t\tsymbol: %v\n\t\tcode: %v/0b%b", node^.symbol, node^.code, node^.code);
+        }
+
+        node_eprint(node^.left, builder);
+        node_eprint(node^.right, builder);
+    }
+
+    fmt.sbprint(&builder, "DHT[0]\n");
+    node_eprint(jpeg.dhts[0].root, &builder);
+
+    fmt.sbprint(&builder, "\nDHT[16]\n");
+    node_eprint(jpeg.dhts[16].root, &builder);
+
+    fmt.sbprint(&builder, "\nDHT[1]\n");
+    node_eprint(jpeg.dhts[1].root, &builder);
+
+    fmt.sbprint(&builder, "\nDHT[17]\n");
+    node_eprint(jpeg.dhts[17].root, &builder);
+    strings.write_byte(&builder, '\n');
+
+    io.write_string(log_writer, strings.to_string(builder));
+    strings.builder_reset(&builder);
+
     for y := 0; y <= height - 8; y += 8 {
         for x := 0; x <= width - 8; x += 8 {
             rle := construct_rle(jpeg, &bs, engine.allocator);
             defer deconstruct_rle(rle);
+
+            //fmt.eprintfln("K Bits: %v", bs.index * 8 + auto_cast bs.offset);
+            fmt.sbprintf(&builder, "K bits: %d\nRLE: ", bs.index * 8 + auto_cast bs.offset);
+            for i in 0..<3 {
+                fmt.sbprintf(&builder, "rle[%d]:", i);
+                for r in rle[i].data {
+                    fmt.sbprintf(&builder, "%d, ", r);
+                }
+                strings.write_byte(&builder, '\n');
+            }
+            strings.write_byte(&builder, '\n');
+            io.write_string(log_writer, strings.to_string(builder));
+            strings.builder_reset(&builder);
 
             //for r in rle do fmt.eprintfln("%v", r);
 
