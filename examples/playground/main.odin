@@ -12,6 +12,7 @@ import sdl3 "vendor:sdl3"
 import stbi "vendor:stb/image"
 
 main :: proc() {
+    // load();
     assert(sdl3.Init({.VIDEO}));
     window := sdl3.CreateWindow("Window", 1000, 500, {});
     defer sdl3.DestroyWindow(window);
@@ -23,7 +24,7 @@ main :: proc() {
 
     surface2: ^sdl3.Surface;
     texture2: ^sdl3.Texture;
-    fname :: "skuska.jpg";
+    fname :: "white.jpg";
     {
         width, height, channels: c.int;
         pixels := stbi.load(fname, &width, &height, &channels, 4);
@@ -40,13 +41,6 @@ main :: proc() {
     defer sdl3.DestroySurface(surface2);
     defer sdl3.DestroyTexture(texture2);
 
-    // blue     { 0, 0, 254, 255 } -> { 0, 0, 254, 255 }
-    // red      { 254, 0, 0, 255 } -> { 254, 0, 0, 255 }
-    // green    { 0, 128, 1, 255 } -> { 0, 128, 0, 255 }
-    // cyan     { 0, 255, 255, 255 } -> { 0, 255, 255, 255 }
-    // purple   { 129, 0, 127, 255 } -> { 128, 0, 127, 255 }
-    // violet   { 238, 130, 239, 255 } -> { 238, 130, 238, 255 }
-    // white    { 255, 255, 255, 255 } -> { 255, 255, 255, 255 }
     engine, e := load_video(fname);
     assert(e == .None);
     defer unload_video(engine);
