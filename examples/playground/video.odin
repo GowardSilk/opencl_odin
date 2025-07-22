@@ -74,7 +74,7 @@ load_video :: proc(fname: string, allocator := context.allocator) -> (engine: ^E
     mjpeg_reader.handle = handle;
 
     // 8KB buffer for reading should be fine ?
-    BUFFER_SIZE :: 8 * 1024;
+    BUFFER_SIZE :: 16 * 1024;
     mjpeg_reader.buf, merr = mem.make([^]byte, BUFFER_SIZE, allocator);
     assert(merr == .None);
     mjpeg_reader.buf_cap = BUFFER_SIZE;

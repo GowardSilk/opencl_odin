@@ -24,7 +24,7 @@ main :: proc() {
 
     surface2: ^sdl3.Surface;
     texture2: ^sdl3.Texture;
-    fname :: "white.jpg";
+    fname :: "skuska.jpg";
     {
         width, height, channels: c.int;
         pixels := stbi.load(fname, &width, &height, &channels, 4);
