@@ -34,7 +34,7 @@ Meta_Data :: struct {
 Engine_Buffer :: struct {
     buffer: [^]byte,
     lock:   sync.Mutex,
-    ready_for_request: bool,
+    ready_for_request: bool, /**< indicates whether the buffer will be available on the next call of `request_frame' */
 }
 
 Engine :: struct {
@@ -45,11 +45,12 @@ Engine :: struct {
     data:    [2]Engine_Buffer,
     front:   ^Engine_Buffer,
     back:    ^Engine_Buffer,
-    ready_for_swap: sync.Cond,
+    ready_for_swap: sync.One_Shot_Event,
 
     stream: io.Reader,
 
     worker: ^thread.Thread,
+    terminate: bool,
 }
 
 load_video :: proc(fname: string, allocator := context.allocator) -> (engine: ^Engine, err: Error) {
@@ -108,22 +109,19 @@ load_video :: proc(fname: string, allocator := context.allocator) -> (engine: ^E
 }
 
 unload_video :: proc(engine: ^Engine) {
-    thread.terminate(engine^.worker, 0);
+    engine^.terminate = true;
+    thread.join(engine^.worker);
 
-//    io.destroy(engine^.stream);
+    io.destroy(engine^.stream);
 
     // wait if there is any worker thread work still in progress
-    fmt.eprintln("Locking back");
     sync.lock(&engine^.back.lock);
-    fmt.eprintln("Back locked");
     // front buffer cannot be used
     // NOTE(GowardSilk): the deferred_in for request_frame is buggy in a sense if we have request_frame followed by unload_video...
     // that would case the engine.front.lock be unlocked AFTER unload_video, so it has to be explicit...
-    fmt.eprintln("Locking front");
     assert(sync.try_lock(&engine^.front.lock), "Front buffer's (aka requested Frame's) lifetime has not ended and it is still locked; we cannot unload the frame's backing buffer if the resource is still \"in-use\"");
-    fmt.eprintln("Front locked");
     mem.free(engine^.backing, engine^.allocator);
-    //sync.unlock(&engine^.front.lock);
+    sync.unlock(&engine^.front.lock);
     sync.unlock(&engine^.back.lock);
 
     mem.free(engine, engine^.allocator);
@@ -156,18 +154,19 @@ Texture_Copy_Proc :: #type proc "cdecl" (engine: ^Engine, tex: rawptr, data: [^]
  * @brief function executes `tex_copy_proc' iff front buffer is ready for display
  */
 request_frame :: #force_inline proc(engine: ^Engine, tex: rawptr, tex_copy_proc: Texture_Copy_Proc) {
+    sync.lock(&engine^.front.lock);
+    defer sync.unlock(&engine^.front.lock);
+
     if !sync.atomic_load(&engine^.front.ready_for_request) do return;
 
-    sync.lock(&engine^.front.lock);
-    {
-        tex_copy_proc(engine, tex, engine^.front.buffer);
+    tex_copy_proc(engine, tex, engine^.front.buffer);
 
-        if sync.atomic_compare_exchange_strong(&engine^.back.ready_for_request, true, false) {
-            sync.cond_signal(&engine^.ready_for_swap);
-        }
+    if sync.atomic_compare_exchange_strong(&engine^.back.ready_for_request, true, false) {
+        sync.one_shot_event_signal(&engine^.ready_for_swap);
+        return;
     }
-    sync.unlock(&engine^.front.lock);
-    engine^.front.ready_for_request = false;
+
+    sync.atomic_store(&engine^.front.ready_for_request, true);
 }
 
 SOI  :: [2]byte { 0xFF, 0xD8 };
@@ -261,9 +260,8 @@ decode_image :: proc(worker: ^thread.Thread) {
     engine := cast(^Engine)worker.data;
     assert(!engine^.back.ready_for_request, "Internal sync error: decode_image should be called iff the backbuffer has outdated data.");
 
-    for {
+    for !engine^.terminate {
         if !sync.try_lock(&engine^.back.lock) do break;
-        fmt.eprintln("Back locked");
         {
             // Start of Image
             marker, ioerr := get_marker(engine.stream);
@@ -341,18 +339,20 @@ decode_image :: proc(worker: ^thread.Thread) {
 
         sync.atomic_store(&engine^.back.ready_for_request, true);
 
-        for sync.atomic_load(&engine^.front.ready_for_request) {
-            sync.wait(&engine^.ready_for_swap, &engine^.front.lock);
+        if sync.atomic_load(&engine^.front.ready_for_request) {
+            sync.one_shot_event_wait(&engine^.ready_for_swap);
         }
 
         sync.lock(&engine^.front.lock);
-        engine^.back, engine^.front = engine^.front, engine^.back;
-        engine^.front.ready_for_request = true;
-        engine^.back.ready_for_request  = false;
+        engine^.front = sync.atomic_exchange(&engine^.back, engine^.front);
+        sync.atomic_store(&engine^.front.ready_for_request, true);
+        sync.atomic_store(&engine^.back.ready_for_request, false);
         // unlock the mutexes in their correct order
         sync.unlock(&engine^.back.lock) // former front
         sync.unlock(&engine^.front.lock); // former back
     }
+
+    fmt.eprintln("last EOI");
 }
 
 delete_jpeg :: proc(jpeg: ^JPEG, allocator: mem.Allocator) {

@@ -512,48 +512,48 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
 
     // Fast ICDT + Level shift
 
-    icdt_block: [64]f64;
-    for i in 0..<3 {
-        for j in 0..<64 do icdt_block[j] = cast(f64)yuv_pixels[i][j];
-
-        fast_idct(&icdt_block);
-
-        for j in 0..<64 do yuv_pixels[i][j] = cast(int)math.round(icdt_block[j]) + 128;
-    }
+    //icdt_block: [64]f64;
+    //for i in 0..<3 {
+    //    for j in 0..<64 do icdt_block[j] = cast(f64)yuv_pixels[i][j];
+    //
+    //    fast_idct(&icdt_block);
+    //
+    //    for j in 0..<64 do yuv_pixels[i][j] = cast(int)math.round(icdt_block[j]) + 128;
+    //}
 
     // ICDT coeffs calculation
-    //
-    //icdt: [3][64]f64;
-    //for i in 0..<3 {
-    //    for y in 0..<8 {
-    //        for x in 0..<8 {
-    //            sum: f64;
-    //            for u in 0..<8 {
-    //                for v in 0..<8 {
-    //                    Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-    //                    Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-    //
-    //                    y_f64 := cast(f64)y;
-    //                    x_f64 := cast(f64)x;
-    //                    sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x_f64 + 1) * cast(f64)u * math.PI / 16.0) *
-    //                                    math.cos_f64((2 * y_f64 + 1) * cast(f64)v * math.PI / 16.0);
-    //                }
-    //            }
-    //
-    //            icdt[i][y * 8 + x] = 0.25 * sum;
-    //        }
-    //    }
-    //}
-    //
-    //// Level shift
-    //
-    //for i in 0..<3 {
-    //    for y in 0..<8 {
-    //        for x in 0..<8 {
-    //            yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
-    //        }
-    //    }
-    //}
+    
+    icdt: [3][64]f64;
+    for i in 0..<3 {
+        for y in 0..<8 {
+            for x in 0..<8 {
+                sum: f64;
+                for u in 0..<8 {
+                    for v in 0..<8 {
+                        Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+                        Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+    
+                        y_f64 := cast(f64)y;
+                        x_f64 := cast(f64)x;
+                        sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x_f64 + 1) * cast(f64)u * math.PI / 16.0) *
+                                        math.cos_f64((2 * y_f64 + 1) * cast(f64)v * math.PI / 16.0);
+                    }
+                }
+    
+                icdt[i][y * 8 + x] = 0.25 * sum;
+            }
+        }
+    }
+    
+    // Level shift
+    
+    for i in 0..<3 {
+        for y in 0..<8 {
+            for x in 0..<8 {
+                yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
+            }
+        }
+    }
 
     // YCbCr to RGB(A)
 
