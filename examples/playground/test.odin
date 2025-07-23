@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:mem"
 import "core:c/libc"
 import "core:time"
+import "core:thread"
 
 import stbi "vendor:stb/image"
 
@@ -20,19 +21,19 @@ load :: proc() {
     fmt.eprintfln("STBI load took: %v", options.duration);
 }
 
+LOAD_FILE :: "skuska.jpg"
+
 custom_load :: proc(options: ^time.Benchmark_Options, allocator: runtime.Allocator) -> time.Benchmark_Error {
-    engine, e := load_video("skuska.jpg", allocator);
+    engine, e := load_video(LOAD_FILE, allocator);
     assert(e == .None);
-    {
-        frame := request_frame(engine);
-    }
+    for !thread.is_done(engine^.worker) {}
     unload_video(engine);
     return nil;
 }
 
 stbi_load :: proc(options: ^time.Benchmark_Options, allocator: runtime.Allocator) -> time.Benchmark_Error {
     width, height, channels: c.int;
-    image := stbi.load("skuska.jpg", &width, &height, &channels, 4);
+    image := stbi.load(LOAD_FILE, &width, &height, &channels, 4);
     libc.free(image);
     return nil;
 }

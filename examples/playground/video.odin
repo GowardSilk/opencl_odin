@@ -8,6 +8,8 @@ import "core:sync"
 import "core:time"
 import "core:thread"
 
+ENABLE_BENCH :: #config(ENABLE_BENCH, false);
+
 Error :: enum {
     None = 0,
     Video_Load_Fail,
@@ -43,11 +45,9 @@ Engine :: struct {
     data:    [2]Engine_Buffer,
     front:   ^Engine_Buffer,
     back:    ^Engine_Buffer,
-    back_being_processed: sync.Cond,
-    back_being_processed_lock: sync.Mutex,
+    ready_for_swap: sync.Cond,
 
     stream: io.Reader,
-    eof: bool,
 
     worker: ^thread.Thread,
 }
@@ -110,14 +110,18 @@ load_video :: proc(fname: string, allocator := context.allocator) -> (engine: ^E
 unload_video :: proc(engine: ^Engine) {
     thread.terminate(engine^.worker, 0);
 
-    io.destroy(engine^.stream);
+//    io.destroy(engine^.stream);
 
     // wait if there is any worker thread work still in progress
+    fmt.eprintln("Locking back");
     sync.lock(&engine^.back.lock);
+    fmt.eprintln("Back locked");
     // front buffer cannot be used
     // NOTE(GowardSilk): the deferred_in for request_frame is buggy in a sense if we have request_frame followed by unload_video...
     // that would case the engine.front.lock be unlocked AFTER unload_video, so it has to be explicit...
+    fmt.eprintln("Locking front");
     assert(sync.try_lock(&engine^.front.lock), "Front buffer's (aka requested Frame's) lifetime has not ended and it is still locked; we cannot unload the frame's backing buffer if the resource is still \"in-use\"");
+    fmt.eprintln("Front locked");
     mem.free(engine^.backing, engine^.allocator);
     //sync.unlock(&engine^.front.lock);
     sync.unlock(&engine^.back.lock);
@@ -147,39 +151,23 @@ load_metadata :: proc(engine: ^Engine) -> (err: Error) {
     return nil;
 }
 
-@(deferred_in=unlock_frame)
-request_frame :: proc(engine: ^Engine) -> Frame {
-    if engine^.eof do return { nil };
+Texture_Copy_Proc :: #type proc "cdecl" (engine: ^Engine, tex: rawptr, data: [^]byte);
+/**
+ * @brief function executes `tex_copy_proc' iff front buffer is ready for display
+ */
+request_frame :: #force_inline proc(engine: ^Engine, tex: rawptr, tex_copy_proc: Texture_Copy_Proc) {
+    if !sync.atomic_load(&engine^.front.ready_for_request) do return;
 
     sync.lock(&engine^.front.lock);
-    if !engine^.front.ready_for_request {
-        sync.unlock(&engine^.front.lock);
-        // "wait" for worker thread to be done with the backbuffer work
-        sync.lock(&engine^.back_being_processed_lock);
-        sync.wait(&engine^.back_being_processed, &engine^.back_being_processed_lock);
-        sync.lock(&engine^.front.lock);
-    }
-    assert(engine^.front.ready_for_request, "Internal sync error: inside request_frame, either the frontbuffer should already have been available or waited for if not!");
-    engine^.front.ready_for_request = false;
-    return Frame { &engine^.front.buffer };
-}
+    {
+        tex_copy_proc(engine, tex, engine^.front.buffer);
 
-unlock_frame :: proc(engine: ^Engine) {
-    sync.lock(&engine^.back.lock);
-    // this should be the only case in which the thread would stop working:
-    // iff backbuffer.ready == frontbuffer.ready == true
-    if engine^.back.ready_for_request {
-        engine^.back, engine^.front = engine^.front, engine^.back;
-        engine^.front.ready_for_request = true;
-        engine^.back.ready_for_request  = false;
-        assert(thread.is_done(engine^.worker), "Internal sync error: worker thread should not be active when frontbuffer.ready == true == backbuffer.ready!!");
-        thread.start(engine^.worker);
-    } else {
-        // mark the current frontbuffer ready for swap
-        engine^.front.ready_for_request = false;
+        if sync.atomic_compare_exchange_strong(&engine^.back.ready_for_request, true, false) {
+            sync.cond_signal(&engine^.ready_for_swap);
+        }
     }
-    sync.unlock(&engine^.back.lock);
     sync.unlock(&engine^.front.lock);
+    engine^.front.ready_for_request = false;
 }
 
 SOI  :: [2]byte { 0xFF, 0xD8 };
@@ -273,96 +261,98 @@ decode_image :: proc(worker: ^thread.Thread) {
     engine := cast(^Engine)worker.data;
     assert(!engine^.back.ready_for_request, "Internal sync error: decode_image should be called iff the backbuffer has outdated data.");
 
-    sync.lock(&engine^.back.lock);
-    {
-        sync.lock(&engine^.back_being_processed_lock);
-        defer {
-            sync.signal(&engine^.back_being_processed);
-            sync.unlock(&engine^.back_being_processed_lock);
-        }
-
-        // Start of Image
-        marker, ioerr := get_marker(engine.stream);
-        if ioerr == .EOF {
-            engine.eof = true;
-            sync.unlock(&engine^.back.lock);
-            return;
-        }
-        mjpeg := cast(^MJPEG_Reader)engine.stream.data;
-        assert(marker == SOI, "Invalid JPEG frame! Expected SOI!");
-
-        jpeg: JPEG;
-        defer delete_jpeg(&jpeg, engine^.allocator);
-
-        marker, ioerr = get_marker(engine.stream);
-
-        read_bench :: proc(p: #type proc(_: ^JPEG, _: ^Engine), p_name: string, jpeg: ^JPEG, engine: ^Engine) {
-            diff: time.Duration
-            {
-                time.SCOPED_TICK_DURATION(&diff)
-                p(jpeg, engine);
+    for {
+        if !sync.try_lock(&engine^.back.lock) do break;
+        fmt.eprintln("Back locked");
+        {
+            // Start of Image
+            marker, ioerr := get_marker(engine.stream);
+            if ioerr == .EOF {
+                sync.unlock(&engine^.back.lock);
+                break;
             }
-            fmt.eprintfln("\"%s\" took %v", p_name, diff);
-        }
+            mjpeg := cast(^MJPEG_Reader)engine.stream.data;
+            assert(marker == SOI, "Invalid JPEG frame! Expected SOI!");
 
-        stopwatch: time.Stopwatch;
-        time.stopwatch_start(&stopwatch);
-        for marker != EOI {
-            switch marker.y {
-                //case APP0.y: read_app0(&jpeg, engine);
-                //case DQT.y:  read_dqt(&jpeg, engine);
-                //case SOF0.y: read_sof0(&jpeg, engine);
-                //case DHT.y:  read_dht(&jpeg, engine);
-                //case SOS.y:  read_sos(&jpeg, engine);
-                case APP0.y: read_bench(read_app0, "read_app0", &jpeg, engine);
-                case DQT.y:  read_bench(read_dqt, "read_dqt", &jpeg, engine);
-                case SOF0.y: read_bench(read_sof0, "read_sof0", &jpeg, engine);
-                case DHT.y:  read_bench(read_dht, "read_dht", &jpeg, engine);
-                case SOS.y:  read_bench(read_sos, "read_sos", &jpeg, engine);
-
-                /* ignoring */
-                case 0xE0..=0xEF, COM.y: // ignore other APP(s) and comments
-                    length: u16be;
-                    l, err := io.read_ptr(engine.stream, &length, size_of(length));
-                    assert(l == size_of(length) && err == .None);
-                    skip_len := cast(i64)(length - 2);
-                    when ODIN_DEBUG do fmt.eprintfln("Ignoring marker 0xFF%02X (skipping %d bytes)", marker.y, skip_len);
-                    io.seek(engine.stream, skip_len, .Current);
-
-                case: unreachable();
-            }
+            jpeg: JPEG;
+            defer delete_jpeg(&jpeg, engine^.allocator);
 
             marker, ioerr = get_marker(engine.stream);
-            assert(ioerr == .None);
+
+            when ENABLE_BENCH {
+                read_bench :: proc(p: #type proc(_: ^JPEG, _: ^Engine), p_name: string, jpeg: ^JPEG, engine: ^Engine) {
+                    diff: time.Duration
+                    {
+                        time.SCOPED_TICK_DURATION(&diff)
+                        p(jpeg, engine);
+                    }
+                    fmt.eprintfln("\"%s\" took %v", p_name, diff);
+                }
+
+                stopwatch: time.Stopwatch;
+                time.stopwatch_start(&stopwatch);
+            }
+
+            for marker != EOI {
+                switch marker.y {
+                    case APP0.y:
+                        when ENABLE_BENCH do read_bench(read_app0, "read_app0", &jpeg, engine);
+                        else do read_app0(&jpeg, engine);
+                    case DQT.y:
+                        when ENABLE_BENCH do read_bench(read_dqt, "read_dqt", &jpeg, engine);
+                        else do read_dqt(&jpeg, engine);
+                    case SOF0.y:
+                        when ENABLE_BENCH do read_bench(read_sof0, "read_sof0", &jpeg, engine);
+                        else do read_sof0(&jpeg, engine);
+                    case DHT.y:
+                        when ENABLE_BENCH do read_bench(read_dht, "read_dht", &jpeg, engine);
+                        else do read_dht(&jpeg, engine);
+                    case SOS.y:
+                        when ENABLE_BENCH do read_bench(read_sos, "read_sos", &jpeg, engine);
+                        else do read_sos(&jpeg, engine);
+
+                    /* ignoring */
+                    case 0xE0..=0xEF, COM.y: // ignore other APP(s) and comments
+                        length: u16be;
+                        l, err := io.read_ptr(engine.stream, &length, size_of(length));
+                        assert(l == size_of(length) && err == .None);
+                        skip_len := cast(i64)(length - 2);
+                        when ODIN_DEBUG do fmt.eprintfln("Ignoring marker 0xFF%02X (skipping %d bytes)", marker.y, skip_len);
+                        io.seek(engine.stream, skip_len, .Current);
+
+                    case: unreachable();
+                }
+
+                marker, ioerr = get_marker(engine.stream);
+                assert(ioerr == .None);
+            }
+            when ENABLE_BENCH {
+                time.stopwatch_stop(&stopwatch);
+                fmt.eprintfln("Reading took: %v", stopwatch._accumulation);
+
+                time.stopwatch_reset(&stopwatch);
+
+                time.stopwatch_start(&stopwatch);
+                decompress(engine, &jpeg);
+                time.stopwatch_stop(&stopwatch);
+                fmt.eprintfln("Decompression took: %v", stopwatch._accumulation);
+            } else do decompress(engine, &jpeg);
         }
-        time.stopwatch_stop(&stopwatch);
-        fmt.eprintfln("Reading took: %v", stopwatch._accumulation);
 
-        time.stopwatch_reset(&stopwatch);
+        sync.atomic_store(&engine^.back.ready_for_request, true);
 
-        time.stopwatch_start(&stopwatch);
-        decompress(engine, &jpeg);
-        time.stopwatch_stop(&stopwatch);
-        fmt.eprintfln("Decompression took: %v", stopwatch._accumulation);
+        for sync.atomic_load(&engine^.front.ready_for_request) {
+            sync.wait(&engine^.ready_for_swap, &engine^.front.lock);
+        }
+
+        sync.lock(&engine^.front.lock);
+        engine^.back, engine^.front = engine^.front, engine^.back;
+        engine^.front.ready_for_request = true;
+        engine^.back.ready_for_request  = false;
+        // unlock the mutexes in their correct order
+        sync.unlock(&engine^.back.lock) // former front
+        sync.unlock(&engine^.front.lock); // former back
     }
-    sync.lock(&engine^.front.lock);
-    if engine^.front.ready_for_request {
-        // buffer has not been request yet
-        // therefore we cannot perform swap
-        // NOTE(GowardSilk): That swap will happen in request_frame conditionally
-        sync.unlock(&engine^.front.lock);
-        engine^.back.ready_for_request = true;
-        sync.unlock(&engine^.back.lock);
-        return;
-    }
-    engine^.back, engine^.front = engine^.front, engine^.back;
-    engine^.front.ready_for_request = true;
-    engine^.back.ready_for_request  = false;
-    // unlock the mutexes in their correct order
-    sync.unlock(&engine^.back.lock) // former front
-    sync.unlock(&engine^.front.lock); // former back
-
-    decode_image(worker); // start decoding new image frame
 }
 
 delete_jpeg :: proc(jpeg: ^JPEG, allocator: mem.Allocator) {

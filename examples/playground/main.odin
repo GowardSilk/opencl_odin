@@ -24,15 +24,14 @@ main :: proc() {
 
     surface2: ^sdl3.Surface;
     texture2: ^sdl3.Texture;
-    fname :: "skuska.jpg";
+    fname :: "output.mjpeg";
     {
         width, height, channels: c.int;
         pixels := stbi.load(fname, &width, &height, &channels, 4);
         assert(pixels != nil && channels == 3);
         defer libc.free(pixels);
-        fmt.eprintfln("Color: {{ %v, %v, %v, %v }}", pixels[0], pixels[1], pixels[2], pixels[3]);
 
-        surface2 = sdl3.CreateSurfaceFrom(width, height, .RGBA8888, pixels, width * 4);
+        surface2 = sdl3.CreateSurfaceFrom(width, height, .ABGR8888, pixels, width * 4);
         assert(surface2 != nil);
         sdl3.SetSurfaceBlendMode(surface2, {});
         texture2 = sdl3.CreateTextureFromSurface(renderer, surface2);
@@ -47,20 +46,18 @@ main :: proc() {
     pixels_size := engine.meta.width * engine.meta.height * 4;
     pixels := make([]byte, pixels_size);
     defer mem.delete(pixels);
-    {
-        frame := request_frame(engine);
-        mem.copy(raw_data(pixels), frame.buffer^, pixels_size);
-        fmt.eprintfln("Color custom: {{ %v, %v, %v, %v }}", pixels[0], pixels[1], pixels[2], pixels[3]);
-    }
 
-    // surface := sdl3.CreateSurfaceFrom(width, height, .RGBA8888, pixels, width * 4);
-    surface := sdl3.CreateSurfaceFrom(cast(c.int)engine.meta.width, cast(c.int)engine.meta.height, .RGBA8888, raw_data(pixels), cast(c.int)engine.meta.width * 4);
+    surface := sdl3.CreateSurfaceFrom(cast(c.int)engine.meta.width, cast(c.int)engine.meta.height, .ABGR8888, raw_data(pixels), cast(c.int)engine.meta.width * 4);
     assert(surface != nil);
     defer sdl3.DestroySurface(surface);
     sdl3.SetSurfaceBlendMode(surface, {});
     texture := sdl3.CreateTextureFromSurface(renderer, surface);
     assert(texture != nil);
     defer sdl3.DestroyTexture(texture);
+
+    texture_copy_proc :: proc "cdecl" (engine: ^Engine, tex: rawptr, data: [^]byte) {
+        sdl3.UpdateTexture(cast(^sdl3.Texture)tex, nil, data, 4 * cast(c.int)engine^.meta.width);
+    }
 
     main_loop: for {
         event: sdl3.Event;
@@ -73,6 +70,7 @@ main :: proc() {
         sdl3.SetTextureBlendMode(texture, {});
         sdl3.SetRenderDrawBlendMode(renderer, {});
 
+        request_frame(engine, texture, texture_copy_proc);
         sdl3.RenderTexture(
             renderer,
             texture,
@@ -81,6 +79,7 @@ main :: proc() {
                 0, 0, 500, 500
             }
         );
+
         sdl3.RenderTexture(
             renderer,
             texture2,

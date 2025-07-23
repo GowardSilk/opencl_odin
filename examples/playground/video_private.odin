@@ -53,7 +53,7 @@ mjpeg_reader_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, 
         reader.pos = 0;
         // reader.seek_pos += cast(i64)reader.buf_len;
         bytes_read += reader.buf_len;
-        fmt.eprintfln("After refill: \x1b[32m%v\x1b[0m", reader);
+        when ODIN_DEBUG do fmt.eprintfln("After refill: \x1b[32m%v\x1b[0m", reader);
         if read_err != nil {
             // NOTE(GowardSilk): We may read less than len(reader.buf) if we hit EOF, which is irrelevant for us
             if bytes_read != 0 && read_err.(io.Error) == .EOF do return cast(i64)bytes_read, .None;
@@ -128,40 +128,40 @@ mjpeg_reader_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, 
         case .Seek:
             switch whence {
                 case .Start:
-                    fmt.eprintfln("[Seek Start] with offet: %v.\nData: %v", offset, reader);
+                    when ODIN_DEBUG do fmt.eprintfln("[Seek Start] with offet: %v.\nData: %v", offset, reader);
                     if offset < reader.seek_pos || offset > reader.seek_pos + cast(i64)reader.buf_len {
                         err: os.Error;
                         reader.seek_pos, err = os.seek(reader.handle, offset, os.SEEK_SET);
                         assert(err == nil);
-                        fmt.eprintfln("\tSeeking new beginning\n\tData: %v", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tSeeking new beginning\n\tData: %v", reader);
 
                         refill_buffer(reader) or_return;
-                        fmt.eprintfln("\tRead new data\n\tData: %v\n=----------=", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tRead new data\n\tData: %v\n=----------=", reader);
 
                         return reader.seek_pos, .None;
                     } else {
                         // no need to read new data, move inside the buffer instead
                         reader.pos = cast(int)(offset - reader.seek_pos);
-                        fmt.eprintfln("\tno need to read new data, move inside the buffer instead\n\tData: %v", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tno need to read new data, move inside the buffer instead\n\tData: %v", reader);
                         return offset, .None;
                     }
 
                 case .Current:
-                    fmt.eprintfln("[Seek Current] with offet: %v.\nData: %v", offset, reader);
+                    when ODIN_DEBUG do fmt.eprintfln("[Seek Current] with offet: %v.\nData: %v", offset, reader);
                     if offset > cast(i64)(reader.buf_len - reader.pos) || offset + cast(i64)reader.pos < 0 {
                         err: os.Error;
                         reader.seek_pos, err = os.seek(reader.handle, offset, os.SEEK_CUR);
                         assert(err == nil);
-                        fmt.eprintfln("\tSeeking new beginning\n\tData: %v", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tSeeking new beginning\n\tData: %v", reader);
 
                         refill_buffer(reader) or_return;
-                        fmt.eprintfln("\tRead new data\n\tData: %v\n=----------=", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tRead new data\n\tData: %v\n=----------=", reader);
 
                         return reader.seek_pos, .None;
                     } else {
                         // no need to read new data, move inside the buffer instead
                         reader.pos += cast(int)offset;
-                        fmt.eprintfln("\tno need to read new data, move inside the buffer instead\n\tData: %v", reader);
+                        when ODIN_DEBUG do fmt.eprintfln("\tno need to read new data, move inside the buffer instead\n\tData: %v", reader);
                         return reader.seek_pos + cast(i64)reader.pos, .None;
                     }
 
@@ -250,7 +250,7 @@ read_sof0 :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     for i in 0..<jpeg.sof0.num_components {
         l, err = io.read_ptr(stream, &jpeg.sof0.components[i], size_of(SOF0_Chunk_Component));
         assert(l == size_of(SOF0_Chunk_Component) && err == .None, "Failed to read whole SOF0 Component Chunk!");
-        assert(jpeg.sof0.components[i].sampling == 0x11, "Invalid subsamling value! Expected 0x11 (Note: we support only 4:4:4 subsampling)");
+        //assert(jpeg.sof0.components[i].sampling == 0x11, "Invalid subsamling value! Expected 0x11 (Note: we support only 4:4:4 subsampling)");
     }
     assert(jpeg.sof0.num_components == 3);
 
@@ -295,7 +295,7 @@ read_dht :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
         assert(l == symbols_len && err == .None, "Failed to read DHT Chunk's symbol list!");
 
         dht_graph := make_dht_graph(dht, allocator);
-        construct_dht_graph(dht_graph, dht, allocator);
+        construct_dht_graph(&dht_graph, dht, allocator);
 
         if jpeg.dhts == nil do jpeg.dhts = make(map[DHT_Chunk_Table_Info]DHT_Graph, allocator);
         assert(dht.table_info not_in jpeg.dhts);
@@ -303,24 +303,24 @@ read_dht :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
 
         length -= size_of(dht.header) + symbols_len;
 
-        //when ODIN_DEBUG {
-        //    fmt.eprintfln("DHT[<%v; %v>]:", cast(DHT_Chunk_Table_Info_High)(dht.table_info & 0xF0), cast(DHT_Chunk_Table_Info_Low)dht.table_info);
-        //
-        //    node_eprint :: proc(node: ^DHT_Graph_Node) {
-        //        if node == nil do return;
-        //
-        //        if node^.symbol != HT_NO_SYMBOL && node^.is_leaf {
-        //            fmt.eprintfln("\tNode:");
-        //            fmt.eprintfln("\t\tsymbol: %v", node^.symbol);
-        //            fmt.eprintfln("\t\tcode: %v/0b%b", node^.code, node^.code);
-        //        }
-        //
-        //        node_eprint(node^.left);
-        //        node_eprint(node^.right);
-        //    }
-        //
-        //    node_eprint(jpeg.dhts[dht.table_info].root);
-        //}
+        when ODIN_DEBUG {
+            fmt.eprintfln("DHT[<%v; %v>]:", cast(DHT_Chunk_Table_Info_High)(dht.table_info & 0xF0), cast(DHT_Chunk_Table_Info_Low)dht.table_info);
+
+            node_eprint :: proc(node: ^DHT_Graph_Node) {
+                if node == nil do return;
+
+                if node^.symbol != HT_NO_SYMBOL && node^.is_leaf {
+                    fmt.eprintfln("\tNode:");
+                    fmt.eprintfln("\t\tsymbol: %v", node^.symbol);
+                    fmt.eprintfln("\t\tcode: %v/0b%b", node^.code, node^.code);
+                }
+
+                node_eprint(node^.left);
+                node_eprint(node^.right);
+            }
+
+            node_eprint(jpeg.dhts[dht.table_info].root);
+        }
     }
 }
 
@@ -351,30 +351,27 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     }
 
     // ignore 3 bytes
-    end_pos: i64;
-    begin_pos, _ := io.seek(stream, 3, .Current);
-    fmt.eprintfln("Begin pos: %v", begin_pos);
+    io.seek(stream, 3, .Current);
+
+    jpeg.compressed_data, merr = mem.make([dynamic]byte, allocator);
+    assert(merr == .None);
 
     b: byte;
     for {
         b, err = io.read_byte(stream);
+        assert(err == nil);
+        append(&jpeg.compressed_data, b);
         if b == 0xFF {
             b, err = io.read_byte(stream);
+            assert(err == nil);
             if b == EOI.y {
-                end_pos, _ = io.seek(stream, -2, .Current);
+                io.seek(stream, -2, .Current);
                 break;
             }
+            if b == 0x00 do continue;
+            append(&jpeg.compressed_data, b);
         }
-        assert(err == nil);
     }
-
-    fmt.eprintfln("End pos: %v", end_pos);
-    io.seek(stream, begin_pos, .Start);
-
-    jpeg.compressed_data, merr = mem.make([dynamic]byte, end_pos - begin_pos, allocator);
-    assert(merr == .None);
-
-    io.read(stream, jpeg.compressed_data[:]);
 }
 
 ZIGZAG_ORDER := [?][2]int {
@@ -398,13 +395,13 @@ ZIGZAG_ORDER := [?][2]int {
 fast_idct :: proc(block: ^[64]f64) {
     // This is a fast 2D IDCT based on the AAN (Arai, Agui, Nakajima) algorithm.
 
-    C1 :: 0.980785280403230; // cos(pi/16)
-    C2 :: 0.923879532511287; // cos(2pi/16)
-    C3 :: 0.831469612302545; // cos(3pi/16)
-    C4 :: 0.707106781186548; // cos(4pi/16)
-    C5 :: 0.555570233019602; // cos(5pi/16)
-    C6 :: 0.382683432365090; // cos(6pi/16)
-    C7 :: 0.195090322016128; // cos(7pi/16)
+    C1 :: 0.490392625;
+    C2 :: 0.461939752;
+    C3 :: 0.415734798;
+    C4 :: 0.353553385;
+    C5 :: 0.277785122;
+    C6 :: 0.191341713;
+    C7 :: 0.097545162;
 
     workspace: [64]f64;
 
@@ -423,9 +420,9 @@ fast_idct :: proc(block: ^[64]f64) {
         a7 := a0 - a3;
 
         b0 := p[1] * C1 + p[7] * C7;
-        b1 := p[1] * C7 - p[7] * C1;
+        b1 := p[7] * C1 - p[1] * C7;
         b2 := p[3] * C3 + p[5] * C5;
-        b3 := p[3] * C5 - p[5] * C3;
+        b3 := p[5] * C3 - p[3] * C5;
         b4 := b0 + b2;
         b5 := b1 + b3;
         b6 := b1 - b3;
@@ -456,9 +453,9 @@ fast_idct :: proc(block: ^[64]f64) {
         a7 := a0 - a3;
 
         b0 := p[1*8] * C1 + p[7*8] * C7;
-        b1 := p[1*8] * C7 - p[7*8] * C1;
+        b1 := p[7*8] * C1 - p[1*8] * C7;
         b2 := p[3*8] * C3 + p[5*8] * C5;
-        b3 := p[3*8] * C5 - p[5*8] * C3;
+        b3 := p[5*8] * C3 - p[3*8] * C5;
         b4 := b0 + b2;
         b5 := b1 + b3;
         b6 := b1 - b3;
@@ -479,7 +476,7 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
     yuv_pixels: [3][64]int;
 
     zzindex_to_matindex :: #force_inline proc(zzindex: int) -> [2]int {
-        return ZIGZAG_ORDER[zzindex];
+        #no_bounds_check return ZIGZAG_ORDER[zzindex];
     }
 
     for rle_id in 0..<3 {
@@ -507,58 +504,56 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
         qt_id := find_qt(jpeg, rle_id);
         qt := jpeg.dqts[qt_id];
 
-        for i in 0..<64 do zzorder[i] *= cast(int)qt.table_data[i];
-
         for i in 0..<64 {
             yuv_pos := zzindex_to_matindex(i);
-            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i];
+            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i] * cast(int)qt.table_data[i];
         }
     }
 
     // Fast ICDT + Level shift
-    //
-    //icdt_block: [64]f64;
-    //for i in 0..<3 {
-    //    for j in 0..<64 do icdt_block[j] = cast(f64)yuv_pixels[i][j];
-    //
-    //    fast_idct(&icdt_block);
-    //
-    //    for j in 0..<64 do yuv_pixels[i][j] = cast(int)math.round(icdt_block[j]) + 128;
-    //}
+
+    icdt_block: [64]f64;
+    for i in 0..<3 {
+        for j in 0..<64 do icdt_block[j] = cast(f64)yuv_pixels[i][j];
+
+        fast_idct(&icdt_block);
+
+        for j in 0..<64 do yuv_pixels[i][j] = cast(int)math.round(icdt_block[j]) + 128;
+    }
 
     // ICDT coeffs calculation
-
-    icdt: [3][64]f64;
-    for i in 0..<3 {
-        for y in 0..<8 {
-            for x in 0..<8 {
-                sum: f64;
-                for u in 0..<8 {
-                    for v in 0..<8 {
-                        Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-                        Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-
-                        y_f64 := cast(f64)y;
-                        x_f64 := cast(f64)x;
-                        sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x_f64 + 1) * cast(f64)u * math.PI / 16.0) *
-                                        math.cos_f64((2 * y_f64 + 1) * cast(f64)v * math.PI / 16.0);
-                    }
-                }
-
-                icdt[i][y * 8 + x] = 0.25 * sum;
-            }
-        }
-    }
-
-    // Level shift
-
-    for i in 0..<3 {
-        for y in 0..<8 {
-            for x in 0..<8 {
-                yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
-            }
-        }
-    }
+    //
+    //icdt: [3][64]f64;
+    //for i in 0..<3 {
+    //    for y in 0..<8 {
+    //        for x in 0..<8 {
+    //            sum: f64;
+    //            for u in 0..<8 {
+    //                for v in 0..<8 {
+    //                    Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+    //                    Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
+    //
+    //                    y_f64 := cast(f64)y;
+    //                    x_f64 := cast(f64)x;
+    //                    sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x_f64 + 1) * cast(f64)u * math.PI / 16.0) *
+    //                                    math.cos_f64((2 * y_f64 + 1) * cast(f64)v * math.PI / 16.0);
+    //                }
+    //            }
+    //
+    //            icdt[i][y * 8 + x] = 0.25 * sum;
+    //        }
+    //    }
+    //}
+    //
+    //// Level shift
+    //
+    //for i in 0..<3 {
+    //    for y in 0..<8 {
+    //        for x in 0..<8 {
+    //            yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
+    //        }
+    //    }
+    //}
 
     // YCbCr to RGB(A)
 
@@ -620,6 +615,23 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
 
     decode_next_huffman_symbol :: #force_inline proc(bs: ^Bit_Stream, table: DHT_Graph) -> (symbol: byte, is_eob: bool) {
         curr_node := table.root;
+
+        // try fast decode
+        fast_code := bitstream_grab_fast_bits(bs);
+        fast_symbol, exists := table.fast[fast_code];
+        if exists {
+            for _ in 0..<fast_symbol.length do bitstream_incr(bs);
+            //bs.offset += fast_symbol.length;
+            //if bs.offset >= 8 {
+            //    #no_bounds_check if bs.buffer[bs.index] == 0xFF && bs.buffer[bs.index + 1] == 0x00 {
+            //        bs.index += 2;
+            //    } else do bs.index += 1;
+            //    bs.offset %= 8;
+            //}
+
+            return fast_symbol.symbol, false;
+        }
+
         for {
             bit := bitstream_next(bs);
 
@@ -635,6 +647,8 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
                 return curr_node^.symbol, false;
             }
         }
+
+        unreachable();
     }
 
     for rle_id in 0..<3 {
@@ -686,7 +700,7 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
     assert(height <= engine.meta.height);
 
     // retained data across rle and mcu calculations
-    bs := init_bitstream(jpeg.compressed_data[:]);
+    bs := init_bitstream(&jpeg.compressed_data);
     dc_diff: [3]int;
 
     rle: [3]RLE_Data;
@@ -697,40 +711,49 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
     }
     defer deconstruct_rle(rle);
 
-    rle_stopwatch, pxbytes_stopwatch, copy_stopwatch: time.Stopwatch;
+    when ENABLE_BENCH {
+        rle_stopwatch, pxbytes_stopwatch, copy_stopwatch: time.Stopwatch;
 
-    for y := 0; y <= height - 8; y += 8 {
-        for x := 0; x <= width - 8; x += 8 {
-            time.stopwatch_start(&rle_stopwatch);
-            construct_rle(jpeg, &bs, &rle);
-            //fmt.eprintfln("RLE:");
-            //for i in 0..<3 {
-            //    fmt.eprintf("rle[%v]:[", i);
-            //    for r in rle[i].data {
-            //        fmt.eprintf("%v, ", r);
-            //    }
-            //    fmt.eprintln("]");
-            //}
-            time.stopwatch_stop(&rle_stopwatch);
-            defer for &r in rle do clear(&r.data);
+        for y := 0; y <= height - 8; y += 8 {
+            for x := 0; x <= width - 8; x += 8 {
+                time.stopwatch_start(&rle_stopwatch);
+                construct_rle(jpeg, &bs, &rle);
+                time.stopwatch_stop(&rle_stopwatch);
+                defer for &r in rle do clear(&r.data);
 
-            time.stopwatch_start(&pxbytes_stopwatch);
-            bytes := construct_pixel_bytes(jpeg, dc_diff[:], rle);
-            time.stopwatch_stop(&pxbytes_stopwatch);
+                time.stopwatch_start(&pxbytes_stopwatch);
+                bytes := construct_pixel_bytes(jpeg, dc_diff[:], rle);
+                time.stopwatch_stop(&pxbytes_stopwatch);
 
-            mcu_byte_width :: size_of(byte) * 8 * 4; // 4 == engine.meta.bytes_per_pixel
-            time.stopwatch_start(&copy_stopwatch);
-            for v in 0..<8 {
-                dst_row := &dst.buffer[(y + v) * engine.meta.width * 4 + x * 4];
-                mem.copy(dst_row, &bytes[v * mcu_byte_width], mcu_byte_width);
+                mcu_byte_width :: size_of(byte) * 8 * 4; // 4 == engine.meta.bytes_per_pixel
+                time.stopwatch_start(&copy_stopwatch);
+                for v in 0..<8 {
+                    dst_row := &dst.buffer[(y + v) * engine.meta.width * 4 + x * 4];
+                    mem.copy(dst_row, &bytes[v * mcu_byte_width], mcu_byte_width);
+                }
+                time.stopwatch_stop(&copy_stopwatch);
             }
-            time.stopwatch_stop(&copy_stopwatch);
+        }
+
+        when ODIN_DEBUG do fmt.eprintfln("RLE avg. time: %vms",      cast(f64)time.stopwatch_duration(rle_stopwatch) / 1e6);
+        when ODIN_DEBUG do fmt.eprintfln("PXBYTES avg. time: %vms",  cast(f64)time.stopwatch_duration(pxbytes_stopwatch) / 1e6);
+        when ODIN_DEBUG do fmt.eprintfln("COPY avg. time: %vms",     cast(f64)time.stopwatch_duration(copy_stopwatch) / 1e6);
+    } else {
+        for y := 0; y <= height - 8; y += 8 {
+            for x := 0; x <= width - 8; x += 8 {
+                construct_rle(jpeg, &bs, &rle);
+                defer for &r in rle do clear(&r.data);
+
+                bytes := construct_pixel_bytes(jpeg, dc_diff[:], rle);
+
+                mcu_byte_width :: size_of(byte) * 8 * 4; // 4 == engine.meta.bytes_per_pixel
+                for v in 0..<8 {
+                    dst_row := &dst.buffer[(y + v) * engine.meta.width * 4 + x * 4];
+                    mem.copy(dst_row, &bytes[v * mcu_byte_width], mcu_byte_width);
+                }
+            }
         }
     }
-
-    fmt.eprintfln("RLE avg. time: %vms",      cast(f64)time.stopwatch_duration(rle_stopwatch) / 1e6);
-    fmt.eprintfln("PXBYTES avg. time: %vms",  cast(f64)time.stopwatch_duration(pxbytes_stopwatch) / 1e6);
-    fmt.eprintfln("COPY avg. time: %vms",     cast(f64)time.stopwatch_duration(copy_stopwatch) / 1e6);
 }
 
 RLE_Data :: struct {
@@ -741,17 +764,17 @@ Bit_Stream :: struct {
     buffer: []byte,
     index:  uint, /**< index of the current byte taken, if offset==8, the next byte will be loaded and this index incremented */
     offset: byte, /**< nof bits pushed from buffer[index] into curr */
-    len:    byte, /**< nof bits pushed into curr - valid in range <0; size_of(u16)*8> */
 }
 
-init_bitstream :: #force_inline proc(backing: []byte) -> (bs: Bit_Stream) {
-    bs.buffer = backing;
+init_bitstream :: #force_inline proc(backing: ^[dynamic]byte) -> (bs: Bit_Stream) {
+    append(backing, 0, 0); // pading zero, so we can avoid checking for boundaries when grabbing FAST_BITS
+    bs.buffer = backing[:];
     return bs;
 }
 
 _bitstream_next_helper :: #force_inline proc(using bs: ^Bit_Stream) -> i16 {
-    assert(index < builtin.len(buffer));
-    return cast(i16)(((buffer[index] << offset) & ~byte(0x7F)) >> 7);
+    when ODIN_DEBUG do assert(index < builtin.len(buffer) - 1);
+    #no_bounds_check return cast(i16)(((buffer[index] << offset) & ~byte(0x7F)) >> 7);
 }
 
 bitstream_next :: #force_inline proc(using bs: ^Bit_Stream) -> i16 {
@@ -760,20 +783,33 @@ bitstream_next :: #force_inline proc(using bs: ^Bit_Stream) -> i16 {
     return next_bit;
 }
 
+/**
+ * @brief grabs FAST_MAP_KEY_NOF_BITS from the stream
+ * @note function does not increment the counter by the NOT_BITS, it remains the same
+ */
+bitstream_grab_fast_bits :: #force_inline proc(using bs: ^Bit_Stream) -> u16 {
+    #assert(FAST_MAP_KEY_NOF_BITS >= size_of(buffer[0]))
+
+    next := index + 1;
+    //if buffer[index] == 0xFF && buffer[next] == 0x00 do next += 1;
+    #no_bounds_check {
+        chunk := cast(u16)buffer[index] << 8 | cast(u16)buffer[next];
+        return (chunk >> (16 - offset - FAST_MAP_KEY_NOF_BITS)) & ((1 << FAST_MAP_KEY_NOF_BITS) - 1);
+    }
+}
+
 bitstream_incr :: #force_inline proc(using bs: ^Bit_Stream) {
     offset += 1;
     if offset >= 8 {
-        // real time byte stuffing
-        if index < builtin.len(buffer) - 1 && buffer[index] == 0xFF && buffer[index + 1] == 0x00 {
-            index += 2;
-        } else do index += 1;
+        index += 1;
+        //if buffer[index] == 0xFF && buffer[index + 1] == 0x00 {
+        //    index += 2;
+        //} else do index += 1;
         offset = 0;
     }
-    len += 1;
-    len %= 17;
 }
 
-HT_NO_SYMBOL :: byte(0);
+HT_NO_SYMBOL :: 0;
 
 DHT_Graph_Node_Code :: struct {
     code: u16,
@@ -792,14 +828,25 @@ DHT_Graph_Node :: struct {
     parent:  ^DHT_Graph_Node, // nil == root
 }
 
+FAST_MAP_KEY_NOF_BITS :: 9;
+
+/** @brief maps codes of fixed size (FAST_BITS) directly into the symbol (a little optimization for fast huffman decoding) */
+DHT_Graph_Fast_Map_Value :: struct {
+    symbol: DHT_Graph_Node_Symbol,
+    length: byte,
+}
+DHT_Graph_Fast_Map :: map[u16]DHT_Graph_Fast_Map_Value;
+
 DHT_Graph :: struct {
     root: ^DHT_Graph_Node,
+    fast: DHT_Graph_Fast_Map,
 }
 
 make_dht_graph :: #force_inline proc(dht: DHT_Chunk, allocator: mem.Allocator) -> (graph: DHT_Graph) {
     graph.root = make_dht_node(nil, allocator);
     make_dht_left_node(graph.root, allocator);
     make_dht_right_node(graph.root, allocator);
+    graph.fast = make(map[u16]DHT_Graph_Fast_Map_Value);
     return graph;
 }
 
@@ -818,6 +865,8 @@ delete_dht_graph :: #force_inline proc(graph: DHT_Graph, allocator: mem.Allocato
     delete_path(node^.left, allocator);
     delete_path(node^.right, allocator);
     delete_dht_node(node, allocator);
+
+    delete(graph.fast);
 }
 
 make_dht_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) -> ^DHT_Graph_Node {
@@ -839,12 +888,12 @@ make_dht_left_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem
 make_dht_right_node :: #force_inline proc(parent: ^DHT_Graph_Node, allocator: mem.Allocator) {
     node := make_dht_node(parent, allocator);
     node^.code = parent^.code << 1 | 0x1;
-    parent^.right = node;
+    parent^.right = node
 }
 
 delete_dht_node :: mem.free;
 
-construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.Allocator) {
+construct_dht_graph :: proc(graph: ^DHT_Graph, dht: DHT_Chunk, allocator: mem.Allocator) {
     leftmost := graph.root.left;
     symbols  := dht.symbols;
 
@@ -876,6 +925,15 @@ construct_dht_graph :: proc(graph: DHT_Graph, dht: DHT_Chunk, allocator: mem.All
             for symbol in symbols[:count] {
                 leftmost^.symbol = symbol;
                 leftmost^.is_leaf = true;
+                if index <= FAST_MAP_KEY_NOF_BITS {
+                    code_len := cast(byte)index + 1;
+                    bits_to_fill := FAST_MAP_KEY_NOF_BITS - code_len;
+                    num_replicas := 1 << bits_to_fill;
+                    base := leftmost^.code << bits_to_fill;
+                    for i in 0..<num_replicas {
+                        map_insert(&graph.fast, base | cast(u16)i, DHT_Graph_Fast_Map_Value{symbol, code_len});
+                    }
+                }
                 leftmost = get_right_level_node(leftmost);
             }
             symbols = symbols[count:];
