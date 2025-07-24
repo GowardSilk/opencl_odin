@@ -9,6 +9,7 @@ import "core:fmt"
 import "core:mem"
 import "core:math"
 import "core:time"
+import "core:simd"
 
 buffer_size :: #force_inline proc(using engine: ^Engine) -> int {
     return meta.width * meta.height * meta.bytes_per_pixel;
@@ -472,17 +473,17 @@ fast_idct :: proc(block: ^[64]f64) {
     }
 }
 
-construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> [64 * 4]byte {
-    yuv_pixels: [3][64]int;
+construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []i32, rle: [3]RLE_Data) -> [64 * 4]byte {
+    yuv_pixels: [3][64]i32;
 
     zzindex_to_matindex :: #force_inline proc(zzindex: int) -> [2]int {
         #no_bounds_check return ZIGZAG_ORDER[zzindex];
     }
 
     for rle_id in 0..<3 {
-        zzorder: [64]int;
+        zzorder: [64]i32;
         curr_rle := rle[rle_id];
-        zzskip_pos := -1;
+        zzskip_pos: i32 = -1;
 
         for i := 0; i <= len(curr_rle.data) - 2; i += 2 {
             nof_zeroes := curr_rle.data[i];
@@ -506,7 +507,7 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
 
         for i in 0..<64 {
             yuv_pos := zzindex_to_matindex(i);
-            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i] * cast(int)qt.table_data[i];
+            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i] * cast(i32)qt.table_data[i];
         }
     }
 
@@ -547,10 +548,16 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
     
     // Level shift
     
-    for i in 0..<3 {
+    for y in 0..<8 {
+        for x in 0..<8 {
+            yuv_pixels[0][y * 8 + x] = cast(i32)math.round(icdt[0][y * 8 + x]) + 128;
+        }
+    }
+
+    for i in 1..=2 {
         for y in 0..<8 {
             for x in 0..<8 {
-                yuv_pixels[i][y * 8 + x] = cast(int)math.round(icdt[i][y * 8 + x]) + 128;
+                yuv_pixels[i][y * 8 + x] = cast(i32)math.round(icdt[i][y * 8 + x]);
             }
         }
     }
@@ -558,25 +565,37 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []int, rle: [3]RLE_Data) -> 
     // YCbCr to RGB(A)
 
     out: [64 * 4]byte;
+
     for y in 0..<8 {
+        y_row := simd.from_slice(simd.i32x8, yuv_pixels[0][y * 8 : (y + 1) * 8]);
+
+        cb_row := simd.from_slice(simd.i32x8, yuv_pixels[1][y * 8 : (y + 1) * 8]);
+        //cb_row -= 128;
+
+        cr_row := simd.from_slice(simd.i32x8, yuv_pixels[2][y * 8 : (y + 1) * 8]);
+        //cr_row -= 128;
+
+        FIXED_BITS      :: 8;
+        FIXED_BIT_LANE: simd.u32x8: FIXED_BITS;
+
+        FIXED_R_COEFF   :: 359; // 1.402 * 256
+        FIXED_G1_COEFF  :: 88;  // 0.344136 * 256
+        FIXED_G2_COEFF  :: 183; // 0.714136 * 256
+        FIXED_B_COEFF   :: 453; // 1.772 * 256
+
+        r_row := simd.clamp(y_row + simd.shr(FIXED_R_COEFF * cr_row, FIXED_BIT_LANE), 0, 255);
+        g_row := simd.clamp(y_row - simd.shr(FIXED_G1_COEFF * cb_row + FIXED_G2_COEFF * cr_row, FIXED_BIT_LANE), 0, 255);
+        b_row := simd.clamp(y_row + simd.shr(FIXED_B_COEFF * cb_row, FIXED_BIT_LANE), 0, 255);
+
+        r_arr := simd.to_array(r_row);
+        g_arr := simd.to_array(g_row);
+        b_arr := simd.to_array(b_row);
+
         for x in 0..<8 {
-            Y  := cast(f64)yuv_pixels[0][y * 8 + x];
-            Cb := cast(f64)yuv_pixels[1][y * 8 + x];
-            Cr := cast(f64)yuv_pixels[2][y * 8 + x];
-
-            R := cast(int)math.floor(Y + 1.402 * (1.0 * Cr - 128.0));
-            G := cast(int)math.floor(Y - 0.344136 * (1.0 * Cb - 128.0) - 0.714136 * (1.0 * Cr - 128.0));
-            B := cast(int)math.floor(Y + 1.772 * (1.0 * Cb - 128.0));
-
-            R = math.max(0, math.min(R, 255));
-            G = math.max(0, math.min(G, 255));
-            B = math.max(0, math.min(B, 255));
-
-            out_base_idx := y * 8 * 4 + x * 4;
-            out[out_base_idx + 0] = cast(byte)R;
-            out[out_base_idx + 1] = cast(byte)G;
-            out[out_base_idx + 2] = cast(byte)B;
-            out[out_base_idx + 3] = 255;
+            out[y * 8 * 4 + x * 4 + 0] = cast(byte)r_arr[x];
+            out[y * 8 * 4 + x * 4 + 1] = cast(byte)g_arr[x];
+            out[y * 8 * 4 + x * 4 + 2] = cast(byte)b_arr[x];
+            out[y * 8 * 4 + x * 4 + 3] = 255;
         }
     }
 
@@ -596,7 +615,7 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
         unreachable();
     }
 
-    decode_value_from_stream :: #force_inline proc(bs: ^Bit_Stream, nof_bits: uint) -> int {
+    decode_value_from_stream :: #force_inline proc(bs: ^Bit_Stream, nof_bits: uint) -> i32 {
         if nof_bits == 0 do return 0;
 
         value_bits: i16;
@@ -607,10 +626,10 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
 
         if (value_bits >> (nof_bits - 1)) == 0 {
             value_bits = ~value_bits & ((1 << nof_bits) - 1);
-            return -cast(int)value_bits;
+            return -cast(i32)value_bits;
         }
 
-        return cast(int)value_bits;
+        return cast(i32)value_bits;
     }
 
     decode_next_huffman_symbol :: #force_inline proc(bs: ^Bit_Stream, table: DHT_Graph) -> (symbol: byte, is_eob: bool) {
@@ -662,7 +681,7 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
         append(&curr_rle.data, 0, dc_val);
 
         // Scan AC
-        nof_codes := 0;
+        nof_codes: i32 = 0;
         for nof_codes < 63 {
             ac_symbol, is_eob := decode_next_huffman_symbol(bs, jpeg.dhts[ac_ht_id]);
             if is_eob {
@@ -670,7 +689,7 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
                 break;
             }
 
-            nof_zeroes := cast(int)(ac_symbol >> 4);
+            nof_zeroes := cast(i32)(ac_symbol >> 4);
             ac_val_len := cast(uint)(ac_symbol & 0x0F);
 
             // EOB
@@ -701,12 +720,12 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
 
     // retained data across rle and mcu calculations
     bs := init_bitstream(&jpeg.compressed_data);
-    dc_diff: [3]int;
+    dc_diff: [3]i32;
 
     rle: [3]RLE_Data;
     for &r in rle {
         merr: mem.Allocator_Error;
-        r.data, merr = mem.make([dynamic]int, engine.allocator);
+        r.data, merr = mem.make([dynamic]i32, engine.allocator);
         assert(merr == .None);
     }
     defer deconstruct_rle(rle);
@@ -757,7 +776,7 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
 }
 
 RLE_Data :: struct {
-    data: [dynamic]int,
+    data: [dynamic]i32,
 }
 
 Bit_Stream :: struct {
