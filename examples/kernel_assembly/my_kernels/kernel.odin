@@ -37,7 +37,7 @@ pi :: proc(
    istart, iend: int;
    istart = (group_id * num_wrk_items + local_id) * niters;
    iend   = istart + niters;
-   for i in istart..<iend {
+   for i: int = istart; i < iend ; i += 1 {
        x = (i + 0.5) * step_size;
        accum += 4.0 / (1.0 + x * x);
    }
@@ -45,7 +45,9 @@ pi :: proc(
    barrier(CLK_LOCAL_MEM_FENCE);
    if local_id == 0 {
       sum = 0.0;
-      for i in 0..<num_wrk_items do sum += local_sums[i];
+      for i: int = 0; i < num_wrk_items; i += 1 {
+         sum += local_sums[i];
+      }
       partial_sums[group_id] = sum;
    }
 }

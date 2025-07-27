@@ -272,14 +272,12 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 
 		// assemble kernel body
 		body_block := lit.body.derived.(^ast.Block_Stmt);
-		for stmt in body_block.stmts {
-			if !to_opencl_lang(compiler, &kernel_string_builder, &stmt.stmt_base) do continue decl_loop;
-		}
+		if !to_opencl_lang(compiler, &kernel_string_builder, &body_block.stmt_base) do continue decl_loop;
 		body = strings.clone(strings.to_string(kernel_string_builder));
 		defer delete(body);
 		strings.builder_reset(&kernel_string_builder);
 
-		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) {{\n%s}}", name, parameters, body));
+		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) %s", name, parameters, body));
 	}
 	
 	return;
@@ -329,7 +327,7 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 			strings.write_string(builder, ident.name);
 			strings.write_byte(builder, '(');
 			for arg in v.args do to_opencl_lang(compiler, builder, arg) or_return;
-			strings.write_byte(builder, ')');
+			strings.write_string(builder, ");");
 		case ^ast.Deref_Expr:
 			strings.write_byte(builder, '*');
 			return to_opencl_lang(compiler, builder, &v.expr.expr_base);
@@ -354,20 +352,46 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 
 		// Statements
 		case ^ast.Assign_Stmt:
-			strings.write_byte(builder, '\t');
 			to_opencl_lang(compiler, builder, &v.lhs[0].expr_base) or_return;
 			fmt.sbprintf(builder, " %s ", v.op.text);
 			to_opencl_lang(compiler, builder, &v.rhs[0].expr_base) or_return;
 			strings.write_string(builder, ";\n");
 		case ^ast.Expr_Stmt:
-			fmt.eprintfln("Expr Stmt: %v", v);
-			return err_return(&v.stmt_base, "TODO expr: Not yet implemented");
+			return to_opencl_lang(compiler, builder, &v.expr.expr_base);
 		case ^ast.Block_Stmt:
-			return err_return(&v.stmt_base, "TODO block: Not yet implemented");
+			strings.write_string(builder, "{\n");
+			for stmt in v.stmts {
+				strings.write_byte(builder, '\t');
+				to_opencl_lang(compiler, builder, &stmt.stmt_base) or_return;
+			}
+			strings.write_string(builder, "}");
 		case ^ast.If_Stmt:
-			return err_return(&v.stmt_base, "TODO if: Not yet implemented");
+			strings.write_string(builder, "if (");
+			if v.label != nil {
+				return err_return(&v.stmt_base, "Label unsupported for if statements");
+			}
+			to_opencl_lang(compiler, builder, &v.cond.expr_base) or_return;
+			strings.write_byte(builder, ')');
+			to_opencl_lang(compiler, builder, &v.body.stmt_base) or_return;
+			strings.write_byte(builder, '\n');
 		case ^ast.For_Stmt:
-			return err_return(&v.stmt_base, "TODO for: Not yet implemented");
+			if v.label != nil do return err_return(&v.label.expr_base, "For loop labels not supported");
+			strings.write_string(builder, "for (");
+			to_opencl_lang(compiler, builder, &v.init.stmt_base) or_return;
+			if builder.buf[len(builder.buf) - 1] == '\n' {
+				ordered_remove(&builder.buf, len(builder.buf) - 1);
+			}
+			to_opencl_lang(compiler, builder, &v.cond.expr_base) or_return;
+			if builder.buf[len(builder.buf) - 1] != ';' {
+				strings.write_byte(builder, ';');
+			}
+			to_opencl_lang(compiler, builder, &v.post.stmt_base) or_return;
+			if builder.buf[len(builder.buf) - 1] == '\n' {
+				ordered_remove(&builder.buf, len(builder.buf) - 1);
+			}
+			strings.write_byte(builder, ')');
+			to_opencl_lang(compiler, builder, &v.body.stmt_base) or_return;
+			strings.write_byte(builder, '\n');
 		case ^ast.Range_Stmt:
 			return err_return(&v.stmt_base, "TODO range: Not yet implemented");
 		case ^ast.Unroll_Range_Stmt:
@@ -423,7 +447,7 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 			for val, index in v.values {
 				val_ident, is_val_ident := v.names[index].derived.(^ast.Ident);
 				if !is_val_ident do return err_return(&v.names[index].expr_base, "Expected identifier, got: %v", v.names[index].expr_base);
-				fmt.sbprintf(builder, "\t%s %s = ", type, val_ident.name);
+				fmt.sbprintf(builder, "%s %s = ", type, val_ident.name);
 				to_opencl_lang(compiler, builder, &val.expr_base) or_return;
 				strings.write_string(builder, ";\n");
 			}
@@ -569,10 +593,17 @@ query_type_from_value_decl :: #force_inline proc(compiler: ^Compiler, val: ^ast.
 				case .Rune:    return "char";
 				case .String:  return "const char*";
 			}
+		case ^ast.Ident:
+			parser.default_error_handler(
+				val.pos,
+				"Ident (%s) as type of a value declaration indicates type inference, which we do not yet support!",
+				v.name
+			);
+			return "";
 		case:
 			parser.default_error_handler(
 				val.pos,
-				"Unsupported stmt type in valeu declaration! %v",
+				"Unsupported stmt type in value declaration! %v",
 				v
 			);
 			return "";
