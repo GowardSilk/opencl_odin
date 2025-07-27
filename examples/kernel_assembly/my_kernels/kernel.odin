@@ -1,18 +1,17 @@
+/**
+ * NOTE(GowardSilk): This should be technically compileable by Odin's compiler but it is sort of redundant to place it
+ * along with the rest of the project since we need to parse this in runtime anyway via our own "Compiler".
+ *
+ * Each function called inside the kernel should be either known (OpenCL language builtin)
+ * or another normal function from this file which will be automatically inlined (as clc does).
+ *
+ * global/local function param type qualifiers can be specified via compound literal consisting of a key (aka field name)
+ * being procedure parameter and field value being the qualifier.
+ */
 package my_kernels;
 
 import c  "core:c"
 import cl "shared:opencl"
-
-/**
- * Odin's version of basic/test_program.cl, this should be fed to the "custom" odin parser and from there generate a CL kernel
- * using @(kernel) for every kernel funciton.
- * NOTE(GowardSilk): This file is technically non-compileable by normal odin's compiler because of some tricks...
- *
- * Each function called inside the kernel should be either known (OpenCL language builtin)
- * or another normal function from this file which will be automatically inlined (as clc does).
- */
-
-get_global_id: #type proc(_: int) -> int;
 
 @(kernel)
 @(params={input="global", output="global"})

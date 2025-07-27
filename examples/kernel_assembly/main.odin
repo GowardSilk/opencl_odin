@@ -18,184 +18,170 @@ OpenCL_Context :: struct {
 }
 
 Compiler :: struct {
-	parser: parser.Parser,
-	kernels: map[string]cl.Kernel
+	/**
+	 * table of all procedures (key <=> proc_name)
+	 * only for Proc_Kind.Builtin, Proc_Desc.params != nil
+	 */
+	proc_table:	map[string]Proc_Desc,
+	kernels:	map[string]cl.Kernel, /**< compiled kernels */
 }
 
 init_compiler :: proc(allocator := context.allocator) -> Compiler {
-	p := parser.default_parser({.Optional_Semicolons});
-	k := mem.make(map[string]cl.Kernel, allocator);
-	return Compiler { p, k };
+	k  := mem.make(map[string]cl.Kernel, allocator);
+	ki := mem.make(map[string]Proc_Desc, allocator);
+	return Compiler { ki, k };
 }
 
 delete_compiler :: proc(using compiler: ^Compiler) {
+	if proc_table != nil do mem.delete(proc_table);
 	if kernels != nil {
 		for _, kernel in kernels do cl.ReleaseKernel(kernel);
-		delete(kernels);
+		mem.delete(kernels);
 	}
 }
 
-OpenCL_Attribute :: distinct string; 
-OpenCL_Attribute_Invalid :: "";
-OpenCL_Attribute_Const 	 :: "__const";
-OpenCL_Attribute_Global	 :: "__global";
-OpenCL_Attribute_Local	 :: "__local";
+OpenCL_Qualifier :: distinct string; 
+OpenCL_Qualifier_Invalid :: "";
+OpenCL_Qualifier_Const 	 :: "__const";
+OpenCL_Qualifier_Global	 :: "__global";
+OpenCL_Qualifier_Local	 :: "__local";
 
 Proc_Desc_Param :: struct {
 	name: string,
-	attr: OpenCL_Attribute,
+	qual: OpenCL_Qualifier,
+}
+
+Proc_Kind :: enum {
+	Default = 0, /**< "odin" proc */
+	Kernel,  /**< __kernel function */
+	Builtin, /**< OpenCL C builtin function */
 }
 
 Proc_Desc :: struct {
 	attributes: []^ast.Attribute,
-	proc_lit:   ^ast.Proc_Lit,
-	proc_name:  string,
-	params: 	map[string]Proc_Desc_Param,
+	lit:        ^ast.Proc_Lit,
+	name:        string,
+	params:      map[string]Proc_Desc_Param,
+	kind:        Proc_Kind,
 }
-PROC_DESC_INVALID := Proc_Desc { nil, nil, "", nil }
+PROC_DESC_INVALID := Proc_Desc { nil, nil, "", nil, .Default };
 
-compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, file_name := "kernel_assembly/my_kernels/kernel.odin") {
-	data, ok := os.read_entire_file_from_filename(file_name);
-	if !ok {
-		fmt.eprintln("Failed to read file!");
-		return;
-	}
-	defer delete(data);
-
-	ast_file: ast.File;
-	ast_file.src = cast(string)data;
-
-	if !parser.parse_file(&compiler.parser, &ast_file) {
-		fmt.eprintln("Grammatical parsing error(s)!");
-		return;
-	}
-
-	is_proc_lit :: #force_inline proc(any_stmt: ^ast.Any_Stmt) -> Proc_Desc {
-		val_decl, is_val_decl := any_stmt.(^ast.Value_Decl);
-		if is_val_decl {
-			if len(val_decl.values) > 0 {
-				proc_lit, is_proc_lit := val_decl.values[0].derived_expr.(^ast.Proc_Lit);
-				if is_proc_lit {
-					return Proc_Desc {
-						val_decl.attributes[:],
-						proc_lit,
-						val_decl.names[0].derived_expr.(^ast.Ident).name,
-						nil,
-					};
-				}
-			}
-		}
-		return PROC_DESC_INVALID;
-	}
-
-	is_kernel_proc :: #force_inline proc(any_stmt: ^ast.Any_Stmt) -> Proc_Desc {
-		proc_desc := is_proc_lit(any_stmt);
-		if proc_desc.proc_lit != nil {
-			// check if function is "__kernel"
-			contains_kernel_attr := false;
-			for attr in proc_desc.attributes {
-				attr_expr := attr.elems[0];
-				if _, ok := attr_expr.derived.(^ast.Field_Value); ok do continue;
-				attr_name := attr_expr.derived.(^ast.Ident).name;
-				if attr_name == "kernel" {
-					contains_kernel_attr = true;
-					break;
-				}
-			}
-			if !contains_kernel_attr {
-				parser.default_warning_handler(proc_desc.proc_lit.pos, "Did not find @(kernel) attribute!");
-				return PROC_DESC_INVALID;
-			}
-
-			proc_desc.params = make(map[string]Proc_Desc_Param);
-			for param in proc_desc.proc_lit.type.params.list {
-				for param_name_expr in param.names {
-					param_name := param_name_expr.derived_expr.(^ast.Ident).name;
-					// const by default
-					map_insert(
-						&proc_desc.params,
-						param_name,
-						Proc_Desc_Param {param_name, OpenCL_Attribute_Const}
-					);
-				}
-			}
-			contains_param_attr := false;
-			for attr in proc_desc.attributes {
-				attr_expr, is_attr_expr := attr.elems[0].derived.(^ast.Field_Value);
-				if !is_attr_expr {
-					delete(proc_desc.params);
-					return PROC_DESC_INVALID;
-				}
-				attr_name := attr_expr.field.derived_expr.(^ast.Ident).name;
-				if attr_name == "params" {
-					params_val := attr_expr.derived.(^ast.Field_Value).value.derived_expr;
-					if !extract_kernel_proc_param_attributes(&proc_desc.params, params_val) {
-						delete(proc_desc.params);
-						return PROC_DESC_INVALID;
-					}
-					contains_param_attr = true;
-				}
-			}
-			// other attributes (Odin's) are ignored since they have no real use in cl
-			if !contains_param_attr && len(proc_desc.attributes) > 2 {
-				parser.default_warning_handler(proc_desc.proc_lit.pos, "Odin's attributes ignored!");
-			}
-			return proc_desc;
-		}
-		return PROC_DESC_INVALID;
-	}
-
-	kernel_string_builder: strings.Builder;
-	assert(strings.builder_init(&kernel_string_builder) != nil);
-	defer strings.builder_destroy(&kernel_string_builder);
-	decl_loop: for stmt in ast_file.decls do if proc_desc := is_kernel_proc(&stmt.derived_stmt); proc_desc.proc_lit != nil {
-		defer strings.builder_reset(&kernel_string_builder);
-		using proc_desc;
-
-		parameters, body: string;
-
-		if proc_lit.type.results != nil {
-			parser.default_error_handler(proc_lit.type.results.list[0].pos, "OpenCL prohibits __kernel functions to have non-void return type! Skipping this kernel...");
-			continue;
-		}
-
-		for param, index in proc_lit.type.params.list {
-			strings.write_string(&kernel_string_builder, auto_cast params[param.names[0].derived_expr.(^ast.Ident).name].attr);
-			if !to_opencl_lang(&compiler.parser, &kernel_string_builder, &param.node) do continue decl_loop;
-			if index < len(proc_lit.type.params.list) - 1 {
-				strings.write_string(&kernel_string_builder, ", ");
-			}
-		}
-		parameters = strings.clone(strings.to_string(kernel_string_builder));
-		strings.builder_reset(&kernel_string_builder);
-
-		body_block := proc_lit.body.derived.(^ast.Block_Stmt);
-		for stmt in body_block.stmts {
-			if !to_opencl_lang(&compiler.parser, &kernel_string_builder, &stmt.stmt_base) do continue decl_loop;
-		}
-		body = strings.clone(strings.to_string(kernel_string_builder));
-		strings.builder_reset(&kernel_string_builder);
-
-		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) {{\n%s}}", proc_name, parameters, body));
-	}
-	
-	return;
+Is_Proc_Ret :: enum {
+	OK = 0,
+	Not_Proc,
+	Invalid,
 }
 
-extract_kernel_proc_param_attributes :: proc(params: ^map[string]Proc_Desc_Param, param_val_expr: ast.Any_Expr) -> bool {
+is_proc_lit :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_Desc) -> Is_Proc_Ret {
+	val_decl, is_val_decl := any_stmt.(^ast.Value_Decl);
+	if is_val_decl {
+		if len(val_decl.values) > 0 {
+			proc_lit, is_proc_lit := val_decl.values[0].derived_expr.(^ast.Proc_Lit);
+			if is_proc_lit {
+				proc_desc^ = Proc_Desc {
+					val_decl.attributes[:],
+					proc_lit,
+					val_decl.names[0].derived_expr.(^ast.Ident).name,
+					nil,
+					.Default,
+				};
+				return .OK;
+			}
+		}
+	}
+	return .Not_Proc;
+}
+
+is_proc_query_attr_helper :: #force_inline proc(attrs: []^ast.Attribute, key: string) -> ^ast.Attribute {
+	for attr in attrs {
+		attr_expr := attr.elems[0];
+		field_value, ok := attr_expr.derived.(^ast.Field_Value);
+		if ok {
+			if field_value.field.derived_expr.(^ast.Ident).name == key {
+				return attr;
+			}
+		}
+		ident: ^ast.Ident;
+		ident, ok = attr_expr.derived_expr.(^ast.Ident);
+		if ok {
+			if ident.name == key {
+				return attr;
+			}
+		}
+	}
+
+	return nil;
+}
+
+is_builtin_proc :: #force_inline proc(proc_desc: ^Proc_Desc) -> Is_Proc_Ret {
+	if is_proc_query_attr_helper(proc_desc.attributes, "kernel_builtin") != nil {
+		proc_desc.kind = .Builtin;
+		return .OK;
+	}
+	return .Not_Proc;
+}
+
+is_kernel_proc :: #force_inline proc(proc_desc: ^Proc_Desc) -> Is_Proc_Ret {
+	// check if function is "__kernel"
+	if is_proc_query_attr_helper(proc_desc.attributes, "kernel") == nil {
+		return .Not_Proc;
+	}
+	// __kernel(s) cannot have non-void return type
+	if proc_desc.lit.type.results != nil {
+		parser.default_error_handler(
+			proc_desc.lit.type.results.list[0].pos,
+			"OpenCL prohibits __kernel functions to have non-void return type! Skipping this kernel..."
+		);
+		return .Invalid;
+	}
+
+	// generate default data for procedure params
+	proc_desc.params = make(map[string]Proc_Desc_Param);
+	for param in proc_desc.lit.type.params.list {
+		for param_name_expr in param.names {
+			param_name := param_name_expr.derived_expr.(^ast.Ident).name;
+			// const by default
+			map_insert(
+				&proc_desc.params,
+				param_name,
+				Proc_Desc_Param {param_name, OpenCL_Qualifier_Const}
+			);
+		}
+	}
+	// if "params" attribute explicitly specified,
+	// query its contents and assign special values to proc_desc.params
+	params_attr := is_proc_query_attr_helper(proc_desc.attributes, "params");
+	if params_attr != nil {
+		params_val  := params_attr.elems[0].derived.(^ast.Field_Value).value.derived_expr;
+		if !extract_kernel_proc_param_qualifiers(&proc_desc.params, params_val) {
+			delete(proc_desc.params);
+			return .Invalid;
+		}
+	}
+	// other attributes (Odin's) are ignored since they have no real use in cl
+	if params_attr == nil && len(proc_desc.attributes) > 2 {
+		parser.default_warning_handler(proc_desc.lit.pos, "Odin's attributes ignored!");
+	}
+
+	proc_desc.kind = .Kernel;
+
+	return .OK;
+}
+
+extract_kernel_proc_param_qualifiers :: proc(params: ^map[string]Proc_Desc_Param, param_val_expr: ast.Any_Expr) -> bool {
 	comp_lit, is_comp_lit := param_val_expr.(^ast.Comp_Lit);
 	if !is_comp_lit do return false;
 
-	to_opencl_attr_from_string :: #force_inline proc(attr: string) -> OpenCL_Attribute {
-		switch attr {
+	to_opencl_qual_from_string :: #force_inline proc(qual: string) -> OpenCL_Qualifier {
+		switch qual {
 			case "\"global\"", "\"__global\"":
-				return OpenCL_Attribute_Global;
+				return OpenCL_Qualifier_Global;
 			case "\"local\"", "\"__local\"":
-				return OpenCL_Attribute_Local;
+				return OpenCL_Qualifier_Local;
 			case "\"const\"", "\"__const\"":
-				return OpenCL_Attribute_Const;
+				return OpenCL_Qualifier_Const;
 			case:
-				return OpenCL_Attribute_Invalid;
+				return OpenCL_Qualifier_Invalid;
 		}
 	}
 	
@@ -225,10 +211,78 @@ extract_kernel_proc_param_attributes :: proc(params: ^map[string]Proc_Desc_Param
 			parser.default_error_handler(e.pos, "Expected string literal!");
 			return false;
 		}
-		param^.attr = to_opencl_attr_from_string(attr_val.tok.text);
+		param^.qual = to_opencl_qual_from_string(attr_val.tok.text);
 	}
 
 	return true;
+}
+
+is_valid_proc :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_Desc) -> bool {
+	if is_proc_lit(any_stmt, proc_desc) != .OK do return false;
+
+	#partial switch is_builtin_proc(proc_desc) {
+		case .OK:	return true;
+		case .Invalid:	return false;
+	}
+	#partial switch is_kernel_proc(proc_desc) {
+		case .OK:	return true;
+		case .Invalid:	return false;
+	}
+
+	return true; // .Default proc
+}
+
+compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, package_path := "kernel_assembly/my_kernels") {
+	pckg, ok := parser.parse_package_from_path(package_path);
+	assert(ok);
+
+	// register all the functions into a table
+	for _, file in pckg.files {
+		proc_desc: Proc_Desc;
+		for stmt in file.decls do if is_valid_proc(&stmt.derived_stmt, &proc_desc) {
+			map_insert(&compiler.proc_table, proc_desc.name, proc_desc);
+		}
+	}
+	
+	kernel_string_builder: strings.Builder;
+	assert(strings.builder_init(&kernel_string_builder) != nil);
+	defer strings.builder_destroy(&kernel_string_builder);
+
+	decl_loop: for _, proc_desc in compiler.proc_table do if proc_desc.kind == .Kernel {
+		defer strings.builder_reset(&kernel_string_builder);
+		using proc_desc;
+
+		parameters, body: string;
+
+		// assemble parameter list
+		for param, index in lit.type.params.list {
+			qual := params[param.names[0].derived_expr.(^ast.Ident).name].qual;
+			strings.write_string(&kernel_string_builder, cast(string)qual);
+			strings.write_byte(&kernel_string_builder, ' ');
+
+			if !to_opencl_lang(compiler, &kernel_string_builder, &param.node) do continue decl_loop;
+
+			if index < len(lit.type.params.list) - 1 {
+				strings.write_string(&kernel_string_builder, ", ");
+			}
+		}
+		parameters = strings.clone(strings.to_string(kernel_string_builder));
+		defer delete(parameters);
+		strings.builder_reset(&kernel_string_builder);
+
+		// assemble kernel body
+		body_block := lit.body.derived.(^ast.Block_Stmt);
+		for stmt in body_block.stmts {
+			if !to_opencl_lang(compiler, &kernel_string_builder, &stmt.stmt_base) do continue decl_loop;
+		}
+		body = strings.clone(strings.to_string(kernel_string_builder));
+		defer delete(body);
+		strings.builder_reset(&kernel_string_builder);
+
+		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) {{\n%s}}", name, parameters, body));
+	}
+	
+	return;
 }
 
 err_return :: #force_inline proc(node: ^ast.Node, msg: string, args: ..any) -> bool {
@@ -236,7 +290,7 @@ err_return :: #force_inline proc(node: ^ast.Node, msg: string, args: ..any) -> b
 	return false;
 }
 
-to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.Node) -> bool {
+to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, node: ^ast.Node) -> bool {
 	if node == nil do return true;
 
 	#partial switch v in node^.derived {
@@ -253,18 +307,19 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 			fmt.sbprint(builder, v.name);
 		case ^ast.Unary_Expr:
 			fmt.sbprint(builder, v.op.text);
-			return to_opencl_lang(p, builder, &v.expr_base);
+			return to_opencl_lang(compiler, builder, &v.expr_base);
 		case ^ast.Binary_Expr:
-			to_opencl_lang(p, builder, &v.left.expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.left.expr_base) or_return;
 			fmt.sbprintf(builder, " %s ", v.op.text);
-			return to_opencl_lang(p, builder, &v.right.expr_base);
+			return to_opencl_lang(compiler, builder, &v.right.expr_base);
 		case ^ast.Paren_Expr:
-			assert(false, "TODO");
-			fmt.sbprintfln(builder, "(");
+			strings.write_byte(builder, '(');
+			to_opencl_lang(compiler, builder, &v.expr.expr_base) or_return;
+			strings.write_byte(builder, ')');
 		case ^ast.Index_Expr:
-			to_opencl_lang(p, builder, &v.expr.expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.expr.expr_base) or_return;
 			strings.write_byte(builder, '[');
-			to_opencl_lang(p, builder, &v.index.expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.index.expr_base) or_return;
 			strings.write_byte(builder, ']');
 		case ^ast.Call_Expr:
 			selector, ok := v.expr.derived_expr.(^ast.Selector_Expr);
@@ -273,15 +328,15 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 			else do ident, _ = v.expr.derived_expr.(^ast.Ident);
 			strings.write_string(builder, ident.name);
 			strings.write_byte(builder, '(');
-			for arg in v.args do to_opencl_lang(p, builder, arg) or_return;
+			for arg in v.args do to_opencl_lang(compiler, builder, arg) or_return;
 			strings.write_byte(builder, ')');
 		case ^ast.Deref_Expr:
 			strings.write_byte(builder, '*');
-			return to_opencl_lang(p, builder, &v.expr.expr_base);
+			return to_opencl_lang(compiler, builder, &v.expr.expr_base);
 		case ^ast.Slice_Expr:
 			// slice is "just" a pointer
 			strings.write_byte(builder, '[');
-			to_opencl_lang(p, builder, &v.low.expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.low.expr_base) or_return;
 			if v.high != nil {
 				parser.default_warning_handler(
 					v.high.pos,
@@ -293,16 +348,16 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 		case ^ast.Ternary_If_Expr:
 			return err_return(&v.expr_base, "TODO ternary: Not yet implemented");
 		case ^ast.Selector_Expr:
-			return to_opencl_lang_selector(p, builder, v);
+			return to_opencl_lang_selector(compiler, builder, v);
 		case ^ast.Tag_Expr:
 			return err_return(&v.expr_base, "TODO tag: Not yet implemented");
 
 		// Statements
 		case ^ast.Assign_Stmt:
 			strings.write_byte(builder, '\t');
-			to_opencl_lang(p, builder, &v.lhs[0].expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.lhs[0].expr_base) or_return;
 			fmt.sbprintf(builder, " %s ", v.op.text);
-			to_opencl_lang(p, builder, &v.rhs[0].expr_base) or_return;
+			to_opencl_lang(compiler, builder, &v.rhs[0].expr_base) or_return;
 			strings.write_string(builder, ";\n");
 		case ^ast.Expr_Stmt:
 			fmt.eprintfln("Expr Stmt: %v", v);
@@ -328,15 +383,15 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 
 		// Types
 		case ^ast.Pointer_Type:
-			return to_opencl_lang_ptr(p, builder, v);
+			return to_opencl_lang_ptr(compiler, builder, v);
 		case ^ast.Multi_Pointer_Type:
-			return to_opencl_lang_multi_ptr(p, builder, v);
+			return to_opencl_lang_multi_ptr(compiler, builder, v);
 		case ^ast.Array_Type:
 			fmt.sbprintfln(builder, "type[size]");
 			return err_return(&v.expr_base, "TODO arr: Not yet implemented");
 		case ^ast.Struct_Type:
 			for field in v.fields.list {
-				to_opencl_lang(p, builder, &field.node) or_return;
+				to_opencl_lang(compiler, builder, &field.node) or_return;
 			}
 		case ^ast.Union_Type:
 			fmt.sbprintfln(builder, "union { ... }");
@@ -348,13 +403,13 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 			fmt.sbprintfln(builder, "type[row][col]");
 			return err_return(&v.expr_base, "TODO matrix: Not yet implemented");
 		case ^ast.Helper_Type:
-			return to_opencl_lang(p, builder, &v.type.expr_base);
+			return to_opencl_lang(compiler, builder, &v.type.expr_base);
 
 		// Declarations
 		case ^ast.Value_Decl:
 			type: string;
 			if v.type == nil {
-				type = query_type_from_value_decl(p, v);
+				type = query_type_from_value_decl(compiler, v);
 				if type == "" {
 					return err_return(
 						&v.names[0].expr_base,
@@ -368,24 +423,22 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 			for val, index in v.values {
 				val_ident, is_val_ident := v.names[index].derived.(^ast.Ident);
 				if !is_val_ident do return err_return(&v.names[index].expr_base, "Expected identifier, got: %v", v.names[index].expr_base);
-				if v.type != nil {
-					fmt.sbprintf(builder, "\t%s %s = ", v.type.derived_expr.(^ast.Ident).name, val_ident.name);
-				} else do return err_return(&v.names[index].expr_base, "Failed to infer type for %v value declaration", v);
-				to_opencl_lang(p, builder, &val.expr_base) or_return;
+				fmt.sbprintf(builder, "\t%s %s = ", type, val_ident.name);
+				to_opencl_lang(compiler, builder, &val.expr_base) or_return;
 				strings.write_string(builder, ";\n");
 			}
 		case ^ast.Field:
 			for name, index in v.names {
-				to_opencl_lang(p, builder, &v.type.expr_base) or_return;
+				to_opencl_lang(compiler, builder, &v.type.expr_base) or_return;
 				strings.write_byte(builder, ' ');
-				to_opencl_lang(p, builder, &name.expr_base) or_return;
+				to_opencl_lang(compiler, builder, &name.expr_base) or_return;
 				if index < len(v.names) - 1 {
 					strings.write_string(builder, ", ");
 				}
 			}
 		case ^ast.Field_List:
 			for field, index in v.list {
-				to_opencl_lang(p, builder, &field.node) or_return;
+				to_opencl_lang(compiler, builder, &field.node) or_return;
 				if index < len(v.list) - 1 {
 					strings.write_string(builder, ", ");
 				}
@@ -476,60 +529,46 @@ to_opencl_lang :: proc(p: ^parser.Parser, builder: ^strings.Builder, node: ^ast.
 	return true;
 }
 
-Visit_Input :: struct {
-	name: string,
-	type: string,
-}
-query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(visitor: ^ast.Visitor, v: ^ast.Value_Decl, proc_type: ^ast.Proc_Type) -> ^ast.Visitor {
-	visit_input := cast(^Visit_Input)visitor.data;
-	if visit_input.name == v.names[0].derived_expr.(^ast.Ident).name {
-		if len(proc_type.results.list) != 1 {
-			parser.default_error_handler(
-				proc_type.pos,
-				"Multiple return types not supported, use struct",
-			);
-		} else {
-			visit_input.type = proc_type.results.list[0].type.derived_expr.(^ast.Ident).name;
-		}
-		return nil;
+query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(proc_type: ^ast.Proc_Type) -> string {
+	if len(proc_type.results.list) != 1 {
+		parser.default_error_handler(
+			proc_type.pos,
+			"Multiple return types not supported, use struct",
+		);
+		return "";
 	}
-	return visitor;
+
+	selector, is_selector := proc_type.results.list[0].type.derived_expr.(^ast.Selector_Expr);
+	if is_selector {
+		return selector.field.name;
+	}
+	ident, is_ident := proc_type.results.list[0].type.derived_expr.(^ast.Ident);
+	if is_ident {
+		return ident.name;
+	}
+
+	return "";
 }
 
-query_type_from_value_decl_visit_proc :: proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
-	// check for Value_Decl declaring/defining functions
-	#partial switch v in node.derived {
-		case ^ast.Value_Decl:
-			#partial switch vv in v.type.derived_expr {
-				case ^ast.Proc_Lit:
-					return query_type_from_value_decl_grab_proc_ret_type(visitor, v, vv.type);
-				case ^ast.Helper_Type:
-					proc_type, is_proc_type := vv.type.derived_expr.(^ast.Proc_Type);
-					if is_proc_type {
-						return query_type_from_value_decl_grab_proc_ret_type(visitor, v, proc_type);
-					}
-				case ^ast.Proc_Type:
-					return query_type_from_value_decl_grab_proc_ret_type(visitor, v, vv);
-			}
-		case: return visitor;
-	}
-	unreachable();
-}
-
-query_type_from_value_decl :: #force_inline proc(p: ^parser.Parser, val: ^ast.Value_Decl) -> string {
+query_type_from_value_decl :: #force_inline proc(compiler: ^Compiler, val: ^ast.Value_Decl) -> string {
 	if len(val.values) <= 0 do return "";
 	#partial switch v in val.values[0].derived_expr {
 		case ^ast.Call_Expr:
 			name := v.expr.derived_expr.(^ast.Ident).name;
-			visit_input := Visit_Input {
-				name, ""
+			_proc, ok := compiler.proc_table[name];
+			if ok {
+				return query_type_from_value_decl_grab_proc_ret_type(_proc.lit.type);
 			}
-			visitor := ast.Visitor {
-				query_type_from_value_decl_visit_proc,
-				&visit_input,
-			};
-			ast.walk(&visitor, &p.file.decls[0].stmt_base);
-			return visit_input.type;
+			return "";
+		case ^ast.Basic_Lit:
+			#partial switch v.tok.kind {
+				case .Ident:   return v.tok.text;
+				case .Integer: return "int";
+				case .Float:   return "float";
+				case .Imag:    return ""; // unsupported
+				case .Rune:    return "char";
+				case .String:  return "const char*";
+			}
 		case:
 			parser.default_error_handler(
 				val.pos,
@@ -588,7 +627,7 @@ generate_opencl_type_map :: proc() -> map[string]string {
 	return types;
 }
 
-to_opencl_lang_selector :: #force_inline proc(p: ^parser.Parser, builder: ^strings.Builder, selector: ^ast.Selector_Expr) -> bool {
+to_opencl_lang_selector :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, selector: ^ast.Selector_Expr) -> bool {
 	// NOTE(GowardSilk): For a type, selector expr means having a specific package being accessed
 	name := selector.expr.derived_expr.(^ast.Ident).name;
 	if name == "cl" {
@@ -598,23 +637,23 @@ to_opencl_lang_selector :: #force_inline proc(p: ^parser.Parser, builder: ^strin
 	} else if name == "c" {
 		strings.write_string(builder, selector.field.name)
 	} else {
-		to_opencl_lang(p, builder, &selector.expr.expr_base) or_return;
+		to_opencl_lang(compiler, builder, &selector.expr.expr_base) or_return;
 		strings.write_string(builder, selector.op.text);
 		strings.write_string(builder, selector.field.name);
 	}
 	return true;
 }
 
-to_opencl_lang_ptr :: #force_inline proc(p: ^parser.Parser, builder: ^strings.Builder, ptr: ^ast.Pointer_Type) -> bool {
-	return to_opencl_lang_ptr_base(p, builder, ptr.elem);
+to_opencl_lang_ptr :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, ptr: ^ast.Pointer_Type) -> bool {
+	return to_opencl_lang_ptr_base(compiler, builder, ptr.elem);
 }
-to_opencl_lang_multi_ptr :: #force_inline proc(p: ^parser.Parser, builder: ^strings.Builder, ptr: ^ast.Multi_Pointer_Type) -> bool {
-	return to_opencl_lang_ptr_base(p, builder, ptr.elem);
+to_opencl_lang_multi_ptr :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, ptr: ^ast.Multi_Pointer_Type) -> bool {
+	return to_opencl_lang_ptr_base(compiler, builder, ptr.elem);
 }
-to_opencl_lang_ptr_base :: #force_inline proc(p: ^parser.Parser, builder: ^strings.Builder, base: ^ast.Expr) -> bool {
+to_opencl_lang_ptr_base :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, base: ^ast.Expr) -> bool {
 	#partial switch v in base.derived_expr {
 		case ^ast.Selector_Expr:
-			to_opencl_lang_selector(p, builder, v) or_return;
+			to_opencl_lang_selector(compiler, builder, v) or_return;
 			strings.write_byte(builder, '*');
 		case:
 			return err_return(&base.expr_base, "Unsupported: %v", v);
