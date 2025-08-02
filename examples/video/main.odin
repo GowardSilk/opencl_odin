@@ -113,6 +113,12 @@ main :: proc() {
     app_context: App_Context;
     app_context.selected_image = "video/resources/images/lena_color_512.png";
 
+    engine, _ := load_video("white.jpg");
+    {
+        request_frame(engine);
+    }
+    unload_video(engine);
+
     platform, device, backend := try_and_pick_backend();
 
     ok: runtime.Allocator_Error;

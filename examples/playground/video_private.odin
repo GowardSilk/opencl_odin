@@ -462,20 +462,30 @@ fast_idct :: proc(block: ^[64]f64) {
         b6 := b1 - b3;
         b7 := b0 - b2;
 
-        o[0*8] = (a4 + b4);
-        o[1*8] = (a5 + b5);
-        o[2*8] = (a6 + b6);
-        o[3*8] = (a7 + b7);
-        o[4*8] = (a7 - b7);
-        o[5*8] = (a6 - b6);
-        o[6*8] = (a5 - b5);
-        o[7*8] = (a4 - b4);
+        o[0*8] = (a4 + b4) / 8;
+        o[1*8] = (a5 + b5) / 8;
+        o[2*8] = (a6 + b6) / 8;
+        o[3*8] = (a7 + b7) / 8;
+        o[4*8] = (a7 - b7) / 8;
+        o[5*8] = (a6 - b6) / 8;
+        o[6*8] = (a5 - b5) / 8;
+        o[7*8] = (a4 - b4) / 8;
     }
 }
 
-construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []i32, rle: [3]RLE_Data) -> [64 * 4]byte {
-    yuv_pixels: [3][64]i32;
+Construct_Pixel_Bytes_Context :: struct($N: int) {
+    jpeg:       ^JPEG,
+    rle:        [3]RLE_Data,
+    icdt_block: [8 * N]f64,
+    yuv_pixels: [3][8 * N]i32,
+    dc_diff:    [3]i32,
+    out:        [8 * N * 4]byte,
+}
 
+Construct_Pixel_Bytes_Context_444 :: Construct_Pixel_Bytes_Context(8);
+Construct_Pixel_Bytes_Context_420 :: Construct_Pixel_Bytes_Context(16);
+
+construct_pixel_bytes :: proc(using ctx: ^Construct_Pixel_Bytes_Context($N)) {
     zzindex_to_matindex :: #force_inline proc(zzindex: int) -> [2]int {
         #no_bounds_check return ZIGZAG_ORDER[zzindex];
     }
@@ -500,88 +510,55 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []i32, rle: [3]RLE_Data) -> 
         zzorder[0] = dc_diff[rle_id];
 
         find_qt :: #force_inline proc(jpeg: ^JPEG, id: int) -> byte {
-            return jpeg^.sof0.components[id].quant_table_id;
+            #no_bounds_check return jpeg^.sof0.components[id].quant_table_id;
         }
         qt_id := find_qt(jpeg, rle_id);
         qt := jpeg.dqts[qt_id];
 
-        for i in 0..<64 {
+        for i := 0; i < 64; i += 1 {
             yuv_pos := zzindex_to_matindex(i);
-            yuv_pixels[rle_id][yuv_pos.y * 8 + yuv_pos.x] = zzorder[i] * cast(i32)qt.table_data[i];
+            yuv_pixels[rle_id][yuv_pos.y * N + yuv_pos.x] = zzorder[i] * cast(i32)qt.table_data[i];
+            when N == 16 {
+                yuv_pixels[rle_id][yuv_pos.y * N + yuv_pos.x + 1] = zzorder[i] * cast(i32)qt.table_data[i];
+                yuv_pixels[rle_id][(yuv_pos.y + 1) * N + yuv_pos.x] = zzorder[i] * cast(i32)qt.table_data[i];
+                yuv_pixels[rle_id][(yuv_pos.y + 1) * N + yuv_pos.x + 1] = zzorder[i] * cast(i32)qt.table_data[i];
+                i += 1;
+            }
         }
     }
 
     // Fast ICDT + Level shift
 
-    //icdt_block: [64]f64;
-    //for i in 0..<3 {
-    //    for j in 0..<64 do icdt_block[j] = cast(f64)yuv_pixels[i][j];
-    //
-    //    fast_idct(&icdt_block);
-    //
-    //    for j in 0..<64 do yuv_pixels[i][j] = cast(int)math.round(icdt_block[j]) + 128;
-    //}
+    for &yuv_channel in yuv_pixels {
+        for j in 0..<len(yuv_channel) do icdt_block[j] = cast(f64)yuv_channel[j];
 
-    // ICDT coeffs calculation
-    
-    icdt: [3][64]f64;
-    for i in 0..<3 {
-        for y in 0..<8 {
-            for x in 0..<8 {
-                sum: f64;
-                for u in 0..<8 {
-                    for v in 0..<8 {
-                        Cu := u == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-                        Cv := v == 0 ? 1.0 / math.sqrt_f64(2.0) : 1.0;
-    
-                        y_f64 := cast(f64)y;
-                        x_f64 := cast(f64)x;
-                        sum += Cu * Cv * cast(f64)yuv_pixels[i][u * 8 + v] * math.cos_f64((2 * x_f64 + 1) * cast(f64)u * math.PI / 16.0) *
-                                        math.cos_f64((2 * y_f64 + 1) * cast(f64)v * math.PI / 16.0);
-                    }
-                }
-    
-                icdt[i][y * 8 + x] = 0.25 * sum;
-            }
-        }
-    }
-    
-    // Level shift
-    
-    for y in 0..<8 {
-        for x in 0..<8 {
-            yuv_pixels[0][y * 8 + x] = cast(i32)math.round(icdt[0][y * 8 + x]) + 128;
-        }
-    }
+        // what about this ??
+        fast_idct(&icdt_block);
 
-    for i in 1..=2 {
-        for y in 0..<8 {
-            for x in 0..<8 {
-                yuv_pixels[i][y * 8 + x] = cast(i32)math.round(icdt[i][y * 8 + x]);
-            }
-        }
+        for j in 0..<64 do yuv_channel[j] = cast(i32)math.round(icdt_block[j]) + 128;
     }
 
     // YCbCr to RGB(A)
 
-    out: [64 * 4]byte;
+    FIXED_BITS      :: 8;
 
-    for y in 0..<8 {
-        y_row := simd.from_slice(simd.i32x8, yuv_pixels[0][y * 8 : (y + 1) * 8]);
+    FIXED_R_COEFF   :: 359; // 1.402 * 256
+    FIXED_G1_COEFF  :: 88;  // 0.344136 * 256
+    FIXED_G2_COEFF  :: 183; // 0.714136 * 256
+    FIXED_B_COEFF   :: 453; // 1.772 * 256
 
-        cb_row := simd.from_slice(simd.i32x8, yuv_pixels[1][y * 8 : (y + 1) * 8]);
-        //cb_row -= 128;
-
-        cr_row := simd.from_slice(simd.i32x8, yuv_pixels[2][y * 8 : (y + 1) * 8]);
-        //cr_row -= 128;
-
-        FIXED_BITS      :: 8;
+    when N == 8  {
+        T :: typeid_of(simd.i32x8);
         FIXED_BIT_LANE: simd.u32x8: FIXED_BITS;
+    } else when N == 16 {
+        T :: typeid_of(simd.i32x16);
+        FIXED_BIT_LANE: simd.u32x16: FIXED_BITS;
+    } else do #assert(false, "Invalid MCU size!");
 
-        FIXED_R_COEFF   :: 359; // 1.402 * 256
-        FIXED_G1_COEFF  :: 88;  // 0.344136 * 256
-        FIXED_G2_COEFF  :: 183; // 0.714136 * 256
-        FIXED_B_COEFF   :: 453; // 1.772 * 256
+    for y in 0..<N {
+        y_row  := simd.from_slice(T, yuv_pixels[0][y * N : (y + 1) * N]);
+        cb_row := simd.from_slice(T, yuv_pixels[1][y * N : (y + 1) * N]) - 128;
+        cr_row := simd.from_slice(T, yuv_pixels[2][y * N : (y + 1) * N]) - 128;
 
         r_row := simd.clamp(y_row + simd.shr(FIXED_R_COEFF * cr_row, FIXED_BIT_LANE), 0, 255);
         g_row := simd.clamp(y_row - simd.shr(FIXED_G1_COEFF * cb_row + FIXED_G2_COEFF * cr_row, FIXED_BIT_LANE), 0, 255);
@@ -591,15 +568,13 @@ construct_pixel_bytes :: proc(jpeg: ^JPEG, dc_diff: []i32, rle: [3]RLE_Data) -> 
         g_arr := simd.to_array(g_row);
         b_arr := simd.to_array(b_row);
 
-        for x in 0..<8 {
-            out[y * 8 * 4 + x * 4 + 0] = cast(byte)r_arr[x];
-            out[y * 8 * 4 + x * 4 + 1] = cast(byte)g_arr[x];
-            out[y * 8 * 4 + x * 4 + 2] = cast(byte)b_arr[x];
-            out[y * 8 * 4 + x * 4 + 3] = 255;
+        for x in 0..<N {
+            out[y * N * 4 + x * 4 + 0] = cast(byte)r_arr[x];
+            out[y * N * 4 + x * 4 + 1] = cast(byte)g_arr[x];
+            out[y * N * 4 + x * 4 + 2] = cast(byte)b_arr[x];
+            out[y * N * 4 + x * 4 + 3] = 255;
         }
     }
-
-    return out;
 }
 
 construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
@@ -640,14 +615,6 @@ construct_rle :: proc(jpeg: ^JPEG, bs: ^Bit_Stream, out_rle: ^[3]RLE_Data) {
         fast_symbol, exists := table.fast[fast_code];
         if exists {
             for _ in 0..<fast_symbol.length do bitstream_incr(bs);
-            //bs.offset += fast_symbol.length;
-            //if bs.offset >= 8 {
-            //    #no_bounds_check if bs.buffer[bs.index] == 0xFF && bs.buffer[bs.index + 1] == 0x00 {
-            //        bs.index += 2;
-            //    } else do bs.index += 1;
-            //    bs.offset %= 8;
-            //}
-
             return fast_symbol.symbol, false;
         }
 

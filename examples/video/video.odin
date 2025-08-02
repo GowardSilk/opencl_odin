@@ -520,7 +520,8 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
     }
 
     // ignore 3 bytes
-    _, e := io.seek(stream, 3, .Current);
+    begin_pos, e := io.seek(stream, 3, .Current);
+    fmt.eprintfln("Begin pos: %v", begin_pos);
     assert(e == .None);
 
     // read SOS compressed data
@@ -539,7 +540,13 @@ read_sos :: #force_inline proc(jpeg: ^JPEG, using engine: ^Engine) {
         append(&jpeg.compressed_data, marker.x, marker.y);
     }
 
-    _, e = io.seek(stream, -2, .Current);
+    fmt.eprintfln("Lenof file: %v", io.size(stream));
+
+    fmt.eprintfln("Lenof compressed_data: %v", len(jpeg.compressed_data));
+
+    end_pos: i64;
+    end_pos, e = io.seek(stream, -2, .Current);
+    fmt.eprintfln("End pos: %v", end_pos);
     assert(e == .None);
     when ODIN_DEBUG do fmt.eprintln("\tCompressed data loaded!");
 }
@@ -903,7 +910,6 @@ construct_rle :: proc(jpeg: ^JPEG, allocator: mem.Allocator) -> [3]RLE_Data {
         // properly their purpose
         dc_ht_id, ac_ht_id := find_ht(jpeg, jpeg.sof0.components[rle_id].id);
         dc_ht  := jpeg.dhts[dc_ht_id];
-        fmt.eprintfln("id: %v/0b%b", dc_ht_id, dc_ht_id);
         for {
             val, eob := query_in_dht_graph(dc_ht, bs.curr, bs.len);
             if eob {
@@ -913,9 +919,15 @@ construct_rle :: proc(jpeg: ^JPEG, allocator: mem.Allocator) -> [3]RLE_Data {
                 nof_zeroes := cast(int)(val >> 4);
                 category := cast(uint)(val & 0x0F);
 
+                //Bit_Stream{buffer = [253, 83, 160, 2, 128, 10, 0, 40, 3, 255, 217, 255], index = 0, offset = 7, len = 7, curr = 126}
+                //Bit_Stream{buffer = [253, 83, 160, 2, 128, 10, 0, 40, 3, 255, 217, 255], index = 2, offset = 0, len = 0, curr = 339}
+                fmt.eprintfln("%v", bs);
                 bs.curr = 0;
                 for _ in 0..<category do _ = bitstream_next(&bs);
+                fmt.eprintfln("%v", bs);
                 append(&curr_rle.data, nof_zeroes, cast(int)bs.curr);
+                fmt.eprintfln("Nofzeroes: %v; Curr: %v", nof_zeroes, bs.curr);
+                fmt.eprintfln("%v", bs);
                 break;
             }
 
@@ -959,6 +971,7 @@ construct_rle :: proc(jpeg: ^JPEG, allocator: mem.Allocator) -> [3]RLE_Data {
         k = bs.index * 8 + cast(uint)bs.offset;
     }
 
+    fmt.eprintfln("RLE: %v", rle_s);
     return rle_s;
 }
 
@@ -981,7 +994,6 @@ decompress :: proc(engine: ^Engine, jpeg: ^JPEG) {
     for y := 0; y < height - 8; y += 8 {
         dst_buffer := &dst.buffer[y * engine.meta.width];
         for x := 0; x < width - 8; x += 8 {
-            fmt.eprintfln("x: %v", x);
             rle   := construct_rle(jpeg, engine.allocator);
             defer deconstruct_rle(rle);
 
