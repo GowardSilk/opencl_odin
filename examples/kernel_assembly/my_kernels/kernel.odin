@@ -20,6 +20,11 @@ my_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ 
 	output[id] = input[id] * scale;
 }
 
+@(kernel)
+my_kernel :: proc(posersa: [2]int) {
+      unimplemented();
+}
+
 // Code replicated from https://github.com/HandsOnOpenCL/Exercises-Solutions/blob/master/Solutions/ExerciseA/pi_vocl.cl
 
 @(kernel)

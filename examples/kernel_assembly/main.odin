@@ -24,23 +24,34 @@ Compiler :: struct {
 	 */
 	proc_table:	map[string]Proc_Desc,
 	kernels:	map[string]cl.Kernel, /**< compiled kernels */
+	types:		map[string]string,
 }
 
 init_compiler :: proc(allocator := context.allocator) -> Compiler {
-	k  := mem.make(map[string]cl.Kernel, allocator);
-	ki := mem.make(map[string]Proc_Desc, allocator);
-	return Compiler { ki, k };
+	p := mem.make(map[string]Proc_Desc, allocator);
+	k := mem.make(map[string]cl.Kernel, allocator);
+	t := generate_opencl_type_map(allocator);
+	return Compiler { p, k, t };
 }
 
 delete_compiler :: proc(using compiler: ^Compiler) {
+	// NOTE(GowardSilk): the contents of proc_table should be freed successfully outside this function, from the appropriate allocator
 	if proc_table != nil do mem.delete(proc_table);
 	if kernels != nil {
 		for _, kernel in kernels do cl.ReleaseKernel(kernel);
 		mem.delete(kernels);
 	}
+	if types != nil {
+		for k, v in types {
+			delete_key(&types, k);
+			mem.delete(k);
+			mem.delete(v);
+		}
+		mem.delete(types);
+	}
 }
 
-OpenCL_Qualifier :: distinct string; 
+OpenCL_Qualifier :: distinct string;
 OpenCL_Qualifier_Invalid :: "";
 OpenCL_Qualifier_Const 	 :: "__const";
 OpenCL_Qualifier_Global	 :: "__global";
@@ -78,6 +89,7 @@ is_proc_lit :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_Desc
 		if len(val_decl.values) > 0 {
 			proc_lit, is_proc_lit := val_decl.values[0].derived_expr.(^ast.Proc_Lit);
 			if is_proc_lit {
+	fmt.eprintfln("Kernel builtin: %v", val_decl.names[0].derived_expr.(^ast.Ident).name);
 				proc_desc^ = Proc_Desc {
 					val_decl.attributes[:],
 					proc_lit,
@@ -232,7 +244,98 @@ is_valid_proc :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_De
 	return true; // .Default proc
 }
 
+DEFAULT_BLOCK_SIZE :: 65_536; // 64KiB
+Compiler_Allocator_Block :: struct {
+	data: []byte,
+	used: int,
+}
+
+Compiler_Allocator :: struct {
+	blocks: [dynamic]Compiler_Allocator_Block,
+	last:   ^Compiler_Allocator_Block,
+	backing: mem.Allocator,
+}
+
+compiler_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> (m: []u8, err: mem.Allocator_Error) {
+	ca := cast(^Compiler_Allocator)allocator_data;
+
+	aligned :: #force_inline proc(x, alignment: int) -> int {
+		return (x + (alignment - 1)) & ~(alignment - 1);
+	}
+
+	switch mode {
+		case .Alloc:
+			when ODIN_DEBUG do assert(ca.last != nil);
+			byte_size := aligned(size, alignment);
+			// pad the pos of the last element to the current alignment
+			// NOTE(GowardSilk): This is essential since we are not using multiple "buddies"
+			// each for the appropriate alignment values (I'm lazy)
+			data_used_addr := cast(int)cast(uintptr)&ca.last.data[ca.last.used];
+			ca.last.used += aligned(data_used_addr, alignment) - data_used_addr;
+			// check if the last block has enough space
+			if byte_size > len(ca.last.data) - ca.last.used {
+				block: Compiler_Allocator_Block;
+				block.data = mem.make([]byte, size * 100, ca.backing) or_return;
+				append(&ca.blocks, block);
+				ca.last = &ca.blocks[len(ca.blocks)-1];
+			}
+			m = ca.last.data[ca.last.used:ca.last.used + byte_size];
+			ca.last.used += byte_size;
+			return m, .None;
+		case .Free:
+			return nil, .None;
+		case .Alloc_Non_Zeroed:
+			return compiler_allocator_proc(allocator_data, .Alloc, size, alignment, old_memory, old_size, location);
+		case .Free_All:
+			for block in ca.blocks {
+				mem.delete_slice(block.data, ca.backing);
+			}
+			mem.delete(ca.blocks);
+			return nil, .None;
+		case .Query_Features:
+			set := cast(^mem.Allocator_Mode_Set)old_memory;
+			if set != nil {
+				set^ = {.Alloc, .Free_All, .Query_Features};
+			}
+			return nil, nil;
+
+		case .Query_Info:
+			return nil, .Mode_Not_Implemented;
+		case .Resize:
+			return nil, .Mode_Not_Implemented;
+		case .Resize_Non_Zeroed:
+			return nil, .Mode_Not_Implemented;
+	}
+	unreachable();
+}
+
+compiler_allocator_init :: proc(allocator: ^Compiler_Allocator, backing: mem.Allocator) -> mem.Allocator_Error {
+	allocator.backing = backing;
+
+	block: Compiler_Allocator_Block;
+	block.data = mem.make([]byte, DEFAULT_BLOCK_SIZE, backing) or_return;
+	append(&allocator.blocks, block);
+	allocator.last = &allocator.blocks[0];
+
+	return nil;
+}
+
+compiler_allocator_destroy :: #force_inline proc(allocator: ^Compiler_Allocator) {
+	compiler_allocator_proc(allocator, .Free_All, 0, 0, nil, 0);
+}
+
+compiler_allocator :: proc(allocator: ^Compiler_Allocator) -> mem.Allocator {
+	return mem.Allocator {
+		compiler_allocator_proc, allocator,
+	};
+}
+
 compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, package_path := "kernel_assembly/my_kernels") {
+	ca: Compiler_Allocator;
+	assert(compiler_allocator_init(&ca, context.allocator) == .None);
+	context.allocator = compiler_allocator(&ca);
+	defer compiler_allocator_destroy(&ca);
+
 	pckg, ok := parser.parse_package_from_path(package_path);
 	assert(ok);
 
@@ -246,7 +349,6 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 	
 	kernel_string_builder: strings.Builder;
 	assert(strings.builder_init(&kernel_string_builder) != nil);
-	defer strings.builder_destroy(&kernel_string_builder);
 
 	decl_loop: for _, proc_desc in compiler.proc_table do if proc_desc.kind == .Kernel {
 		defer strings.builder_reset(&kernel_string_builder);
@@ -267,14 +369,12 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 			}
 		}
 		parameters = strings.clone(strings.to_string(kernel_string_builder));
-		defer delete(parameters);
 		strings.builder_reset(&kernel_string_builder);
 
 		// assemble kernel body
 		body_block := lit.body.derived.(^ast.Block_Stmt);
 		if !to_opencl_lang(compiler, &kernel_string_builder, &body_block.stmt_base) do continue decl_loop;
 		body = strings.clone(strings.to_string(kernel_string_builder));
-		defer delete(body);
 		strings.builder_reset(&kernel_string_builder);
 
 		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) %s", name, parameters, body));
@@ -411,8 +511,29 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 		case ^ast.Multi_Pointer_Type:
 			return to_opencl_lang_multi_ptr(compiler, builder, v);
 		case ^ast.Array_Type:
-			fmt.sbprintfln(builder, "type[size]");
-			return err_return(&v.expr_base, "TODO arr: Not yet implemented");
+			ident_type, is_ident_type := v.elem.derived_expr.(^ast.Ident);
+			if !is_ident_type do return false;
+			if v.len != nil {
+				lit_len, is_lit_len := v.len.derived_expr.(^ast.Basic_Lit);
+				if !is_lit_len {
+					parser.default_warning_handler(v.pos, "Expected literal with appropriate array len! (2, 4, 8, 16)");
+					return false;
+				}
+				b: strings.Builder;
+				strings.builder_init(&b, context.temp_allocator);
+				fmt.sbprintf(&b, "[%s]%s", lit_len.tok.text, ident_type.name);
+				type, is_type := compiler.types[strings.to_string(b)];
+				if !is_type {
+					parser.default_warning_handler(v.pos, "Could not find appropriate OpenCL vector type.", strings.to_string(b));
+					return false;
+				}
+				strings.write_string(builder, type);
+				strings.builder_destroy(&b);
+				return true;
+			}
+
+			parser.default_warning_handler(v.pos, "Using slice instead of array, use multi pointer instead or specify the valid range!");
+			return false;
 		case ^ast.Struct_Type:
 			for field in v.fields.list {
 				to_opencl_lang(compiler, builder, &field.node) or_return;
@@ -553,7 +674,7 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 	return true;
 }
 
-query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(proc_type: ^ast.Proc_Type) -> string {
+query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(types: map[string]string, proc_type: ^ast.Proc_Type) -> string {
 	if len(proc_type.results.list) != 1 {
 		parser.default_error_handler(
 			proc_type.pos,
@@ -568,7 +689,7 @@ query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(proc_type: ^
 	}
 	ident, is_ident := proc_type.results.list[0].type.derived_expr.(^ast.Ident);
 	if is_ident {
-		return ident.name;
+		return types[ident.name];
 	}
 
 	return "";
@@ -581,7 +702,7 @@ query_type_from_value_decl :: #force_inline proc(compiler: ^Compiler, val: ^ast.
 			name := v.expr.derived_expr.(^ast.Ident).name;
 			_proc, ok := compiler.proc_table[name];
 			if ok {
-				return query_type_from_value_decl_grab_proc_ret_type(_proc.lit.type);
+				return query_type_from_value_decl_grab_proc_ret_type(compiler.types, _proc.lit.type);
 			}
 			return "";
 		case ^ast.Basic_Lit:
@@ -615,42 +736,78 @@ query_type_from_value_decl :: #force_inline proc(compiler: ^Compiler, val: ^ast.
 Odin_Opencl_Type_Mapping :: struct {
 	odin, opencl: string
 }
-OPENCL_BASE_TYPES :: [?]Odin_Opencl_Type_Mapping {
-	{ "i8"    , "char", },
-	{ "u8"    , "uchar", },
-	{ "byte"  , "uchar", },
-	{ "i16"   , "short", },
-	{ "u16"   , "ushort", },
-	{ "i32"   , "int", },
-	{ "u32"   , "uint", },
-	{ "i64"   , "long", },
-	{ "u64"   , "ulong", },
-	{ "f32"   , "float", },
-	{ "f64"   , "double", },
-	{ "f16"   , "half", },
-	{ "bool"  , "bool", },
-	{ "uintptr" , "size_t", },
-	{ "intptr"  , "ptrdiff_t", },
-};
+when size_of(int) == 8 {
+	OPENCL_BASE_TYPES :: [?]Odin_Opencl_Type_Mapping {
+		{ "int"    , "long", },
+		{ "uint"    , "ulong", },
 
-generate_opencl_type_map :: proc() -> map[string]string {
-	vector_sizes :: [?]int { 2, 4, 8 };
+		{ "i8"    , "char", },
+		{ "u8"    , "uchar", },
+		{ "byte"  , "uchar", },
+		{ "i16"   , "short", },
+		{ "u16"   , "ushort", },
+		{ "i32"   , "int", },
+		{ "u32"   , "uint", },
+		{ "i64"   , "long", },
+		{ "u64"   , "ulong", },
+		{ "f32"   , "float", },
+		{ "f64"   , "double", },
+		{ "f16"   , "half", },
+		{ "bool"  , "bool", },
+		{ "uintptr" , "size_t", },
+		{ "intptr"  , "ptrdiff_t", },
+	};
+} else when size_of(int) == 4 {
+	OPENCL_BASE_TYPES :: [?]Odin_Opencl_Type_Mapping {
+		{ "int"    , "int", },
+		{ "uint"    , "uint", },
+
+		{ "i8"    , "char", },
+		{ "u8"    , "uchar", },
+		{ "byte"  , "uchar", },
+		{ "i16"   , "short", },
+		{ "u16"   , "ushort", },
+		{ "i32"   , "int", },
+		{ "u32"   , "uint", },
+		{ "i64"   , "long", },
+		{ "u64"   , "ulong", },
+		{ "f32"   , "float", },
+		{ "f64"   , "double", },
+		{ "f16"   , "half", },
+		{ "bool"  , "bool", },
+		{ "uintptr" , "size_t", },
+		{ "intptr"  , "ptrdiff_t", },
+	};
+}
+
+generate_opencl_type_map :: proc(allocator: mem.Allocator) -> map[string]string {
+	vector_sizes :: [?]int { 2, 3, 4, 8, 16 };
 
 	builder: strings.Builder;
-	strings.builder_init(&builder);
+	strings.builder_init(&builder, allocator);
 	defer strings.builder_destroy(&builder);
 
-	types := make(map[string]string);
+	types := make(map[string]string, allocator);
 
-	for base_odin_type, cl_base in OPENCL_BASE_TYPES {
+	for type in OPENCL_BASE_TYPES {
+		base_odin_type := type.odin;
+		cl_base := type.opencl;
+
+		// copy of basic types
+		map_insert(
+			&types,
+			strings.clone(base_odin_type, allocator),
+			strings.clone(cl_base, allocator)
+		);
+
+		// vector types
 		for size in vector_sizes {
-			//key := "[${size}]${base_odin_type}"
-			//val := "${cl_base}${size}"
 			fmt.sbprintf(&builder, "[%d]%s", size, base_odin_type);
-			val := map_insert(&types, strings.to_string(builder), "");
+			val := map_insert(&types, strings.clone(strings.to_string(builder), allocator), "");
 			strings.builder_reset(&builder);
-			fmt.sbprintf(&builder, "%d%s", cl_base, size);
-			val^ = strings.to_string(builder);
+
+			fmt.sbprintf(&builder, "%s%d", cl_base, size);
+			val^ = strings.clone(strings.to_string(builder), allocator);
 			strings.builder_reset(&builder);
 		}
 	}
@@ -703,8 +860,26 @@ main :: proc() {
 	cl_context := init_cl_context();
 	defer delete_cl_context(&cl_context);
 
-	compiler := init_compiler();
-	defer delete_compiler(&compiler);
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator;
+		mem.tracking_allocator_init(&track, context.allocator);
+		allocator := context.allocator;
+		context.allocator = mem.tracking_allocator(&track);
+	}
 
+	compiler := init_compiler();
 	compile_kernels(&compiler, &cl_context);
+	delete_compiler(&compiler);
+
+	when ODIN_DEBUG {
+		if len(track.allocation_map) <= 0 do fmt.println("\x1b[32mNo leaks\x1b[0m");
+		else {
+			for _, leak in track.allocation_map {
+				fmt.printf("%v leaked %m\n", leak.location, leak.size)
+			}
+		}
+
+		mem.tracking_allocator_destroy(&track);
+		context.allocator = allocator;
+	}
 }
