@@ -20,11 +20,6 @@ my_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ 
 	output[id] = input[id] * scale;
 }
 
-@(kernel)
-my_kernel :: proc(posersa: [2]int) {
-      unimplemented();
-}
-
 // Code replicated from https://github.com/HandsOnOpenCL/Exercises-Solutions/blob/master/Solutions/ExerciseA/pi_vocl.cl
 
 @(kernel)
@@ -38,7 +33,7 @@ pi :: proc(
    num_wrk_items  := get_local_size(0);
    local_id       := get_local_id(0);
    group_id       := get_group_id(0);
-   x, sum, accum  := 0.0;
+   x, sum, accum  := 0.0, 0.0, 0.0;
    istart, iend: int;
    istart = (group_id * num_wrk_items + local_id) * niters;
    iend   = istart + niters;

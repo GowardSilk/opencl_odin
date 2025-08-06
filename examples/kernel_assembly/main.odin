@@ -89,7 +89,6 @@ is_proc_lit :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_Desc
 		if len(val_decl.values) > 0 {
 			proc_lit, is_proc_lit := val_decl.values[0].derived_expr.(^ast.Proc_Lit);
 			if is_proc_lit {
-	fmt.eprintfln("Kernel builtin: %v", val_decl.names[0].derived_expr.(^ast.Ident).name);
 				proc_desc^ = Proc_Desc {
 					val_decl.attributes[:],
 					proc_lit,
@@ -262,22 +261,32 @@ compiler_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode
 	aligned :: #force_inline proc(x, alignment: int) -> int {
 		return (x + (alignment - 1)) & ~(alignment - 1);
 	}
+	alloc_new_block :: #force_inline proc(ca: ^Compiler_Allocator, size: int) -> mem.Allocator_Error {
+		block: Compiler_Allocator_Block;
+		block.data = mem.make([]byte, size * 100, ca.backing) or_return;
+		append(&ca.blocks, block);
+		ca.last = &ca.blocks[len(ca.blocks)-1];
+		return .None;
+	}
 
 	switch mode {
 		case .Alloc:
 			when ODIN_DEBUG do assert(ca.last != nil);
-			byte_size := aligned(size, alignment);
-			// pad the pos of the last element to the current alignment
-			// NOTE(GowardSilk): This is essential since we are not using multiple "buddies"
-			// each for the appropriate alignment values (I'm lazy)
-			data_used_addr := cast(int)cast(uintptr)&ca.last.data[ca.last.used];
-			ca.last.used += aligned(data_used_addr, alignment) - data_used_addr;
-			// check if the last block has enough space
-			if byte_size > len(ca.last.data) - ca.last.used {
-				block: Compiler_Allocator_Block;
-				block.data = mem.make([]byte, size * 100, ca.backing) or_return;
-				append(&ca.blocks, block);
-				ca.last = &ca.blocks[len(ca.blocks)-1];
+			byte_size: int;
+			if ca.last.used >= len(ca.last.data) {
+				alloc_new_block(ca, size) or_return;
+			} else {
+				// pad the pos of the last element to the current alignment
+				// NOTE(GowardSilk): This is essential since we are not using multiple "buddies"
+				// each for the appropriate alignment values (I'm lazy)
+				data_used_addr := cast(int)cast(uintptr)&ca.last.data[ca.last.used];
+				ca.last.used += aligned(data_used_addr, alignment) - data_used_addr;
+
+				byte_size = aligned(size, alignment);
+				// check if allocation does not exceed current buffer size
+				if ca.last.used + byte_size >= len(ca.last.data) {
+					alloc_new_block(ca, size) or_return;
+				}
 			}
 			m = ca.last.data[ca.last.used:ca.last.used + byte_size];
 			ca.last.used += byte_size;
@@ -334,6 +343,7 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 	ca: Compiler_Allocator;
 	assert(compiler_allocator_init(&ca, context.allocator) == .None);
 	context.allocator = compiler_allocator(&ca);
+	// everything allocated from this function will be freed upon leave
 	defer compiler_allocator_destroy(&ca);
 
 	pckg, ok := parser.parse_package_from_path(package_path);
@@ -362,7 +372,14 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 			strings.write_string(&kernel_string_builder, cast(string)qual);
 			strings.write_byte(&kernel_string_builder, ' ');
 
-			if !to_opencl_lang(compiler, &kernel_string_builder, &param.node) do continue decl_loop;
+			_in: To_Opencl_Lang_In = {
+				compiler,
+				&kernel_string_builder,
+				param.node,
+				0,
+				true,
+			};
+			if !to_opencl_lang(&_in) do continue decl_loop;
 
 			if index < len(lit.type.params.list) - 1 {
 				strings.write_string(&kernel_string_builder, ", ");
@@ -373,7 +390,14 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 
 		// assemble kernel body
 		body_block := lit.body.derived.(^ast.Block_Stmt);
-		if !to_opencl_lang(compiler, &kernel_string_builder, &body_block.stmt_base) do continue decl_loop;
+		_in: To_Opencl_Lang_In = {
+			compiler,
+			&kernel_string_builder,
+			body_block.stmt_base,
+			0,
+			true,
+		};
+		if !to_opencl_lang(&_in) do continue decl_loop;
 		body = strings.clone(strings.to_string(kernel_string_builder));
 		strings.builder_reset(&kernel_string_builder);
 
@@ -383,15 +407,31 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 	return;
 }
 
-err_return :: #force_inline proc(node: ^ast.Node, msg: string, args: ..any) -> bool {
+err_return :: #force_inline proc(node: ast.Node, msg: string, args: ..any) -> bool {
 	parser.default_error_handler(node.pos, msg, ..args);
 	return false;
 }
 
-to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, node: ^ast.Node) -> bool {
-	if node == nil do return true;
+To_Opencl_Lang_In :: struct {
+	compiler: ^Compiler,	/**< pointer to a valid compiler instance (this is required only for occasional type searches) */
+	builder: ^strings.Builder, /**< pointer to a valid string concatenator */
+	node: ast.Node,		/**< active node (being translated) */
+	tab_offset: int,	/**< recursive depth (handled internally) */
+	full: bool,		/**< indicates that next statement is to be properly terminated (aka "full") */
+}
 
-	#partial switch v in node^.derived {
+update_active_node :: #force_inline proc(_in: ^To_Opencl_Lang_In, node: ast.Node) -> ^To_Opencl_Lang_In {
+	_in.node = node;
+	return _in;
+}
+
+/**
+ * @brief converts odin statement (`node') into open computing language
+ */
+to_opencl_lang :: proc(using _in: ^To_Opencl_Lang_In) -> bool {
+	if node.derived == nil do return true;
+
+	#partial switch v in node.derived {
 		case ^ast.Basic_Lit:
 			#partial switch v.tok.kind {
 				case .Imag:
@@ -405,19 +445,19 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 			fmt.sbprint(builder, v.name);
 		case ^ast.Unary_Expr:
 			fmt.sbprint(builder, v.op.text);
-			return to_opencl_lang(compiler, builder, &v.expr_base);
+			return to_opencl_lang(update_active_node(_in, v.expr_base));
 		case ^ast.Binary_Expr:
-			to_opencl_lang(compiler, builder, &v.left.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.left.expr_base)) or_return;
 			fmt.sbprintf(builder, " %s ", v.op.text);
-			return to_opencl_lang(compiler, builder, &v.right.expr_base);
+			return to_opencl_lang(update_active_node(_in, v.right.expr_base));
 		case ^ast.Paren_Expr:
 			strings.write_byte(builder, '(');
-			to_opencl_lang(compiler, builder, &v.expr.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.expr.expr_base)) or_return;
 			strings.write_byte(builder, ')');
 		case ^ast.Index_Expr:
-			to_opencl_lang(compiler, builder, &v.expr.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.expr.expr_base)) or_return;
 			strings.write_byte(builder, '[');
-			to_opencl_lang(compiler, builder, &v.index.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.index.expr_base)) or_return;
 			strings.write_byte(builder, ']');
 		case ^ast.Call_Expr:
 			selector, ok := v.expr.derived_expr.(^ast.Selector_Expr);
@@ -426,15 +466,23 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 			else do ident, _ = v.expr.derived_expr.(^ast.Ident);
 			strings.write_string(builder, ident.name);
 			strings.write_byte(builder, '(');
-			for arg in v.args do to_opencl_lang(compiler, builder, arg) or_return;
-			strings.write_string(builder, ");");
+
+			tmp := full;
+			for arg in v.args {
+				full = false;
+				to_opencl_lang(update_active_node(_in, arg.expr_base)) or_return;
+			}
+			full = tmp;
+
+			strings.write_byte(builder, ')');
+			if full do strings.write_string(builder, ";\n");
 		case ^ast.Deref_Expr:
 			strings.write_byte(builder, '*');
-			return to_opencl_lang(compiler, builder, &v.expr.expr_base);
+			return to_opencl_lang(update_active_node(_in, v.expr.expr_base));
 		case ^ast.Slice_Expr:
 			// slice is "just" a pointer
 			strings.write_byte(builder, '[');
-			to_opencl_lang(compiler, builder, &v.low.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.low.expr_base)) or_return;
 			if v.high != nil {
 				parser.default_warning_handler(
 					v.high.pos,
@@ -444,72 +492,86 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 		case ^ast.Type_Cast:
 			fmt.sbprintfln(builder, "(%s)", v.tok.text);
 		case ^ast.Ternary_If_Expr:
-			return err_return(&v.expr_base, "TODO ternary: Not yet implemented");
+			return err_return(v.expr_base, "TODO ternary: Not yet implemented");
 		case ^ast.Selector_Expr:
-			return to_opencl_lang_selector(compiler, builder, v);
+			return to_opencl_lang_selector(_in, v);
 		case ^ast.Tag_Expr:
-			return err_return(&v.expr_base, "TODO tag: Not yet implemented");
+			return err_return(v.expr_base, "TODO tag: Not yet implemented");
 
 		// Statements
 		case ^ast.Assign_Stmt:
-			to_opencl_lang(compiler, builder, &v.lhs[0].expr_base) or_return;
-			fmt.sbprintf(builder, " %s ", v.op.text);
-			to_opencl_lang(compiler, builder, &v.rhs[0].expr_base) or_return;
-			strings.write_string(builder, ";\n");
+			return to_opencl_lang_assign_stmt(_in, v);
 		case ^ast.Expr_Stmt:
-			return to_opencl_lang(compiler, builder, &v.expr.expr_base);
+			return to_opencl_lang(update_active_node(_in, v.expr.expr_base));
 		case ^ast.Block_Stmt:
 			strings.write_string(builder, "{\n");
+
+			tab_offset += 1;
 			for stmt in v.stmts {
-				strings.write_byte(builder, '\t');
-				to_opencl_lang(compiler, builder, &stmt.stmt_base) or_return;
+				for i in 0..<tab_offset do strings.write_byte(builder, '\t');
+				_in.full = true;
+				to_opencl_lang(update_active_node(_in, stmt.stmt_base)) or_return;
 			}
-			strings.write_string(builder, "}");
+			tab_offset -= 1;
+
+			if tab_offset > 0 do for i in 0..<tab_offset do strings.write_byte(builder, '\t');
+			strings.write_string(builder, "}\n");
 		case ^ast.If_Stmt:
 			strings.write_string(builder, "if (");
 			if v.label != nil {
-				return err_return(&v.stmt_base, "Label unsupported for if statements");
+				return err_return(v.stmt_base, "Label unsupported for if statements");
 			}
-			to_opencl_lang(compiler, builder, &v.cond.expr_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.cond.expr_base)) or_return;
 			strings.write_byte(builder, ')');
-			to_opencl_lang(compiler, builder, &v.body.stmt_base) or_return;
-			strings.write_byte(builder, '\n');
+			to_opencl_lang(update_active_node(_in, v.body.stmt_base)) or_return;
+			if v.else_stmt != nil {
+				for _ in 0..<tab_offset do strings.write_byte(builder, '\t');
+				strings.write_string(builder, "else");
+				to_opencl_lang(update_active_node(_in, v.else_stmt.stmt_base)) or_return;
+			}
 		case ^ast.For_Stmt:
-			if v.label != nil do return err_return(&v.label.expr_base, "For loop labels not supported");
+			if v.label != nil do return err_return(v.label.expr_base, "For loop labels not supported");
 			strings.write_string(builder, "for (");
-			to_opencl_lang(compiler, builder, &v.init.stmt_base) or_return;
-			if builder.buf[len(builder.buf) - 1] == '\n' {
-				ordered_remove(&builder.buf, len(builder.buf) - 1);
+			if v.init != nil {
+				_in.full = false;
+				to_opencl_lang_value_decl(
+					_in,
+					v.init.derived_stmt.(^ast.Value_Decl),
+				) or_return;
+				_in.full = true;
 			}
-			to_opencl_lang(compiler, builder, &v.cond.expr_base) or_return;
-			if builder.buf[len(builder.buf) - 1] != ';' {
-				strings.write_byte(builder, ';');
-			}
-			to_opencl_lang(compiler, builder, &v.post.stmt_base) or_return;
-			if builder.buf[len(builder.buf) - 1] == '\n' {
-				ordered_remove(&builder.buf, len(builder.buf) - 1);
+			strings.write_byte(builder, ';');
+			to_opencl_lang(update_active_node(_in, v.cond.expr_base)) or_return;
+			strings.write_byte(builder, ';');
+			if v.post != nil {
+				_in.full = false;
+				to_opencl_lang_assign_stmt(
+					_in,
+					v.post.derived_stmt.(^ast.Assign_Stmt)
+				) or_return;
+				_in.full = true;
 			}
 			strings.write_byte(builder, ')');
-			to_opencl_lang(compiler, builder, &v.body.stmt_base) or_return;
+			to_opencl_lang(update_active_node(_in, v.body.stmt_base)) or_return;
 			strings.write_byte(builder, '\n');
 		case ^ast.Range_Stmt:
-			return err_return(&v.stmt_base, "TODO range: Not yet implemented");
+			return err_return(v.stmt_base, "TODO range: Not yet implemented");
 		case ^ast.Unroll_Range_Stmt:
-			return err_return(&v.stmt_base, "TODO unroll: Not yet implemented");
+			return err_return(v.stmt_base, "TODO unroll: Not yet implemented");
 		case ^ast.Return_Stmt:
-			return err_return(&v.stmt_base, "TODO return: Not yet implemented");
+			return err_return(v.stmt_base, "TODO return: Not yet implemented");
 		case ^ast.Switch_Stmt:
-			return err_return(&v.stmt_base, "TODO switch: Not yet implemented");
+			return err_return(v.stmt_base, "TODO switch: Not yet implemented");
 		case ^ast.Case_Clause:
-			return err_return(&v.stmt_base, "TODO case: Not yet implemented");
+			return err_return(v.stmt_base, "TODO case: Not yet implemented");
 		case ^ast.Branch_Stmt:
-			return err_return(&v.stmt_base, "TODO branch: Not yet implemented");
+			return err_return(v.stmt_base, "TODO branch: Not yet implemented");
 
 		// Types
 		case ^ast.Pointer_Type:
-			return to_opencl_lang_ptr(compiler, builder, v);
+			return to_opencl_lang_ptr(_in, v);
 		case ^ast.Multi_Pointer_Type:
-			return to_opencl_lang_multi_ptr(compiler, builder, v);
+			return to_opencl_lang_multi_ptr(_in, v);
 		case ^ast.Array_Type:
 			ident_type, is_ident_type := v.elem.derived_expr.(^ast.Ident);
 			if !is_ident_type do return false;
@@ -524,7 +586,7 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 				fmt.sbprintf(&b, "[%s]%s", lit_len.tok.text, ident_type.name);
 				type, is_type := compiler.types[strings.to_string(b)];
 				if !is_type {
-					parser.default_warning_handler(v.pos, "Could not find appropriate OpenCL vector type.", strings.to_string(b));
+					parser.default_warning_handler(v.pos, "Could not find appropriate OpenCL vector type. (Trying to match: %v)", strings.to_string(b));
 					return false;
 				}
 				strings.write_string(builder, type);
@@ -535,55 +597,39 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 			parser.default_warning_handler(v.pos, "Using slice instead of array, use multi pointer instead or specify the valid range!");
 			return false;
 		case ^ast.Struct_Type:
+			_in.tab_offset += 1;
 			for field in v.fields.list {
-				to_opencl_lang(compiler, builder, &field.node) or_return;
+				for _ in 0..<_in.tab_offset do strings.write_byte(builder, '\t');
+				to_opencl_lang(update_active_node(_in, field.node)) or_return;
 			}
+			_in.tab_offset -= 1;
 		case ^ast.Union_Type:
 			fmt.sbprintfln(builder, "union { ... }");
-			return err_return(&v.expr_base, "TODO union: Not yet implemented");
+			return err_return(v.expr_base, "TODO union: Not yet implemented");
 		case ^ast.Enum_Type:
 			fmt.sbprintfln(builder, "enum { ... }");
-			return err_return(&v.expr_base, "TODO enum: Not yet implemented");
+			return err_return(v.expr_base, "TODO enum: Not yet implemented");
 		case ^ast.Matrix_Type:
 			fmt.sbprintfln(builder, "type[row][col]");
-			return err_return(&v.expr_base, "TODO matrix: Not yet implemented");
+			return err_return(v.expr_base, "TODO matrix: Not yet implemented");
 		case ^ast.Helper_Type:
-			return to_opencl_lang(compiler, builder, &v.type.expr_base);
+			return to_opencl_lang(update_active_node(_in, v.type.expr_base));
 
 		// Declarations
 		case ^ast.Value_Decl:
-			type: string;
-			if v.type == nil {
-				type = query_type_from_value_decl(compiler, v);
-				if type == "" {
-					return err_return(
-						&v.names[0].expr_base,
-						"Failed to infer type for %v value declaration",
-						v
-					);
-				}
-			} else {
-				type = v.type.derived_expr.(^ast.Ident).name;
-			}
-			for val, index in v.values {
-				val_ident, is_val_ident := v.names[index].derived.(^ast.Ident);
-				if !is_val_ident do return err_return(&v.names[index].expr_base, "Expected identifier, got: %v", v.names[index].expr_base);
-				fmt.sbprintf(builder, "%s %s = ", type, val_ident.name);
-				to_opencl_lang(compiler, builder, &val.expr_base) or_return;
-				strings.write_string(builder, ";\n");
-			}
+			return to_opencl_lang_value_decl(_in, v);
 		case ^ast.Field:
 			for name, index in v.names {
-				to_opencl_lang(compiler, builder, &v.type.expr_base) or_return;
+				to_opencl_lang(update_active_node(_in, v.type.expr_base)) or_return;
 				strings.write_byte(builder, ' ');
-				to_opencl_lang(compiler, builder, &name.expr_base) or_return;
+				to_opencl_lang(update_active_node(_in, name.expr_base)) or_return;
 				if index < len(v.names) - 1 {
 					strings.write_string(builder, ", ");
 				}
 			}
 		case ^ast.Field_List:
 			for field, index in v.list {
-				to_opencl_lang(compiler, builder, &field.node) or_return;
+				to_opencl_lang(update_active_node(_in, field.node)) or_return;
 				if index < len(v.list) - 1 {
 					strings.write_string(builder, ", ");
 				}
@@ -674,7 +720,51 @@ to_opencl_lang :: proc(using compiler: ^Compiler, builder: ^strings.Builder, nod
 	return true;
 }
 
-query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(types: map[string]string, proc_type: ^ast.Proc_Type) -> string {
+to_opencl_lang_assign_stmt :: #force_inline proc(using _in: ^To_Opencl_Lang_In, v: ^ast.Assign_Stmt) -> bool {
+	to_opencl_lang(update_active_node(_in, v.lhs[0].expr_base)) or_return;
+	fmt.sbprintf(builder, " %s ", v.op.text);
+	to_opencl_lang(update_active_node(_in, v.rhs[0].expr_base)) or_return;
+	if full do strings.write_string(builder, ";\n");
+	return true;
+}
+
+to_opencl_lang_value_decl :: #force_inline proc(using _in: ^To_Opencl_Lang_In, v: ^ast.Value_Decl) -> bool {
+	type: string;
+	if v.type == nil {
+		type = query_type_from_value_decl(_in, v);
+		if type == "" {
+			return err_return(
+				v.names[0].expr_base,
+				"Failed to infer type for %v value declaration",
+				v
+			);
+		}
+	} else {
+		type = v.type.derived_expr.(^ast.Ident).name;
+	}
+	for name, index in v.names {
+		val_ident, is_val_ident := name.derived.(^ast.Ident);
+		if !is_val_ident do return err_return(name.expr_base, "Expected identifier, got: %v", name.expr_base);
+
+		if index < len(v.values) {
+			// definition
+			fmt.sbprintf(builder, "%s %s = ", type, val_ident.name);
+
+			tmp := full;
+			full = false;
+			to_opencl_lang(update_active_node(_in, v.values[index].expr_base)) or_return;
+			full = tmp;
+		} else {
+			// declaration
+			fmt.sbprintf(builder, "%s %s", type, val_ident.name);
+		}
+		if full do strings.write_string(builder, ";\n");
+	}
+
+	return true;
+}
+
+query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(using _in: ^To_Opencl_Lang_In, proc_type: ^ast.Proc_Type) -> string {
 	if len(proc_type.results.list) != 1 {
 		parser.default_error_handler(
 			proc_type.pos,
@@ -685,24 +775,35 @@ query_type_from_value_decl_grab_proc_ret_type :: #force_inline proc(types: map[s
 
 	selector, is_selector := proc_type.results.list[0].type.derived_expr.(^ast.Selector_Expr);
 	if is_selector {
-		return selector.field.name;
+		b: strings.Builder;
+		strings.builder_init(&b);
+
+		temp := _in.builder;
+		_in.builder = &b;
+		defer _in.builder = temp;
+
+		if to_opencl_lang_selector(_in, selector) {
+			// NOTE(GowardSilk): This function should be called only from to_opencl_lang
+			// and that should be covered by Compiler_Allocator anyway...
+			return strings.to_string(b);
+		}
 	}
 	ident, is_ident := proc_type.results.list[0].type.derived_expr.(^ast.Ident);
 	if is_ident {
-		return types[ident.name];
+		return compiler.types[ident.name];
 	}
 
 	return "";
 }
 
-query_type_from_value_decl :: #force_inline proc(compiler: ^Compiler, val: ^ast.Value_Decl) -> string {
+query_type_from_value_decl :: #force_inline proc(using _in: ^To_Opencl_Lang_In, val: ^ast.Value_Decl) -> string {
 	if len(val.values) <= 0 do return "";
 	#partial switch v in val.values[0].derived_expr {
 		case ^ast.Call_Expr:
 			name := v.expr.derived_expr.(^ast.Ident).name;
 			_proc, ok := compiler.proc_table[name];
 			if ok {
-				return query_type_from_value_decl_grab_proc_ret_type(compiler.types, _proc.lit.type);
+				return query_type_from_value_decl_grab_proc_ret_type(_in, _proc.lit.type);
 			}
 			return "";
 		case ^ast.Basic_Lit:
@@ -815,7 +916,7 @@ generate_opencl_type_map :: proc(allocator: mem.Allocator) -> map[string]string 
 	return types;
 }
 
-to_opencl_lang_selector :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, selector: ^ast.Selector_Expr) -> bool {
+to_opencl_lang_selector :: #force_inline proc(using _in: ^To_Opencl_Lang_In, selector: ^ast.Selector_Expr) -> bool {
 	// NOTE(GowardSilk): For a type, selector expr means having a specific package being accessed
 	name := selector.expr.derived_expr.(^ast.Ident).name;
 	if name == "cl" {
@@ -825,26 +926,26 @@ to_opencl_lang_selector :: #force_inline proc(compiler: ^Compiler, builder: ^str
 	} else if name == "c" {
 		strings.write_string(builder, selector.field.name)
 	} else {
-		to_opencl_lang(compiler, builder, &selector.expr.expr_base) or_return;
+		to_opencl_lang(update_active_node(_in, selector.expr.expr_base)) or_return;
 		strings.write_string(builder, selector.op.text);
 		strings.write_string(builder, selector.field.name);
 	}
 	return true;
 }
 
-to_opencl_lang_ptr :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, ptr: ^ast.Pointer_Type) -> bool {
-	return to_opencl_lang_ptr_base(compiler, builder, ptr.elem);
+to_opencl_lang_ptr :: #force_inline proc(_in: ^To_Opencl_Lang_In, ptr: ^ast.Pointer_Type) -> bool {
+	return to_opencl_lang_ptr_base(_in, ptr.elem);
 }
-to_opencl_lang_multi_ptr :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, ptr: ^ast.Multi_Pointer_Type) -> bool {
-	return to_opencl_lang_ptr_base(compiler, builder, ptr.elem);
+to_opencl_lang_multi_ptr :: #force_inline proc(_in: ^To_Opencl_Lang_In, ptr: ^ast.Multi_Pointer_Type) -> bool {
+	return to_opencl_lang_ptr_base(_in, ptr.elem);
 }
-to_opencl_lang_ptr_base :: #force_inline proc(compiler: ^Compiler, builder: ^strings.Builder, base: ^ast.Expr) -> bool {
+to_opencl_lang_ptr_base :: #force_inline proc(using _in: ^To_Opencl_Lang_In, base: ^ast.Expr) -> bool {
 	#partial switch v in base.derived_expr {
 		case ^ast.Selector_Expr:
-			to_opencl_lang_selector(compiler, builder, v) or_return;
+			to_opencl_lang_selector(_in, v) or_return;
 			strings.write_byte(builder, '*');
 		case:
-			return err_return(&base.expr_base, "Unsupported: %v", v);
+			return err_return(base.expr_base, "Unsupported: %v", v);
 	}
 	return true;
 }
