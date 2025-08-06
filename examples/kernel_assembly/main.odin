@@ -1,5 +1,6 @@
 package ka;
 
+import "core:c"
 import "core:os"
 import "core:fmt"
 import "core:mem"
@@ -10,11 +11,12 @@ import "core:odin/ast"
 import cl "shared:opencl"
 
 OpenCL_Context :: struct {
-    platform:   cl.Platform_ID,
-    device:     cl.Device_ID,
-    _context:   cl.Context,
-    program:    cl.Program,
-    queue:      cl.Command_Queue,
+	platform:   cl.Platform_ID,
+	device:     cl.Device_ID,
+	_context:   cl.Context,
+	program:    cl.Program,
+	queue:      cl.Command_Queue,
+	kernels:    map[string]cl.Kernel, /**< compiled kernels */
 }
 
 Compiler :: struct {
@@ -23,24 +25,18 @@ Compiler :: struct {
 	 * only for Proc_Kind.Builtin, Proc_Desc.params != nil
 	 */
 	proc_table:	map[string]Proc_Desc,
-	kernels:	map[string]cl.Kernel, /**< compiled kernels */
 	types:		map[string]string,
 }
 
 init_compiler :: proc(allocator := context.allocator) -> Compiler {
 	p := mem.make(map[string]Proc_Desc, allocator);
-	k := mem.make(map[string]cl.Kernel, allocator);
 	t := generate_opencl_type_map(allocator);
-	return Compiler { p, k, t };
+	return Compiler { p, t };
 }
 
 delete_compiler :: proc(using compiler: ^Compiler) {
 	// NOTE(GowardSilk): the contents of proc_table should be freed successfully outside this function, from the appropriate allocator
 	if proc_table != nil do mem.delete(proc_table);
-	if kernels != nil {
-		for _, kernel in kernels do cl.ReleaseKernel(kernel);
-		mem.delete(kernels);
-	}
 	if types != nil {
 		for k, v in types {
 			delete_key(&types, k);
@@ -339,13 +335,38 @@ compiler_allocator :: proc(allocator: ^Compiler_Allocator) -> mem.Allocator {
 	};
 }
 
-compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, package_path := "kernel_assembly/my_kernels") {
+Assemble_Kernels_Result :: struct {
+	kernel_strings: [^]cstring,
+	kernel_sizes: [^]c.size_t,
+	nof_kernels: cl.Uint,
+}
+
+delete_assemble_kernels_res :: proc(akr: Assemble_Kernels_Result) {
+	for i in 0..<akr.nof_kernels do delete(akr.kernel_strings[i]);
+	free(akr.kernel_sizes);
+	free(akr.kernel_strings);
+}
+
+compile :: proc(package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context, mem.Allocator_Error) {
+	compiler := init_compiler();
+	defer delete_compiler(&compiler);
+
+	// store the allocator which is used in scope of the function caller (for return value allocation)
+	backup_allocator := context.allocator;
 	ca: Compiler_Allocator;
 	assert(compiler_allocator_init(&ca, context.allocator) == .None);
 	context.allocator = compiler_allocator(&ca);
 	// everything allocated from this function will be freed upon leave
 	defer compiler_allocator_destroy(&ca);
 
+	kernels_res, merr := assemble_kernels(&compiler, package_path);
+	if merr != .None do return {}, merr;
+	defer delete_assemble_kernels_res(kernels_res);
+
+	return init_cl_context(&compiler, kernels_res, backup_allocator), .None;
+}
+
+assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
 	pckg, ok := parser.parse_package_from_path(package_path);
 	assert(ok);
 
@@ -354,12 +375,17 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 		proc_desc: Proc_Desc;
 		for stmt in file.decls do if is_valid_proc(&stmt.derived_stmt, &proc_desc) {
 			map_insert(&compiler.proc_table, proc_desc.name, proc_desc);
+			if proc_desc.kind == .Kernel do out.nof_kernels += 1;
 		}
 	}
 	
 	kernel_string_builder: strings.Builder;
 	assert(strings.builder_init(&kernel_string_builder) != nil);
 
+	out.kernel_sizes = mem.make([^]c.size_t, out.nof_kernels) or_return;
+	out.kernel_strings = mem.make([^]cstring, out.nof_kernels) or_return;
+
+	index := 0;
 	decl_loop: for _, proc_desc in compiler.proc_table do if proc_desc.kind == .Kernel {
 		defer strings.builder_reset(&kernel_string_builder);
 		using proc_desc;
@@ -401,7 +427,15 @@ compile_kernels :: proc(compiler: ^Compiler, cl_context: ^OpenCL_Context, packag
 		body = strings.clone(strings.to_string(kernel_string_builder));
 		strings.builder_reset(&kernel_string_builder);
 
-		fmt.eprintln(fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) %s", name, parameters, body));
+		fmt.sbprintf(&kernel_string_builder, "__kernel void %s(%s) %s", name, parameters, body);
+
+		kernel_size := strings.builder_len(kernel_string_builder);
+		kernel_cstr := mem.make([]byte, kernel_size) or_return;
+		mem.copy(&kernel_cstr[0], &kernel_string_builder.buf[0], kernel_size * size_of(byte));
+		out.kernel_strings[index] = cast(cstring)&kernel_cstr[0];
+		out.kernel_sizes[index] = cast(c.size_t)kernel_size;
+
+		index += 1;
 	}
 	
 	return;
@@ -950,17 +984,111 @@ to_opencl_lang_ptr_base :: #force_inline proc(using _in: ^To_Opencl_Lang_In, bas
 	return true;
 }
 
-init_cl_context :: proc() -> OpenCL_Context {
-	return OpenCL_Context {};
+init_cl_context :: proc(compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
+	// query platform
+	nof_platforms: cl.Uint;
+	cl.GetPlatformIDs(0, nil, &nof_platforms);
+	assert(nof_platforms > 0);
+	assert(cl.GetPlatformIDs(1, &ocl.platform, nil) == cl.SUCCESS);
+
+	// query device
+	nof_devices: cl.Uint;
+	cl.GetDeviceIDs(
+		ocl.platform,
+		cl.DEVICE_TYPE_GPU,
+		0,
+		nil,
+		&nof_devices
+	);
+	assert(nof_devices > 0);
+	assert(
+		cl.GetDeviceIDs(
+			ocl.platform,
+			cl.DEVICE_TYPE_GPU,
+			1,
+			&ocl.device,
+			nil
+		) == cl.SUCCESS
+	);
+
+	// context
+	ret: cl.Int;
+	ocl._context = cl.CreateContext(nil, 1, &ocl.device, nil, nil, &ret);
+	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateContext with exit code: %v", ret);
+
+	// program
+	ocl.program = cl.CreateProgramWithSource(
+		ocl._context,
+		kernels.nof_kernels,
+		&kernels.kernel_strings[0],
+		&kernels.kernel_sizes[0],
+		&ret
+	);
+	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateProgramWithSource with exit code: %v", ret);
+
+	ret = cl.BuildProgram(ocl.program, 1, &ocl.device, nil, nil, nil);
+	if ret != cl.SUCCESS {
+		fmt.eprintfln("Failed calling cl.BuildProgram with exit code: %v.\nLog:", ret);
+		log_len: c.size_t;
+		assert(cl.GetProgramBuildInfo(
+			ocl.program,
+			ocl.device,
+			cl.PROGRAM_BUILD_LOG,
+			0,
+			nil,
+			&log_len
+		) == cl.SUCCESS);
+		log := make([]byte, cast(int)log_len);
+		assert(cl.GetProgramBuildInfo(
+			ocl.program,
+			ocl.device,
+			cl.PROGRAM_BUILD_LOG,
+			log_len,
+			&log[0],
+			nil
+		) == cl.SUCCESS);
+		fmt.eprintfln("%s", cast(string)log);
+		delete(log);
+	}
+
+	// kernels
+	ocl.kernels = mem.make(map[string]cl.Kernel, allocator);
+	for name, desc in compiler.proc_table do if desc.kind == .Kernel {
+		cname := strings.clone_to_cstring(name);
+		defer delete(cname);
+
+		map_insert(
+			&ocl.kernels,
+			strings.clone(name),
+			cl.CreateKernel(ocl.program, cname, &ret)
+		);
+		fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateKernel with exit code: %v", ret);
+	}
+	when ODIN_DEBUG do fmt.eprintfln("\x1b[32mAll kernels compiled\x1b[0m");
+
+	// queue
+	ocl.queue = cl.CreateCommandQueue(
+		ocl._context,
+		ocl.device,
+		0,
+		&ret
+	);
+	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateCommandQueue with exit code: %v", ret);
+
+	return ocl;
 }
 
 delete_cl_context :: proc(cl_context: ^OpenCL_Context) {
+	assert(cl_context != nil);
+	cl.ReleaseContext(cl_context._context);
+	cl.ReleaseCommandQueue(cl_context.queue);
+	for kernel_name, kernel in cl_context.kernels {
+		cl.ReleaseKernel(kernel);
+	}
+	mem.delete(cl_context.kernels);
 }
 
 main :: proc() {
-	cl_context := init_cl_context();
-	defer delete_cl_context(&cl_context);
-
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator;
 		mem.tracking_allocator_init(&track, context.allocator);
@@ -968,9 +1096,9 @@ main :: proc() {
 		context.allocator = mem.tracking_allocator(&track);
 	}
 
-	compiler := init_compiler();
-	compile_kernels(&compiler, &cl_context);
-	delete_compiler(&compiler);
+	cl_context, merr := compile();
+	assert(merr == .None);
+	delete_cl_context(&cl_context);
 
 	when ODIN_DEBUG {
 		if len(track.allocation_map) <= 0 do fmt.println("\x1b[32mNo leaks\x1b[0m");
