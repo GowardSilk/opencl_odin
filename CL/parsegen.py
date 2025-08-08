@@ -476,7 +476,12 @@ def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]
     elif base == "c.schar" or base == "char":
         base = "cstring"
     else:
-        base = f"^{base}"
+        potential_alias = get_alias_type(base)
+        if potential_alias is None or "#type proc" not in potential_alias:
+            # pointer to an existing '#type proc' is still a '#type proc'
+            # the reason is that we cannot handle C's typedef of function signature
+            # vs function pointer....
+            base = f"^{fmt.format(base)}"
 
     potential_const, potential_cursor = next_token_unwrap(fcontent, cursor)
     if potential_const == "const":  # const ptr
@@ -493,6 +498,7 @@ def apply_pointer_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]
 
 
 def apply_func_ptr_type(base: str, cursor: int, fcontent: str) -> tuple[str, int]:
+    base = fmt.format(base)
     ftype, cursor = parse_function_ptr_type(fcontent, cursor)
     if base == "void":
         return f"{ftype}", cursor
@@ -543,14 +549,13 @@ def apply_pointer_and_func_type(
 ) -> tuple[str, int]:
     potential_ptr, potential_cursor = next_token_unwrap(fcontent, cursor)
 
-    base = fmt.format(base)
     if potential_ptr == "*":  # "normal" ptr OR ptr as a return type for a function
         ptr, cursor = apply_pointer_type(base, potential_cursor, fcontent)
         return ptr, cursor
     if potential_ptr == "(":  # function ptr
         return apply_func_ptr_type(base, potential_cursor, fcontent)
 
-    return base, cursor
+    return fmt.format(base), cursor
 
 
 # <type> ::= { "struct" | "union" } [word] [<body>] | <word_seq> [ "*"* ]
@@ -861,6 +866,7 @@ ESSENTIAL_CL_HEADERS = [
     "cl_function_types.h",
 ]
 WIN_CL_FILES = [
+    "cl_dx9_media_sharing.h",
     "cl_d3d10.h",
     "cl_d3d11.h",
     "d3d10.h",
@@ -868,8 +874,93 @@ WIN_CL_FILES = [
 EXTRA_CL_HEADERS = [
     "cl_ext.h",
     "cl_gl.h",
+    "cl_egl.h",
     "cl_icd.h",
 ]
+
+def header_rewrite_filters(target_header: str) -> tuple[list[Function], list[AliasEntry], list[Definition]]:
+    functions = list(filter(lambda func: func.file == target_header, g_functions))
+    aliases = list(
+        filter(lambda alias: alias[1].file == target_header, g_aliases.items())
+    )
+    definitions = list(
+        filter(lambda _def: _def.file == target_header, g_definitions)
+    )
+    return functions, aliases, definitions
+
+
+def header_rewrite(target_header: str, out_dir: str, current_location: str, config: str) -> None:
+    file_blob = 'package cl;\n\nimport "core:c"\n'
+    file_blob += config
+    file_blob += '\n\nforeign import opencl "OpenCL.lib"\n\n'
+
+    functions, aliases, definitions = header_rewrite_filters(target_header)
+
+    file_blob += f"/* =========================================\n*               {target_header}\n* ========================================= */\n\n"
+
+    for defs in definitions:
+        file_blob += defs.into_odin() + "\n"
+
+    file_blob += "\n" if len(definitions) > 0 else ""
+
+    for name, alias in aliases:
+        file_blob += fmt.format_alias(name, alias) + "\n"
+
+    file_blob += "\n" if len(definitions) > 0 else ""
+
+    if len(functions) > 0:
+        # khr functions have to be loaded in runtime
+        khr_functions:  list[Function] = []
+        core_functions: list[Function] = []
+
+        def is_khr_function(s: str) -> bool:
+            s_l = s.lower()
+            khr_endings = [
+                "khr",
+                "ext",
+                "intel",
+                "amd",
+                "nv",
+                "nvidia",
+                "apple",
+                "arm",
+                "qcom",
+                "img",
+                "msft"
+            ]
+            return any(True for khr_ending in khr_endings if s_l.endswith(khr_ending))
+
+        for func in functions:
+            if is_khr_function(func.name):
+                khr_functions.append(func)
+            else:
+                core_functions.append(func)
+
+        if len(khr_functions):
+            func_loader: str = ""
+            for khr_func in khr_functions:
+                stripped_khr_name = fmt.strip_cl_prefix(khr_func.name)
+                khr_func_predicate_alias = f"{khr_func.name}_t"
+                # print(f"In aliases: {g_aliases[khr_func_predicate_alias]}")
+                # print(f"In reality: {khr_func.into_odin(typed=True)}")
+                assert khr_func.into_odin(typed=True) == g_aliases[khr_func_predicate_alias]._from, "For each binding KHR function, there should be an already existing alias for the function prototype"
+                file_blob += f"{stripped_khr_name}: {fmt.format(khr_func_predicate_alias)}\n"
+                # NOTE(GowardSilk): khr_func.name is not stored after application of fmt.change_format,
+                # so this should be a valid OpenCL function name
+                func_loader += f"\t{stripped_khr_name} = auto_cast GetExtensionFunctionAddressForPlatform(platform, \"{khr_func.name}\");\n"
+
+            # add one special procedure for loading all of the functions for this specific KHR file
+            file_blob += f"Load{fmt.strip_cl_prefix(target_header.strip(".h")).upper()}KHRFunctions :: proc(platform: Platform_ID) {{\n{func_loader}}}\n"
+
+        if len(core_functions):
+            file_blob += '@(link_prefix="cl")\n'
+            file_blob += "foreign opencl {\n"
+            for core_func in core_functions:
+                file_blob += "\t" + core_func.into_odin(typed=False) + "\n"
+            file_blob += "}\n"
+
+    with open(os.path.join(out_dir, target_header[:-2] + ".odin"), "w+") as file:
+        file.write(file_blob)
 
 
 def main(cc: str, out_dir: str, enable_d3d: bool, only_essential: bool) -> None:
@@ -888,103 +979,121 @@ def main(cc: str, out_dir: str, enable_d3d: bool, only_essential: bool) -> None:
 
     current_location = os.path.dirname(os.path.abspath(__file__))
 
+    # parse headers
     for target_header in header_files:
         parse_helper(cc, current_location, target_header)
 
-    file_blob: str = ""
+    # run preprocessor on custom config file
+    # and extract all necessary statements
+    preprocess_out = preprocess_run(cc, current_location, "defs.odin.c")
+    config: str = ""
+    with open(preprocess_out, "r") as defsfile:
+        defs = defsfile.readlines()
+        for line in defs:
+            var = re.compile(r"^@(.*?)@$", re.DOTALL)
+            match = var.match(line)
+            if match:
+                key = match.group(1)
+                config += ODIN_CONFIG[key]
 
+    # rewrite headers into .odin files
     for target_header in header_files:
-        file_blob += "\n"
-        file_blob += 'foreign import opencl "OpenCL.lib"\n\n'
+        header_rewrite(target_header, out_dir, current_location, config)
 
-        functions = list(filter(lambda func: func.file == target_header, g_functions))
-        aliases = list(
-            filter(lambda alias: alias[1].file == target_header, g_aliases.items())
-        )
-        definitions = list(
-            filter(lambda _def: _def.file == target_header, g_definitions)
-        )
+    # if we have to transpile also cl_icd.h we generate "ex" version
+    # which will contain functions appropriated to the 'COM' model
+    if not only_essential:
+        generate_com_icd(current_location, out_dir)
 
-        if len(functions) > 0 or len(aliases) > 0 or len(definitions):
-            file_blob += f"/* =========================================\n*               {target_header}\n* ========================================= */\n\n"
+def generate_com_icd(current_location: str, out_dir: str) -> None:
+    # NOTE(GowardSilk): The parsing system is not setup for remembering
+    # the "structure" of types, therefore it will just be easier to
+    # brute force this by re-parsing....
+    file: str
+    with open(os.path.join(current_location, "out", "cl_icd.h.out.txt.ex"), "r") as f:
+        file = f.read()
 
-            for defs in definitions:
-                file_blob += defs.into_odin() + "\n"
+    lines = file.split('\n')
+    for index, line in enumerate(lines):
+        if "typedef struct _cl_icd_dispatch" in line:
+            lines = lines[index + 1:]
 
-            file_blob += "\n" if len(definitions) > 0 else ""
+    ICD_DISPATCH_EX_NAME = "ICD_Dispatch_Ex"
+    new_icd: str = f"{ICD_DISPATCH_EX_NAME} :: struct {{\n\t#subtype base: ICD_Dispatch,\n"
+    icd_ex_functions: str = ""
 
-            for name, alias in aliases:
-                file_blob += fmt.format_alias(name, alias) + "\n"
+    for member in lines:
+        if member == "} cl_icd_dispatch;\n":
+            break
 
-            file_blob += "\n" if len(definitions) > 0 else ""
+        def decapitalize(s):
+            return s[:1].lower() + s[1:] if s else ''
 
-            if len(functions) > 0:
-                # khr functions have to be loaded in runtime
-                khr_functions:  list[Function] = []
-                core_functions: list[Function] = []
+        def capitalize(s):
+            return s[:1].upper() + s[1:] if s else ''
 
-                def is_khr_function(s: str) -> bool:
-                    s_l = s.lower()
-                    khr_endings = [
-                        "khr",
-                        "ext",
-                        "intel",
-                        "amd",
-                        "nv",
-                        "nvidia",
-                        "apple",
-                        "arm",
-                        "qcom",
-                        "img",
-                        "msft"
-                    ]
-                    return any(True for khr_ending in khr_endings if s_l.endswith(khr_ending))
+        def extract_params(s: str) -> list[str]:
+            names: list[str] = []
+            index = 0
+            while s[index] != '(':
+                index += 1
 
-                for func in functions:
-                    if is_khr_function(func.name):
-                        khr_functions.append(func)
-                    else:
-                        core_functions.append(func)
+            index += 1
 
-                if len(khr_functions):
-                    func_loader: str = ""
-                    for khr_func in khr_functions:
-                        stripped_khr_name = fmt.strip_cl_prefix(khr_func.name)
-                        for k, v in g_aliases.items():
-                            print(f"Key {k}; Val: {v}")
+            capture_name = True
+            name: str = ""
+            while s[index] != ')':
+                if s[index].isspace():
+                    index += 1
+                    continue
+                elif s[index] == '(':
+                    # skip inner #type proc() defs
+                    while s[index] != ')':
+                        index += 1
+                    index += 1
+                    continue
+                elif s[index] == ':':
+                    names.append(name)
+                    capture_name = False
+                    name = ""
+                elif s[index] == ',':
+                    capture_name = True
+                    index += 1
+                    continue
 
-                        khr_func_predicate_alias = f"{khr_func.name}_t"
-                        print(f"In aliases: {g_aliases[khr_func_predicate_alias]}")
-                        print(f"In reality: {khr_func.into_odin(typed=True)}")
-                        assert khr_func.into_odin(typed=True) == g_aliases[khr_func_predicate_alias]._from, "For each binding KHR function, there should be an already existing alias for the function prototype"
-                        file_blob += f"{stripped_khr_name}: {fmt.format(khr_func_predicate_alias)}\n"
-                        # NOTE(GowardSilk): khr_func.name is not stored after application of fmt.change_format,
-                        # so this should be a valid OpenCL function name
-                        func_loader += f"\t{stripped_khr_name} = auto_cast GetExtensionFunctionAddressForPlatform(platform, \"{khr_func.name}\");\n"
+                if capture_name:
+                    name += s[index]
 
-                    # add one special procedure for loading all of the functions for this specific KHR file
-                    file_blob += f"Load{fmt.strip_cl_prefix(target_header.strip(".h")).upper()}KHRFunctions :: proc(platform: Platform_ID) {{\n{func_loader}}}\n"
-                
-                if len(core_functions):
-                    file_blob += '@(link_prefix="cl")\n'
-                    file_blob += "foreign opencl {\n"
-                    for core_func in core_functions:
-                        file_blob += "\t" + core_func.into_odin(typed=False) + "\n"
-                    file_blob += "}\n"
+                index += 1
 
-        with open(os.path.join(out_dir, target_header[:-2] + ".odin"), "w+") as file:
-            file.write("package cl;\n\n")
-            file.write('import "core:c"\n')
-            preprocess_out = preprocess_run(cc, current_location, "defs.odin.c")
-            with open(preprocess_out, "r") as defsfile:
-                defs = defsfile.readlines()
-                for line in defs:
-                    var = re.compile(r"^@(.*?)@$", re.DOTALL)
-                    match = var.match(line)
-                    if match:
-                        key = match.group(1)
-                        file.write(ODIN_CONFIG[key])
-            file.write("\n")
-            file.write(file_blob)
+            return names
 
-        file_blob = ""
+        member_re = re.compile(r"\s*([a-zA-Z_0-9]+)\s*\*([a-zA-Z_0-9]+);")
+        match = member_re.match(member)
+        if match:
+            field_type = match.group(1)
+            field_value = decapitalize(match.group(2)[2:])
+
+            method_type = g_aliases[field_type]
+            # add one additional parameter: ^ICD_Dispatch_Ex (aka "self"/"this")
+            proc_type_pattern = re.compile(r"(#type\s+proc\s*\(\s*)")
+            modified = proc_type_pattern.sub(rf"\1this: ^{ICD_DISPATCH_EX_NAME}, ", method_type._from)
+
+            global_field_value = f"_icd{capitalize(field_value)}"
+            icd_ex_functions += f"{global_field_value}Type :: {modified};\n"
+            new_icd += f"\t{field_value}: {global_field_value}Type,\n"
+
+            # strip '#type'
+            modified = modified[modified.index("proc"):]
+            params = extract_params(modified)[1:]
+            if modified.find("->") != -1:
+                icd_ex_functions += f"{global_field_value} :: {modified} {{ return this^.base.{fmt.change_format(field_value)}({', '.join(params)}); }}\n"
+            else:
+                icd_ex_functions += f"{global_field_value} :: {modified} {{ this^.base.{fmt.change_format(field_value)}({', '.join(params)}); }}\n"
+
+    new_icd += "}"
+    with open(os.path.join(out_dir, "cl_icd.odin"), "a") as file:
+        file.write('\n')
+        file.write(icd_ex_functions)
+        file.write('\n')
+        file.write(new_icd)
