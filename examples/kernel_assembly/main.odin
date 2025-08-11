@@ -41,6 +41,74 @@ my_kernel_test :: proc(em: ^Emulator) {
 	fmt.eprintfln("%v\n* %f\n=========\n%v", inputs, coeff, outputs);
 }
 
+pi_test :: proc(em: ^Emulator, $vector_size: int) {
+	NOF_STEPS :: 512 * 512 * 512;
+
+	when vector_size == 1 {
+		kernel := em.ocl.kernels["pi"];
+		NOF_ITERS :: 262144;
+		WGS       :: 8; // [W]ork[G]roup[S]ize;
+	} else when vector_size == 4 {
+		NOF_ITERS :: 262144 / 4;
+		WGS       :: 8 * 4;
+	} else when vector_size == 8 {
+		NOF_ITERS :: 262144 / 8;
+		WGS       :: 8 * 8;
+	} else do #assert(false, "vector_size can be only 1, 4 or 8!");
+
+	work_group_size: c.size_t = WGS;
+	nof_work_groups: c.size_t = NOF_STEPS / (WGS * NOF_ITERS);
+
+	max_size: c.size_t;
+	ret := em->GetKernelWorkGroupInfo(kernel, em.ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+
+	fmt.eprintfln("WGS: %d; max_size: %d", WGS, max_size);
+	if max_size > WGS {
+		work_group_size = max_size;
+		nof_work_groups = NOF_STEPS / (work_group_size * NOF_ITERS);
+	}
+
+	if nof_work_groups < 1 {
+		ret = em->GetDeviceInfo(em.ocl.device, cl.DEVICE_MAX_COMPUTE_UNITS, size_of(nof_work_groups), &nof_work_groups, nil);
+		fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+		work_group_size = NOF_STEPS / (nof_work_groups * NOF_ITERS);
+	}
+	fmt.eprintfln("nof_work_groups: %d", nof_work_groups);
+
+	nof_steps := work_group_size * NOF_ITERS * nof_work_groups;
+	step_size := 1.0 / NOF_STEPS;
+	fmt.eprintfln("nof_steps: %d; NOF_STEPS: %d\nstep_size: %f", nof_steps, NOF_STEPS, step_size);
+
+	partial_sums, merr := mem.make([^]cl.Float, cast(int)nof_work_groups);
+	assert(merr == .None);
+	defer mem.free(partial_sums);
+	partial_sums_mem := em->CreateBuffer(em.ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+	defer em->ReleaseMemObject(partial_sums_mem);
+
+	nof_iters: cl.Int = 262144;
+	ret  = em->SetKernelArg(kernel, 0, size_of(cl.Int), &nof_iters);
+	ret |= em->SetKernelArg(kernel, 1, size_of(cl.Float), &step_size);
+	ret |= em->SetKernelArg(kernel, 2, size_of(cl.Float) * work_group_size, nil);
+	ret |= em->SetKernelArg(kernel, 3, size_of(cl.Mem), &partial_sums_mem);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+
+	ret = em->EnqueueNDRangeKernelEx(kernel, 1, nil, &nof_steps, &work_group_size);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+
+	ret = em->EnqueueReadBufferEx(partial_sums_mem, true, 0, nof_work_groups * size_of(cl.Float), partial_sums);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+
+	final_sum: cl.Float = 0;
+	for i in 0..<nof_work_groups {
+		final_sum += partial_sums[i];
+	}
+	final_sum *= step_size;
+
+	fmt.eprintfln("Result: %f", final_sum);
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator;
@@ -50,7 +118,10 @@ main :: proc() {
 	}
 
 	em := init_emulator_full();
+	fmt.eprintfln("\nmy_kernel:\n");
 	my_kernel_test(&em);
+	fmt.eprintfln("\npi:\n");
+	pi_test(&em, 1);
 	delete_emulator(&em);
 
 	when ODIN_DEBUG {

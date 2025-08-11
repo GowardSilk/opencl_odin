@@ -26,6 +26,7 @@ Emulator_VTable :: struct {
     GetDeviceIDs               : Get_Device_IDs_Type,
     GetDeviceInfo              : Get_Device_Info_Type,
     GetProgramBuildInfo        : Get_Program_Build_Info_Type,
+    GetKernelWorkGroupInfo     : Get_Kernel_Work_Group_Info_Type,
 
     // Context
     CreateContext              : Create_Context_Type,
@@ -75,6 +76,7 @@ init_emulator_null :: proc() -> (em: Null_CL) {
 	em.base.GetDeviceIDs = GetDeviceIDs_NullCL;
 	em.base.GetDeviceInfo = GetDeviceInfo_NullCL;
 	em.base.GetProgramBuildInfo = GetProgramBuildInfo_NullCL;
+	em.base.GetKernelWorkGroupInfo = GetKernelWorkGroupInfo_NullCL;
 	em.base.CreateContext = CreateContext_NullCL;
 	em.base.ReleaseContext = ReleaseContext_NullCL;
 	em.base.CreateCommandQueue = CreateCommandQueue_NullCL;
@@ -108,6 +110,7 @@ init_emulator_full :: proc() -> (em: Full_CL) {
 	em.base.GetDeviceIDs = GetDeviceIDs_FullCL;
 	em.base.GetDeviceInfo = GetDeviceInfo_FullCL;
 	em.base.GetProgramBuildInfo = GetProgramBuildInfo_FullCL;
+	em.base.GetKernelWorkGroupInfo = GetKernelWorkGroupInfo_FullCL;
 	em.base.CreateContext = CreateContext_FullCL;
 	em.base.ReleaseContext = ReleaseContext_FullCL;
 	em.base.CreateCommandQueue = CreateCommandQueue_FullCL;
@@ -147,8 +150,9 @@ delete_emulator :: #force_inline proc(em: ^Emulator) {
 // OpenCL API
 Get_Platform_IDs_Type             :: #type proc(this: ^Emulator, num_entries: cl.Uint, platforms: [^]Platform_ID, num_platforms: ^cl.Uint) -> cl.Int;
 Get_Device_IDs_Type               :: #type proc(this: ^Emulator, platform: Platform_ID, device_type: cl.Device_Type, num_entries: cl.Uint, devices: [^]Device_ID, num_devices: ^cl.Uint) -> cl.Int;
-Get_Device_Info_Type              :: #type proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t);
+Get_Device_Info_Type              :: #type proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int;
 Get_Program_Build_Info_Type       :: #type proc(this: ^Emulator, program: Program, device: Device_ID, param_name: cl.Program_Build_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int;
+Get_Kernel_Work_Group_Info_Type   :: #type proc(this: ^Emulator, kernel: Kernel, device: Device_ID, param_name: cl.Kernel_Work_Group_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int;
 Create_Context_Type               :: #type proc(this: ^Emulator, properties: ^cl.Context_Properties, num_devices: cl.Uint, devices: ^Device_ID, pfn_notify: #type proc "stdcall" (errinfo: cstring, private_info: rawptr, cb: c.size_t, user_data: rawptr), user_data: rawptr, errcode_ret: ^cl.Int) -> Context;
 Release_Context_Type              :: #type proc(this: ^Emulator) -> cl.Int;
 Create_Command_Queue_Type         :: #type proc(this: ^Emulator, _context: Context, device: Device_ID, properties: cl.Command_Queue_Properties, errcode_ret: ^cl.Int) -> Command_Queue;
@@ -244,11 +248,11 @@ GetDeviceIDs_NullCL :: proc(this: ^Emulator, platform: Platform_ID, device_type:
 }
 
 @(private="file")
-GetDeviceInfo_FullCL :: proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) {
-	cl.GetDeviceInfo(cast(Device_ID_Full)device, param_name, param_value_size, param_value, param_value_size_ret);
+GetDeviceInfo_FullCL :: proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
+	return cl.GetDeviceInfo(cast(Device_ID_Full)device, param_name, param_value_size, param_value, param_value_size_ret);
 }
 @(private="file")
-GetDeviceInfo_NullCL :: proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) {
+GetDeviceInfo_NullCL :: proc(this: ^Emulator, device: Device_ID, param_name: cl.Device_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
 	unimplemented();
 }
 
@@ -258,6 +262,15 @@ GetProgramBuildInfo_FullCL :: proc(this: ^Emulator, program: Program, device: De
 }
 @(private="file")
 GetProgramBuildInfo_NullCL :: proc(this: ^Emulator, program: Program, device: Device_ID, param_name: cl.Program_Build_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
+	unimplemented();
+}
+
+@(private="file")
+GetKernelWorkGroupInfo_FullCL :: proc(this: ^Emulator, kernel: Kernel, device: Device_ID, param_name: cl.Kernel_Work_Group_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
+	return cl.GetKernelWorkGroupInfo(cast(Kernel_Full)kernel, cast(Device_ID_Full)device, param_name, param_value_size, param_value, param_value_size_ret);
+}
+@(private="file")
+GetKernelWorkGroupInfo_NullCL :: proc(this: ^Emulator, kernel: Kernel, device: Device_ID, param_name: cl.Kernel_Work_Group_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
 	unimplemented();
 }
 
@@ -319,7 +332,7 @@ FinishCommandQueue_NullCL :: proc(this: ^Emulator) -> cl.Int {
 
 @(private="file")
 CreateBuffer_FullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, size: c.size_t, host_ptr: rawptr, errcode_ret: ^cl.Int) -> Mem {
-	unimplemented();
+	return cast(Mem)cl.CreateBuffer(cast(Context_Full)_context, flags, size, host_ptr, errcode_ret);
 }
 @(private="file")
 CreateBuffer_NullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, size: c.size_t, host_ptr: rawptr, errcode_ret: ^cl.Int) -> Mem {
