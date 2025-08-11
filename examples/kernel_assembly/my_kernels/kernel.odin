@@ -20,6 +20,14 @@ my_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ 
 	output[id] = input[id] * scale;
 }
 
+my_kernel_nullcl_wrapper :: proc(params: []rawptr) {
+      my_kernel(
+	 cast([^]cl.Float)params[0],
+	 cast([^]cl.Float)params[1],
+	 (cast(^cl.Float)params[2])^
+      );
+}
+
 // Code replicated from https://github.com/HandsOnOpenCL/Exercises-Solutions/blob/master/Solutions/ExerciseA/pi_vocl.cl
 
 @(kernel)
@@ -50,4 +58,13 @@ pi :: proc(
       }
       partial_sums[group_id] = sum;
    }
+}
+
+pi_nullcl_wrapper :: proc(params: []rawptr) {
+      pi(
+	 (cast(^c.int)params[0])^,
+	 (cast(^cl.Float)params[1])^,
+	 cast([^]cl.Float)params[2],
+	 cast([^]cl.Float)params[3]
+      );
 }

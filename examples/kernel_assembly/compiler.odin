@@ -241,7 +241,7 @@ delete_assemble_kernels_res :: proc(akr: Assemble_Kernels_Result) {
 	free(akr.kernel_strings);
 }
 
-compile :: proc(package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context, mem.Allocator_Error) {
+compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context, mem.Allocator_Error) {
 	compiler := init_compiler();
 	defer delete_compiler(&compiler);
 
@@ -257,7 +257,7 @@ compile :: proc(package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context
 	if merr != .None do return {}, merr;
 	defer delete_assemble_kernels_res(kernels_res);
 
-	return init_cl_context(&compiler, kernels_res, backup_allocator), .None;
+	return init_cl_context(em, &compiler, kernels_res, backup_allocator), .None;
 }
 
 assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {

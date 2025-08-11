@@ -11,9 +11,8 @@ main :: proc() {
 		context.allocator = mem.tracking_allocator(&track);
 	}
 
-	cl_context, merr := compile();
-	assert(merr == .None);
-	delete_cl_context(&cl_context);
+	em := init_emulator_full();
+	delete_emulator(&em);
 
 	when ODIN_DEBUG {
 		if len(track.allocation_map) <= 0 do fmt.println("\x1b[32mNo leaks\x1b[0m");
