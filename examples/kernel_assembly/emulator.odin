@@ -55,6 +55,8 @@ Emulator_VTable :: struct {
     // Execution
     EnqueueNDRangeKernel       : Enqueue_NDRange_Kernel_Type,
     EnqueueNDRangeKernelEx     : Enqueue_NDRange_Kernel_Ex_Type,
+    EnqueueReadBuffer          : Enqueue_Read_Buffer_Type,
+    EnqueueReadBufferEx        : Enqueue_Read_Buffer_Ex_Type,
 }
 
 Null_CL :: struct {
@@ -90,6 +92,8 @@ init_emulator_null :: proc() -> (em: Null_CL) {
 	em.base.ReleaseKernel = ReleaseKernel_NullCL;
 	em.base.EnqueueNDRangeKernel = EnqueueNDRangeKernel_NullCL;
 	em.base.EnqueueNDRangeKernelEx = EnqueueNDRangeKernelEx_NullCL;
+	em.base.EnqueueReadBuffer = EnqueueReadBuffer_NullCL;
+	em.base.EnqueueReadBufferEx = EnqueueReadBufferEx_NullCL;
 
 	init_emulator_base(&em);
 
@@ -121,6 +125,8 @@ init_emulator_full :: proc() -> (em: Full_CL) {
 	em.base.ReleaseKernel = ReleaseKernel_FullCL;
 	em.base.EnqueueNDRangeKernel = EnqueueNDRangeKernel_FullCL;
 	em.base.EnqueueNDRangeKernelEx = EnqueueNDRangeKernelEx_FullCL;
+	em.base.EnqueueReadBuffer = EnqueueReadBuffer_FullCL;
+	em.base.EnqueueReadBufferEx = EnqueueReadBufferEx_FullCL;
 
 	init_emulator_base(&em);
 
@@ -158,11 +164,13 @@ Create_Kernel_Type                :: #type proc(this: ^Emulator, program: Progra
 Set_Kernel_Arg_Type               :: #type proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint, arg_size: c.size_t, arg_value: rawptr) -> cl.Int;
 Release_Kernel_Type               :: #type proc(this: ^Emulator, kernel: Kernel) -> cl.Int;
 Enqueue_NDRange_Kernel_Type       :: #type proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int;
+Enqueue_Read_Buffer_Type          :: #type proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int;
 // Custom types
 // TODO(GowardSilk): IT IS REALLY QUESTIONABLE WHETHER WE SHOULD 'ABSTRACT' ALL FUNCTIONS THIS WAY BY REMOVING REDUNDANT PARAMETERS ALREADY IMPLICITLY SUPPLIED BY ^Emulator
 // OR SHOULD WE TRY TO BE THE MOST "ICD-RELATABLE" ???
 Create_Null_Kernel_Type           :: #type proc(this: ^Emulator, kernel_wrapper_name: string, kernel_wrapper_addr: rawptr, errcode_ret: ^cl.Int) -> Kernel;
 Enqueue_NDRange_Kernel_Ex_Type    :: #type proc(this: ^Emulator, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t = nil, global_work_size: ^c.size_t = nil, local_work_size: ^c.size_t = nil) -> cl.Int;
+Enqueue_Read_Buffer_Ex_Type       :: #type proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr) -> cl.Int;
 
 /**
  * @brief Create_Buffer_(Null|Full)CL [Ex]tended version aided by Odin's parapoly
@@ -179,7 +187,14 @@ CreateBufferEx_NullCL :: proc(this: ^Emulator, flags: cl.Mem_Flags, host_ptr: ^$
 	unimplemented();
 }
 CreateBufferEx_FullCL :: proc(this: ^Emulator, flags: cl.Mem_Flags, host_ptr: ^$T) -> Maybe(Mem) {
-	unimplemented();
+	ret: cl.Int;
+	buf: Mem_Full;
+	when intrinsics.type_is_slice(T) || intrinsics.type_is_dynamic_array(T) {
+		buf = cl.CreateBuffer(cast(Context_Full)this.ocl._context, flags, size_of(host_ptr[0]) * len(host_ptr^), raw_data(host_ptr^), &ret);
+	} else do unimplemented();
+
+	if ret == cl.SUCCESS do return cast(Mem)buf;
+	return nil;
 }
 
 Platform_ID :: distinct rawptr;
@@ -313,7 +328,7 @@ CreateBuffer_NullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Fl
 
 @(private="file")
 ReleaseMemObject_FullCL :: proc(this: ^Emulator, memobj: Mem) -> cl.Int {
-	unimplemented();
+	return cl.ReleaseMemObject(cast(Mem_Full)memobj);
 }
 @(private="file")
 ReleaseMemObject_NullCL :: proc(this: ^Emulator, memobj: Mem) -> cl.Int {
@@ -372,7 +387,7 @@ CreateNullKernel_NullCL :: proc(this: ^Emulator, kernel_wrapper_name: string, ke
 
 @(private="file")
 SetKernelArg_FullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint, arg_size: c.size_t, arg_value: rawptr) -> cl.Int {
-	unimplemented();
+	return cl.SetKernelArg(cast(Kernel_Full)kernel, arg_index, arg_size, arg_value);
 }
 @(private="file")
 SetKernelArg_NullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint, arg_size: c.size_t, arg_value: rawptr) -> cl.Int {
@@ -390,7 +405,7 @@ ReleaseKernel_NullCL :: proc(this: ^Emulator, kernel: Kernel) -> cl.Int {
 
 @(private="file")
 EnqueueNDRangeKernel_FullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
-	unimplemented();
+	return cl.EnqueueNDRangeKernel(cast(Command_Queue_Full)command_queue, cast(Kernel_Full)kernel, work_dim, global_work_offset, global_work_size, local_work_size, num_events_in_wait_list, event_wait_list, event);
 }
 @(private="file")
 EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
@@ -404,4 +419,22 @@ EnqueueNDRangeKernelEx_FullCL :: proc(this: ^Emulator, kernel: Kernel, work_dim:
 @(private="file")
 EnqueueNDRangeKernelEx_NullCL :: proc(this: ^Emulator, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t = nil, global_work_size: ^c.size_t = nil, local_work_size: ^c.size_t = nil) -> cl.Int {
 	return EnqueueNDRangeKernel_NullCL(this, this.ocl.queue, kernel, work_dim, global_work_offset, global_work_size, local_work_size, 0, nil, nil);
+}
+
+@(private="file")
+EnqueueReadBuffer_FullCL :: proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
+	return cl.EnqueueReadBuffer(cast(Command_Queue_Full)this.ocl.queue, cast(Mem_Full)buffer, blocking_read, offset, size, ptr, num_events_in_wait_list, event_wait_list, event);
+}
+@(private="file")
+EnqueueReadBuffer_NullCL :: proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
+	unimplemented();
+}
+
+@(private="file")
+EnqueueReadBufferEx_FullCL :: proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr) -> cl.Int {
+	return this->EnqueueReadBuffer(buffer, blocking_read, offset, size, ptr, 0, nil, nil);
+}
+@(private="file")
+EnqueueReadBufferEx_NullCL :: proc(this: ^Emulator, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr) -> cl.Int {
+	unimplemented();
 }
