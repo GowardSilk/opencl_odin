@@ -60,7 +60,7 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	nof_work_groups: c.size_t = NOF_STEPS / (WGS * NOF_ITERS);
 
 	max_size: c.size_t;
-	ret := em->GetKernelWorkGroupInfo(kernel, em.ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
+	ret := em->GetKernelWorkGroupInfo(kernel, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	fmt.eprintfln("WGS: %d; max_size: %d", WGS, max_size);
@@ -70,20 +70,20 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	}
 
 	if nof_work_groups < 1 {
-		ret = em->GetDeviceInfo(em.ocl.device, cl.DEVICE_MAX_COMPUTE_UNITS, size_of(nof_work_groups), &nof_work_groups, nil);
+		ret = em->GetDeviceInfo(cl.DEVICE_MAX_COMPUTE_UNITS, size_of(nof_work_groups), &nof_work_groups, nil);
 		fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 		work_group_size = NOF_STEPS / (nof_work_groups * NOF_ITERS);
 	}
 	fmt.eprintfln("nof_work_groups: %d", nof_work_groups);
 
 	nof_steps := work_group_size * NOF_ITERS * nof_work_groups;
-	step_size := 1.0 / NOF_STEPS;
-	fmt.eprintfln("nof_steps: %d; NOF_STEPS: %d\nstep_size: %f", nof_steps, NOF_STEPS, step_size);
+	step_size: cl.Float = 1.0 / NOF_STEPS;
+	fmt.eprintfln("nof_steps: %d; NOF_STEPS: %d\nstep_size: %.10f", nof_steps, NOF_STEPS, step_size);
 
 	partial_sums, merr := mem.make([^]cl.Float, cast(int)nof_work_groups);
 	assert(merr == .None);
 	defer mem.free(partial_sums);
-	partial_sums_mem := em->CreateBuffer(em.ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
+	partial_sums_mem := em->CreateBuffer(cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	defer em->ReleaseMemObject(partial_sums_mem);
 
@@ -94,11 +94,14 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	ret |= em->SetKernelArg(kernel, 3, size_of(cl.Mem), &partial_sums_mem);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	ret = em->EnqueueNDRangeKernelEx(kernel, 1, nil, &nof_steps, &work_group_size);
+	//ret = em->EnqueueNDRangeKernelEx(kernel, 1, nil, &nof_steps, &work_group_size);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	ret = em->EnqueueReadBufferEx(partial_sums_mem, true, 0, nof_work_groups * size_of(cl.Float), partial_sums);
-	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+	assert(em->FinishCommandQueue() == cl.SUCCESS);
+
+	//fmt.eprintfln("EnqueueReadBufferEx(mem: %v, blocking: %v, offset: %v, size: %v, host_ptr: %v)", partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums)
+	//ret = em->EnqueueReadBufferEx(partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums);
+	//fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	final_sum: cl.Float = 0;
 	for i in 0..<nof_work_groups {

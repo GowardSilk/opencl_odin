@@ -61,6 +61,7 @@ pi :: proc(
 }
 
 pi_nullcl_wrapper :: proc(params: []rawptr) {
+      assert(len(params) == 4);
       pi(
 	 (cast(^c.int)params[0])^,
 	 (cast(^cl.Float)params[1])^,

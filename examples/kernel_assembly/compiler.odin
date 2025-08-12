@@ -3,6 +3,7 @@ package ka;
 import "core:c"
 import "core:mem"
 import "core:fmt"
+import "core:time"
 import "core:strings"
 import "core:odin/parser"
 import "core:odin/ast"
@@ -241,6 +242,8 @@ delete_assemble_kernels_res :: proc(akr: Assemble_Kernels_Result) {
 	free(akr.kernel_strings);
 }
 
+SHOW_TIMINGS :: #config(SHOW_TIMINGS, ODIN_DEBUG);
+
 compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context, mem.Allocator_Error) {
 	compiler := init_compiler();
 	defer delete_compiler(&compiler);
@@ -253,7 +256,18 @@ compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> 
 	// everything allocated from this function will be freed upon leave
 	defer compiler_allocator_destroy(&ca);
 
-	kernels_res, merr := assemble_kernels(&compiler, package_path);
+	kernels_res: Assemble_Kernels_Result;
+	merr: mem.Allocator_Error;
+	when SHOW_TIMINGS {
+		diff: time.Duration;
+		{
+			time.SCOPED_TICK_DURATION(&diff)
+			kernels_res, merr = assemble_kernels(&compiler, package_path);
+		}
+		fmt.eprintfln("Kernel assembly in total took: %v", diff);
+	} else {
+		kernels_res, merr = assemble_kernels(&compiler, package_path);
+	}
 	if merr != .None do return {}, merr;
 	defer delete_assemble_kernels_res(kernels_res);
 
@@ -261,7 +275,19 @@ compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> 
 }
 
 assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
-	pckg, ok := parser.parse_package_from_path(package_path);
+	pckg: ^ast.Package;
+	ok: bool;
+	when SHOW_TIMINGS {
+		// timed parsing
+		diff: time.Duration;
+		{
+			time.SCOPED_TICK_DURATION(&diff)
+			pckg, ok = parser.parse_package_from_path(package_path);
+		}
+		fmt.eprintfln("Parsing took: %v", diff);
+	} else {
+		pckg, ok = parser.parse_package_from_path(package_path);
+	}
 	assert(ok);
 
 	// register all the functions into a table
@@ -273,11 +299,26 @@ assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Ass
 		}
 	}
 	
-	kernel_string_builder: strings.Builder;
-	assert(strings.builder_init(&kernel_string_builder) != nil);
-
 	out.kernel_sizes = mem.make([^]c.size_t, out.nof_kernels) or_return;
 	out.kernel_strings = mem.make([^]cstring, out.nof_kernels) or_return;
+
+	// timed assembly
+	when SHOW_TIMINGS {
+		{
+			time.SCOPED_TICK_DURATION(&diff);
+			assemble_kernels_translate_helper(compiler, &out) or_return;
+		}
+		fmt.eprintfln("\"Assembly\" translation took: %v", diff);
+	} else {
+		assemble_kernels_translate_helper(compiler, &out) or_return;
+	}
+	return out, .None;
+}
+
+@(private="file")
+assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
+	kernel_string_builder: strings.Builder;
+	assert(strings.builder_init(&kernel_string_builder) != nil);
 
 	index := 0;
 	decl_loop: for _, proc_desc in compiler.proc_table do if proc_desc.kind == .Kernel {
@@ -331,8 +372,8 @@ assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Ass
 
 		index += 1;
 	}
-	
-	return;
+
+	return .None;
 }
 
 err_return :: #force_inline proc(node: ast.Node, msg: string, args: ..any) -> bool {

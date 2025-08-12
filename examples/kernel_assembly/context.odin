@@ -3,6 +3,7 @@ package ka;
 import "core:c"
 import "core:mem"
 import "core:fmt"
+import "core:time"
 import "core:strings"
 
 import cl "shared:opencl"
@@ -16,7 +17,24 @@ OpenCL_Context :: struct {
 	kernels:    map[string]Kernel, /**< compiled kernels */
 }
 
-init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
+when SHOW_TIMINGS {
+	init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
+		diff: time.Duration;
+		{
+			time.SCOPED_TICK_DURATION(&diff);
+			ocl = _init_cl_context(em, compiler, kernels, allocator);
+		}
+		fmt.eprintfln("OpenCL context initialization took: %v", diff);
+		return ocl;
+	}
+} else {
+	init_cl_context :: #force_inline proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> OpenCL_Context {
+		return _init_cl_context(em, compiler, kernels, allocator);
+	}
+}
+
+@(private="file")
+_init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
 	// query platform
 	nof_platforms: cl.Uint;
 	em->GetPlatformIDs(0, nil, &nof_platforms);
@@ -63,8 +81,6 @@ init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Ke
 		fmt.eprintfln("Failed calling cl.BuildProgram with exit code: %v.\nLog:", ret);
 		log_len: c.size_t;
 		assert(em->GetProgramBuildInfo(
-			ocl.program,
-			ocl.device,
 			cl.PROGRAM_BUILD_LOG,
 			0,
 			nil,
@@ -73,8 +89,6 @@ init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Ke
 		log := make([]byte, cast(int)log_len);
 		defer delete(log);
 		assert(em->GetProgramBuildInfo(
-			ocl.program,
-			ocl.device,
 			cl.PROGRAM_BUILD_LOG,
 			log_len,
 			&log[0],
