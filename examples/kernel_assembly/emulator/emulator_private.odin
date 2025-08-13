@@ -1,7 +1,13 @@
 package emulator;
 
+import "base:runtime"
+
 import "core:c"
+import "core:fmt"
 import "core:mem"
+import "core:thread"
+import "core:sys/windows"
+import "core:container/intrusive/list"
 
 import cl "shared:opencl"
 
@@ -46,7 +52,7 @@ GetDeviceIDs_NullCL :: proc(this: ^Emulator, platform: Platform_ID, device_type:
 
 	if devices == nil {
 		if num_devices == nil do return cl.INVALID_VALUE;
-		num_devices^ = 1;
+		num_devices^ = len(Device_ID_Null_Impl);
 		return cl.SUCCESS;
 	}
 
@@ -62,6 +68,7 @@ GetDeviceIDs_NullCL :: proc(this: ^Emulator, platform: Platform_ID, device_type:
 	for type in SUPPORTED_TYPES {
 		if type == device_type {
 			devices[0] = cast(Device_ID)cast(uintptr)Device_ID_Null_Impl.Dummy;
+			return cl.SUCCESS;
 		}
 	}
 
@@ -131,6 +138,7 @@ ReleaseContext_FullCL :: proc(this: ^Emulator, _context: Context) -> cl.Int {
 	return cl.ReleaseContext(cast(Context_Full)_context);
 }
 ReleaseContext_NullCL :: proc(this: ^Emulator, _context: Context) -> cl.Int {
+	assert(this.kind == .Null);
 	if _context == nil do return cl.INVALID_VALUE;
 
 	c := cast(^Context_Null_Impl)_context;
@@ -139,6 +147,8 @@ ReleaseContext_NullCL :: proc(this: ^Emulator, _context: Context) -> cl.Int {
 	if c.rc == 0 {
 		this->ReleaseCommandQueue(cast(Command_Queue)c.queue);
 		mem.free(c);
+		null := (cast(^Null_CL)this);
+		null._context = nil;
 	}
 
 	return cl.SUCCESS;
@@ -172,6 +182,15 @@ CreateCommandQueue_NullCL :: proc(this: ^Emulator, _context: Context, device: De
 		errcode_ret^ = cl.OUT_OF_HOST_MEMORY;
 		return nil;
 	}
+	null._context.queue.rc = 1;
+
+	when ODIN_OS == .Windows {
+		sys_info: windows.SYSTEM_INFO;
+		windows.GetSystemInfo(&sys_info);
+		null._context.queue.max_items = cast(c.size_t)sys_info.dwNumberOfProcessors;
+		fmt.eprintfln("Number of \"processors\": %d", null._context.queue.max_items);
+	} else do unimplemented("Unsupported OS!");
+
 	return cast(Command_Queue)null._context.queue;
 }
 
@@ -192,6 +211,7 @@ ReleaseCommandQueue_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue
 
 	if q.rc <= 0 {
 		mem.delete(q.commands);
+		null._context.queue = nil;
 	}
 
 	return cl.SUCCESS;
@@ -208,14 +228,51 @@ CreateBuffer_FullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Fl
 	return cast(Mem)cl.CreateBuffer(cast(Context_Full)_context, flags, size, host_ptr, errcode_ret);
 }
 CreateBuffer_NullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, size: c.size_t, host_ptr: rawptr, errcode_ret: ^cl.Int) -> Mem {
-	unimplemented();
+	// only cl.MEM_USE_HOST_PTR, cl.MEM_WRITE_ONLY, cl.MEM_READ_ONLY, cl.MEM_READ_WRITE are supported
+
+	SUPPORTED_FLAGS: cl.Mem_Flags : cl.MEM_USE_HOST_PTR | cl.MEM_WRITE_ONLY | cl.MEM_READ_ONLY | cl.MEM_READ_WRITE;
+
+	// check if `flags' contain unsupported flags
+	// this is inverted implication in bitwise: ~(~flags | SUPPORTED_FLAGS)
+	if (flags & ~SUPPORTED_FLAGS) != 0 {
+		errcode_ret^ = cl.INVALID_VALUE;
+		return nil;
+	}
+
+	if (flags & cl.MEM_USE_HOST_PTR) != 0 {
+		memobj, merr := mem.new(Mem_Null_Impl);
+		if merr != .None {
+			errcode_ret^ = cl.OUT_OF_RESOURCES;
+			return nil;
+		}
+		memobj^ = {
+			rc = 1,
+			size = size,
+			data = host_ptr,
+			flags = flags,
+		};
+
+		c := cast(^Context_Null_Impl)_context;
+		list.push_back(&c.memobjs, &memobj.node);
+
+		return cast(Mem)memobj;
+	}
+
+	unreachable();
 }
 
 ReleaseMemObject_FullCL :: proc(this: ^Emulator, memobj: Mem) -> cl.Int {
 	return cl.ReleaseMemObject(cast(Mem_Full)memobj);
 }
 ReleaseMemObject_NullCL :: proc(this: ^Emulator, memobj: Mem) -> cl.Int {
-	unimplemented();
+	assert(this.kind == .Null);
+	null := cast(^Null_CL)this;
+	if null._context == nil {
+		return cl.INVALID_VALUE;
+	}
+
+	list.remove(&null._context.memobjs, &(cast(^Mem_Null_Impl)memobj)^.node);
+	return cl.SUCCESS;
 }
 
 CreateProgramWithSource_FullCL :: proc(this: ^Emulator, _context: Context, count: cl.Uint, strings: [^]cstring, lengths: [^]c.size_t, errcode_ret: ^cl.Int) -> Program {
@@ -270,8 +327,8 @@ ReleaseProgram_NullCL :: proc(this: ^Emulator, program: Program) -> cl.Int {
 
 	null.program.rc -= 1;
 	if null.program.rc <= 0 {
-		for kernel in null.program.kernels {
-			this->ReleaseKernel(kernel);
+		for &kernel in null.program.kernels {
+			this->ReleaseKernel(cast(Kernel)&kernel);
 		}
 		mem.free(null.program);
 	}
@@ -290,21 +347,152 @@ SetKernelArg_FullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint,
 	return cl.SetKernelArg(cast(Kernel_Full)kernel, arg_index, arg_size, arg_value);
 }
 SetKernelArg_NullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint, arg_size: c.size_t, arg_value: rawptr) -> cl.Int {
-	unimplemented();
+	assert(this.kind == .Null);
+
+	k := cast(^Kernel_Null_Impl)kernel;
+	p := (cast(^Null_CL)this).program;
+
+	kernel_in := false;
+	for &ker in p.kernels do if auto_cast &ker == kernel {
+		kernel_in = true;
+	}
+	if !kernel_in || cast(int)arg_index >= len(k.args) do return cl.INVALID_VALUE;
+
+	#no_bounds_check k.args[arg_index].size  = arg_size;
+	#no_bounds_check k.args[arg_index].value = arg_value;
+
+	return cl.SUCCESS;
 }
 
 ReleaseKernel_FullCL :: proc(this: ^Emulator, kernel: Kernel) -> cl.Int {
 	return cl.ReleaseKernel(cast(Kernel_Full)kernel);
 }
 ReleaseKernel_NullCL :: proc(this: ^Emulator, kernel: Kernel) -> cl.Int {
-	unimplemented();
+	assert(this.kind == .Null);
+
+	k := cast(^Kernel_Null_Impl)kernel;
+	p := (cast(^Null_CL)this).program;
+	kernel_in := false;
+	for &ker in p.kernels do if auto_cast &ker == kernel {
+		kernel_in = true;
+	}
+	if !kernel_in do return cl.INVALID_VALUE;
+
+	// do not delete the element from kernel program registry
+	// just invalidate the existing object
+	delete(k.args);
+	mem.zero_item(k);
+
+	return cl.SUCCESS;
 }
 
-EnqueueNDRangeKernel_FullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
+MAX_DIMS :: 3;
+
+EnqueueNDRangeKernel_FullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: [^]c.size_t, global_work_size: [^]c.size_t, local_work_size: [^]c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: [^]cl.Event, event: ^cl.Event) -> cl.Int {
 	return cl.EnqueueNDRangeKernel(cast(Command_Queue_Full)command_queue, cast(Kernel_Full)kernel, work_dim, global_work_offset, global_work_size, local_work_size, num_events_in_wait_list, event_wait_list, event);
 }
-EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
-	unimplemented();
+EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: [^]c.size_t, global_work_size: [^]c.size_t, local_work_size: [^]c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: [^]cl.Event, event: ^cl.Event) -> cl.Int {
+	assert(this.kind == .Null);
+
+	// validate params
+	if global_work_offset != nil do return cl.INVALID_VALUE;
+	p := (cast(^Null_CL)this).program;
+	kernel_in := false;
+	for &ker in p.kernels do if auto_cast &ker == kernel {
+		kernel_in = true;
+	}
+	if !kernel_in do return cl.INVALID_VALUE;
+
+	ndrange: NDRange;
+
+	// get the number of total work items from global dimensions
+	total_items: c.size_t;
+	for i in 0..<work_dim {
+		total_items *= global_work_size[i];
+	}
+
+	q := cast(^Command_Queue_Null_Impl)command_queue;
+	if total_items > q.max_items do return cl.INVALID_VALUE;
+
+	thread.pool_init(&ndrange.items, runtime.default_allocator(), cast(int)total_items);
+	defer thread.pool_destroy(&ndrange.items);
+
+	/** @brief designed for Task.user_data value */
+	Task_In :: struct {
+		args: []rawptr, /**< wrapper params */
+		addr: #type proc([]rawptr), /**< @(kernel) wrapper proc addr */
+		groups: []Work_Group, /**< used to get proper sync.Barrier into Kernel_Builtin_Context_Payload */
+	}
+
+	/** @brief general thread task executing @(kernel) wrapper from Task_In */
+	task_proc :: proc(t: thread.Task) {
+		// update payload ids
+		payload := (cast(^Kernel_Builtin_Context_Payload)context.user_ptr)^;
+
+		switch payload.work_dim {
+			case 1:
+				payload.global_pos.x += 1;
+
+				payload.local_pos.x  += 1 % payload.local_work_size[0];
+			case 2:
+				payload.global_pos.x += 1;
+				if payload.global_pos.x >= payload.global_work_size[0] {
+					payload.global_pos.x = 0;
+					payload.global_pos.y += 1;
+				}
+
+				payload.local_pos.x = payload.global_pos.x % payload.local_work_size[0];
+				payload.local_pos.y = payload.global_pos.y % payload.local_work_size[1];
+			case 3:
+				payload.global_pos.x += 1;
+				if payload.global_pos.x >= payload.global_work_size[0] {
+					payload.global_pos.x = 0;
+					payload.global_pos.y += 1;
+					if payload.global_pos.y >= payload.global_work_size[1] {
+						payload.global_pos.y = 0;
+						payload.global_pos.z += 1;
+					}
+				}
+
+				payload.local_pos.x = payload.global_pos.x % payload.local_work_size[0];
+				payload.local_pos.y = payload.global_pos.y % payload.local_work_size[1];
+				payload.local_pos.z = payload.global_pos.z % payload.local_work_size[2];
+			case: unreachable();
+		}
+		// reupload payload
+		context.user_ptr = &payload;
+
+		task_in := cast(^Task_In)t.data;
+		task_in.addr(task_in.args);
+	}
+
+	c := (cast(^Null_CL)this)._context;
+	payload: Kernel_Builtin_Context_Payload = {
+		_context = c,
+		work_dim = work_dim,
+		global_work_size = global_work_size,
+		local_work_size = local_work_size,
+	};
+	context.user_ptr = &payload;
+
+	// copy kernel args into Task_In
+	k := cast(^Kernel_Null_Impl)kernel;
+	task_in_args: [10]rawptr;
+	assert(len(task_in_args) >= len(k.args), "Too many function parameters!");
+	for arg, index in k.args {
+		task_in_args[index] = arg.value;
+	}
+
+	task_in: Task_In = {
+		args   = task_in_args[:len(k.args)],
+		addr   = k.addr,
+		groups = ndrange.groups,
+	};
+	thread.pool_add_task(&ndrange.items, runtime.default_allocator(), task_proc, &task_in, 0);
+	thread.pool_start(&ndrange.items);
+	thread.pool_finish(&ndrange.items);
+
+	return cl.SUCCESS;
 }
 
 EnqueueReadBuffer_FullCL :: proc(this: ^Emulator, command_queue: Command_Queue, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {

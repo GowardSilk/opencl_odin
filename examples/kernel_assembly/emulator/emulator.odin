@@ -4,6 +4,9 @@ import "base:intrinsics"
 
 import "core:c"
 import "core:mem"
+import "core:sync"
+import "core:thread"
+import "core:container/intrusive/list"
 
 import cl "shared:opencl"
 
@@ -140,7 +143,7 @@ Release_Program_Type              :: #type proc(this: ^Emulator, program: Progra
 Create_Kernel_Type                :: #type proc(this: ^Emulator, program: Program, kernel_name: cstring, errcode_ret: ^cl.Int) -> Kernel;
 Set_Kernel_Arg_Type               :: #type proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint, arg_size: c.size_t, arg_value: rawptr) -> cl.Int;
 Release_Kernel_Type               :: #type proc(this: ^Emulator, kernel: Kernel) -> cl.Int;
-Enqueue_NDRange_Kernel_Type       :: #type proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: ^c.size_t, global_work_size: ^c.size_t, local_work_size: ^c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int;
+Enqueue_NDRange_Kernel_Type       :: #type proc(this: ^Emulator, command_queue: Command_Queue, kernel: Kernel, work_dim: cl.Uint, global_work_offset: [^]c.size_t, global_work_size: [^]c.size_t, local_work_size: [^]c.size_t, num_events_in_wait_list: cl.Uint, event_wait_list: [^]cl.Event, event: ^cl.Event) -> cl.Int;
 Enqueue_Read_Buffer_Type          :: #type proc(this: ^Emulator, command_queue: Command_Queue, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int;
 
 Platform_ID :: distinct rawptr;
@@ -165,6 +168,7 @@ Context_Null_Impl :: struct {
 	rc:       int,
 	device:   Device_ID_Null_Impl,
 	queue:    ^Command_Queue_Null_Impl,
+	memobjs:  list.List,
 }
 
 Program :: distinct rawptr;
@@ -172,13 +176,14 @@ Program_Full :: cl.Program;
 Program_Null :: Program; // == ptr to Program_Null_Impl
 Program_Null_Impl :: struct {
 	rc: int,
-	kernels: []Kernel_Null,
+	kernels: []Kernel_Null_Impl,
 }
 
 Kernel :: distinct rawptr;
 Kernel_Full :: cl.Kernel;
 Kernel_Null :: Kernel; // == ptr to Kernel_Null_Impl
 Kernel_Null_Impl :: struct {
+	name: cstring,
 	addr: #type proc(_: []rawptr), /**< pointer to the kernel wrapper */
 	args: []Kernel_Null_Arg, /**< kernel arguments */
 }
@@ -194,23 +199,53 @@ Command_Queue_Null_Impl :: struct {
 	rc: int,
 	commands: [dynamic]#type struct {},
 	flags: Command_Queue_Properties_Null,
+
+	max_items: uint, /**< max number of 'threads' (aka Work_Items) a 'thread pool' (aka NDRange) can have */
 }
-Command_Queue_Properties_Null :: enum {
-	QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE = 1,
-	QUEUE_PROFILING_ENABLE = 2,
-	QUEUE_ON_DEVICE = 5, // needs QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE
-	CL_QUEUE_ON_DEVICE_DEFAULT = 13, // needs QUEUE_ON_DEVICE_DEFAULT
+Command_Queue_Properties_Null :: enum cl.Command_Queue_Properties {
+	QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE = cl.QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
+	QUEUE_PROFILING_ENABLE = cl.QUEUE_PROFILING_ENABLE,
+	QUEUE_ON_DEVICE = cl.QUEUE_ON_DEVICE, // needs QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE
+	QUEUE_ON_DEVICE_DEFAULT = cl.QUEUE_ON_DEVICE_DEFAULT, // needs QUEUE_ON_DEVICE_DEFAULT
 }
 
 Mem :: distinct rawptr;
 Mem_Full :: cl.Mem;
 Mem_Null :: Mem; // == ptr to Mem_Null_Impl
 Mem_Null_Impl :: struct {
+	node: list.Node, /*< node of Context_Null_Impl.memobjs */
+
 	rc: int,
 	size: c.size_t,
 	data: rawptr,
 	flags: cl.Mem_Flags,
+	/* TODO(GowardSilk): FIX guard: sync.Barrier, */
 }
+
+/**
+ * @brief stores necessary Emulator and NDRange data for @(kernel_builtin) procs to work properly; the value of this struct is contained in context.user_ptr
+ * @note values of this struct are purely READ-ONLY (therefore they do not need any form of sync, not even atomic)
+ */
+Kernel_Builtin_Context_Payload :: struct {
+	_context: ^Context_Null_Impl,
+	work_dim: cl.Uint,
+	global_work_size: [^]c.size_t,
+	local_work_size: [^]c.size_t,
+
+	// these values are set inside task_proc dynamically for each Work_Item
+	global_pos: [MAX_DIMS]c.size_t, /**< used for get_global_id(#) */
+	local_pos: [MAX_DIMS]c.size_t, /**< used for get_local_id(#) */
+	barrier: ^sync.Barrier,
+}
+NDRange :: struct {
+	items:  thread.Pool,
+	groups: []Work_Group,
+}
+Work_Group :: struct {
+	work_items: []Work_Item,
+	barrier: sync.Barrier,
+}
+Work_Item :: thread.Thread;
 
 /**
  * @brief Create_Buffer_(Null|Full)CL [Ex]tended version aided by Odin's parapoly

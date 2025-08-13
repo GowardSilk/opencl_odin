@@ -120,6 +120,7 @@ main :: proc() {
 		context.allocator = mem.tracking_allocator(&track);
 	}
 
+	#assert(false, "TODO: WE NEED TO SOMEHOW SOLVE THE PROBLEM OF @(buildin_kernel) BEING INSIDE ANOTHER PACKAGE (aka `emulator`) WHILE ALL OF THE OTHER FUCNTIONS BEING SOMEWHERE ELSE... ALSO WE NEED TO TAKE INTO ACCOUNT THAT \"BUILDING\" HAS ALREADY BEEN DONE WHEN COMPILING ODIN, SO em[NullCL]->BuildProgram IS USELESS; MAKE SOMETHING ELSE (aka NEW METHOD WITH \"Ex\" OR \"Null\")");
 	em := init_emulator_full();
 	fmt.eprintfln("\nmy_kernel:\n");
 	my_kernel_test(&em);
