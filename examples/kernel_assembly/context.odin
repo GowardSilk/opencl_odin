@@ -6,63 +6,96 @@ import "core:fmt"
 import "core:time"
 import "core:strings"
 
+import "emulator"
 import cl "shared:opencl"
 
-OpenCL_Context :: struct {
+Platform_ID   :: emulator.Platform_ID;
+Device_ID     :: emulator.Device_ID;
+Context       :: emulator.Context;
+Program       :: emulator.Program;
+Command_Queue :: emulator.Command_Queue;
+Kernel        :: emulator.Kernel;
+
+Emulator_Wrapper :: struct #raw_union {
+	null: emulator.Null_CL,
+	full: emulator.Full_CL,
+}
+
+OpenCL_Context :: struct #no_copy {
 	platform:   Platform_ID,
 	device:     Device_ID,
 	_context:   Context,
 	program:    Program,
 	queue:      Command_Queue,
 	kernels:    map[string]Kernel, /**< compiled kernels */
+
+	emulator_base: ^emulator.Emulator,
+	/**
+	 * @brief contains all possible emulator types
+	 * @note as an "outsider" we do not care about the specific type, only the subtype (aka emulator.Emulator) but we need a way to properly store both in case they contain additional data
+	 */
+	emulator: Emulator_Wrapper,
 }
 
 when SHOW_TIMINGS {
-	init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
+	init_cl_context :: proc(ocl: ^OpenCL_Context, ekind: emulator.Emulator_Kind, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) {
+		context.allocator = allocator;
 		diff: time.Duration;
 		{
 			time.SCOPED_TICK_DURATION(&diff);
-			ocl = _init_cl_context(em, compiler, kernels, allocator);
+			_init_cl_context(ocl, ekind, compiler, kernels);
 		}
 		fmt.eprintfln("OpenCL context initialization took: %v", diff);
-		return ocl;
 	}
 } else {
-	init_cl_context :: #force_inline proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> OpenCL_Context {
-		return _init_cl_context(em, compiler, kernels, allocator);
+	init_cl_context :: #force_inline proc(ocl: ^OpenCL_Context, ekind: emulator.Emulator_Kind, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) {
+		context.allocator = allocator;
+		_init_cl_context(ocl, ekind, compiler, kernels);
 	}
 }
 
 @(private="file")
-_init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_Kernels_Result, allocator: mem.Allocator) -> (ocl: OpenCL_Context) {
+_init_cl_context :: proc(ocl: ^OpenCL_Context, ekind: emulator.Emulator_Kind, compiler: ^Compiler, kernels: Assemble_Kernels_Result) {
+	switch ekind {
+		case .Null:
+			ocl.emulator.null = emulator.init_null();
+			ocl.emulator_base = &ocl.emulator.null.base;
+		case .Full:
+			ocl.emulator.full = emulator.init_full();
+			ocl.emulator_base = &ocl.emulator.full.base;
+	}
+	em: ^emulator.Emulator = ocl.emulator_base;
+
+	ret: cl.Int;
 	// query platform
 	nof_platforms: cl.Uint;
-	em->GetPlatformIDs(0, nil, &nof_platforms);
-	assert(nof_platforms > 0);
-	assert(em->GetPlatformIDs(1, &ocl.platform, nil) == cl.SUCCESS);
+	ret = em->GetPlatformIDs(0, nil, &nof_platforms);
+	fmt.assertf(ret == cl.SUCCESS, "em->GetPlatformIDs(0, nil, &nof_platforms) returned %v", ret);
+	assert(nof_platforms > 0, "em->GetPlatformIDs(0, nil, &nof_platforms) gave 0 platforms");
+	ret = em->GetPlatformIDs(1, &ocl.platform, nil);
+	fmt.assertf(ret == cl.SUCCESS, "em->GetPlatformIDs(1, &ocl.platform, nil) returned %v", ret);
 
 	// query device
 	nof_devices: cl.Uint;
-	em->GetDeviceIDs(
+	ret = em->GetDeviceIDs(
 		ocl.platform,
-		cl.DEVICE_TYPE_GPU,
+		cl.DEVICE_TYPE_DEFAULT,
 		0,
 		nil,
 		&nof_devices
 	);
-	assert(nof_devices > 0);
-	assert(
-		em->GetDeviceIDs(
-			ocl.platform,
-			cl.DEVICE_TYPE_GPU,
-			1,
-			&ocl.device,
-			nil
-		) == cl.SUCCESS
+	fmt.assertf(ret == cl.SUCCESS, "em->GetDeviceIDs(...) returned %v", ret);
+	assert(nof_devices > 0, "em->GetDeviceIDs(...) gave 0 devices");
+	ret = em->GetDeviceIDs(
+		ocl.platform,
+		cl.DEVICE_TYPE_DEFAULT,
+		1,
+		&ocl.device,
+		nil
 	);
+	fmt.assertf(ret == cl.SUCCESS, "em->GetDeviceIDs(...) returned %v", ret);
 
 	// context
-	ret: cl.Int;
 	ocl._context = em->CreateContext(nil, 1, &ocl.device, nil, nil, &ret);
 	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateContext with exit code: %v", ret);
 
@@ -70,8 +103,8 @@ _init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_K
 	ocl.program = em->CreateProgramWithSource(
 		ocl._context,
 		kernels.nof_kernels,
-		&kernels.kernel_strings[0],
-		&kernels.kernel_sizes[0],
+		kernels.kernel_strings,
+		kernels.kernel_sizes,
 		&ret
 	);
 	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateProgramWithSource with exit code: %v", ret);
@@ -81,6 +114,8 @@ _init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_K
 		fmt.eprintfln("Failed calling cl.BuildProgram with exit code: %v.\nLog:", ret);
 		log_len: c.size_t;
 		assert(em->GetProgramBuildInfo(
+			ocl.program,
+			ocl.device,
 			cl.PROGRAM_BUILD_LOG,
 			0,
 			nil,
@@ -89,6 +124,8 @@ _init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_K
 		log := make([]byte, cast(int)log_len);
 		defer delete(log);
 		assert(em->GetProgramBuildInfo(
+			ocl.program,
+			ocl.device,
 			cl.PROGRAM_BUILD_LOG,
 			log_len,
 			&log[0],
@@ -98,16 +135,26 @@ _init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_K
 	}
 
 	// kernels
-	ocl.kernels = mem.make(map[string]Kernel, allocator);
+	ocl.kernels = mem.make(map[string]Kernel);
 	for name, desc in compiler.proc_table do if desc.kind == .Kernel {
 		cname := strings.clone_to_cstring(name);
 		defer delete(cname);
 
-		map_insert(
-			&ocl.kernels,
-			strings.clone(name),
-			em->CreateKernel(ocl.program, cname, &ret)
-		);
+		switch em.kind {
+			case .Full:
+				map_insert(
+					&ocl.kernels,
+					strings.clone(name),
+					em->CreateKernel(ocl.program, cname, &ret)
+				);
+			case .Null:
+				nof_params := len(desc.lit.type.params.list);
+				map_insert(
+					&ocl.kernels,
+					strings.clone(name),
+					emulator.CreateKernel_Null(em, ocl.program, desc.addr, nof_params, &ret)
+				);
+		}
 		fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateKernel with exit code: %v", ret);
 	}
 	when ODIN_DEBUG do fmt.eprintfln("\x1b[32mAll kernels compiled\x1b[0m");
@@ -120,16 +167,19 @@ _init_cl_context :: proc(em: ^Emulator, compiler: ^Compiler, kernels: Assemble_K
 		&ret
 	);
 	fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateCommandQueue with exit code: %v", ret);
-
-	return ocl;
 }
 
-delete_cl_context :: proc(em: ^Emulator) {
-	em->ReleaseContext();
-	em->ReleaseCommandQueue();
-	for kernel_name, kernel in em.ocl.kernels {
-		em->ReleaseKernel(kernel);
+delete_cl_context :: #force_inline proc(ocl: ^OpenCL_Context) {
+	ocl.emulator_base->ReleaseContext(ocl._context);
+	ocl.emulator_base->ReleaseProgram(ocl.program);
+	switch ocl.emulator_base.kind {
+		case .Null: emulator.delete_null(&ocl.emulator.null);
+		case .Full: emulator.delete_full(&ocl.emulator.full);
 	}
-	mem.delete(em.ocl.kernels);
+	for k in ocl.kernels {
+		delete_key(&ocl.kernels, k);
+		mem.delete(k);
+	}
+	mem.delete(ocl.kernels);
 }
 

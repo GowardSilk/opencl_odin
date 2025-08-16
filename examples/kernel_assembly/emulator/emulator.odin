@@ -4,6 +4,7 @@ import "base:intrinsics"
 
 import "core:c"
 import "core:mem"
+import "core:fmt"
 import "core:sync"
 import "core:thread"
 import "core:container/intrusive/list"
@@ -68,7 +69,7 @@ Full_CL :: struct {
 }
 
 /** @brief */
-init_emulator_null :: proc() -> (em: Null_CL) {
+init_null :: proc() -> (em: Null_CL) {
 	em.base.kind = .Null;
 
 	em.base.GetPlatformIDs = GetPlatformIDs_NullCL;
@@ -96,7 +97,7 @@ init_emulator_null :: proc() -> (em: Null_CL) {
 }
 
 /** @brief */
-init_emulator_full :: proc() -> (em: Full_CL) {
+init_full :: proc() -> (em: Full_CL) {
 	em.base.kind = .Full;
 
 	em.base.GetPlatformIDs = GetPlatformIDs_FullCL;
@@ -121,6 +122,20 @@ init_emulator_full :: proc() -> (em: Full_CL) {
 	em.base.EnqueueReadBuffer = EnqueueReadBuffer_FullCL;
 
 	return em;
+}
+
+delete :: proc { delete_null, delete_full }
+@(disabled=true)
+delete_full :: proc(em: ^Full_CL) {}
+delete_null :: proc(em: ^Null_CL) {
+	if em._context != nil {
+		fmt.eprintfln("Context was not properly deinitialized!");
+		assert(em.base->ReleaseContext(cast(Context)em._context) == cl.SUCCESS);
+	}
+	if em.program != nil {
+		fmt.eprintfln("Program was not properly deinitialized!");
+		assert(em.base->ReleaseProgram(cast(Program)em.program) == cl.SUCCESS);
+	}
 }
 
 // OpenCL API
@@ -183,10 +198,10 @@ Kernel :: distinct rawptr;
 Kernel_Full :: cl.Kernel;
 Kernel_Null :: Kernel; // == ptr to Kernel_Null_Impl
 Kernel_Null_Impl :: struct {
-	name: cstring,
-	addr: #type proc(_: []rawptr), /**< pointer to the kernel wrapper */
+	addr: Kernel_Null_Proc_Wrapper, /**< pointer to the kernel wrapper */
 	args: []Kernel_Null_Arg, /**< kernel arguments */
 }
+Kernel_Null_Proc_Wrapper :: #type proc([]rawptr);
 Kernel_Null_Arg :: struct {
 	size: c.size_t,
 	value: rawptr,
@@ -251,10 +266,42 @@ Work_Item :: thread.Thread;
  * @brief Create_Buffer_(Null|Full)CL [Ex]tended version aided by Odin's parapoly
  * @note this function cannot be part of the Emulator_VTable because of the parapoly itself
  */
-CreateBufferEx :: proc "system" (this: ^Emulator, _context: Context, flags: cl.Mem_Flags, host_ptr: ^$T) -> Maybe(Mem) {
-	switch this.kind {
-		case .Full: return CreateBufferEx_FullCL(this, auto_cast _context, flags, host_ptr);
-		case .Null: return CreateBufferEx_NullCL(this, auto_cast _context, flags, host_ptr);
+CreateBufferEx :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, host_ptr: ^$T) -> Maybe(Mem) {
+	ret: cl.Int;
+	buf: Mem;
+	when intrinsics.type_is_slice(T) || intrinsics.type_is_dynamic_array(T) {
+		buf = this->CreateBuffer(_context, flags, size_of(host_ptr[0]) * len(host_ptr^), raw_data(host_ptr^), &ret);
+	} else do unimplemented();
+
+	if ret == cl.SUCCESS do return cast(Mem)buf;
+	return nil;
+}
+
+/**
+ * @brief utility function for Null_CL emulator type when creating Kernel(s)
+ */
+CreateKernel_Null :: proc(this: ^Emulator, program: Program, kernel_addr: Kernel_Null_Proc_Wrapper, nof_params: int, errcode_ret: ^cl.Int) -> Kernel {
+	assert(this.kind == .Null);
+	null := cast(^Null_CL)this;
+	p := null.program;
+
+	@(static)
+	kernel_idx := 0; // index of the last created Kernel in program.kernels
+
+	if p != auto_cast program || kernel_addr == nil || kernel_idx >= len(p.kernels) {
+		if errcode_ret != nil do errcode_ret ^= cl.INVALID_VALUE;
+		return nil;
 	}
-	unreachable();
+
+	merr: mem.Allocator_Error;
+	k := &p.kernels[kernel_idx];
+	k.addr = kernel_addr;
+	k.args, merr = mem.make([]Kernel_Null_Arg, nof_params);
+	if merr != .None {
+		if errcode_ret != nil do errcode_ret ^= cl.OUT_OF_HOST_MEMORY;
+		return nil;
+	}
+
+	kernel_idx += 1;
+	return cast(Kernel)k;
 }

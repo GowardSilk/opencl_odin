@@ -4,9 +4,13 @@ import "core:c"
 import "core:mem"
 import "core:fmt"
 
+import "emulator"
+import "my_kernels"
 import cl "shared:opencl"
 
-my_kernel_test :: proc(em: ^Emulator) {
+my_kernel_test :: proc(ocl: ^OpenCL_Context) {
+	em := ocl.emulator_base;
+
 	outputs, inputs: []cl.Float;
 	merr: mem.Allocator_Error;
 
@@ -15,37 +19,39 @@ my_kernel_test :: proc(em: ^Emulator) {
 	assert(merr == .None);
 	defer mem.delete(inputs);
 	for i in 0..<10 do inputs[i] = cast(cl.Float)i + 1;
-	inputs_mem := CreateBufferEx(em, cl.MEM_READ_ONLY | cl.MEM_USE_HOST_PTR, &inputs).?;
+	inputs_mem := emulator.CreateBufferEx(em, ocl._context, cl.MEM_READ_ONLY | cl.MEM_USE_HOST_PTR, &inputs).?;
 	defer em->ReleaseMemObject(inputs_mem);
 
 	outputs, merr = mem.make([]cl.Float, cast(int)work_size);
 	assert(merr == .None);
 	defer mem.delete(outputs);
-	outputs_mem := CreateBufferEx(em, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, &outputs).?;
+	outputs_mem := emulator.CreateBufferEx(em, ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, &outputs).?;
+	fmt.eprintfln("%p", &(cast(^emulator.Mem_Null_Impl)outputs_mem)^.node);
 	defer em->ReleaseMemObject(outputs_mem);
 
 	coeff: cl.Float = 2;
 
-	my_kernel := em.ocl.kernels["my_kernel"];
+	my_kernel := ocl.kernels["my_kernel"];
 	ret := em->SetKernelArg(my_kernel, 0, size_of(inputs_mem), &inputs_mem);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	ret = em->SetKernelArg(my_kernel, 1, size_of(outputs_mem), &outputs_mem);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	ret = em->SetKernelArg(my_kernel, 2, size_of(coeff), &coeff);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
-	ret = em->EnqueueNDRangeKernelEx(my_kernel, 1, nil, &work_size);
+	ret = em->EnqueueNDRangeKernel(ocl.queue, my_kernel, 1, nil, &work_size, nil, 0, nil, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
-	ret = em->FinishCommandQueue();
+	ret = em->FinishCommandQueue(ocl.queue);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	fmt.eprintfln("%v\n* %f\n=========\n%v", inputs, coeff, outputs);
 }
 
-pi_test :: proc(em: ^Emulator, $vector_size: int) {
+pi_test :: proc(ocl: ^OpenCL_Context, $vector_size: int) {
+	em := ocl.emulator_base;
 	NOF_STEPS :: 512 * 512 * 512;
 
 	when vector_size == 1 {
-		kernel := em.ocl.kernels["pi"];
+		kernel := ocl.kernels["pi"];
 		NOF_ITERS :: 262144;
 		WGS       :: 8; // [W]ork[G]roup[S]ize;
 	} else when vector_size == 4 {
@@ -60,7 +66,7 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	nof_work_groups: c.size_t = NOF_STEPS / (WGS * NOF_ITERS);
 
 	max_size: c.size_t;
-	ret := em->GetKernelWorkGroupInfo(kernel, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
+	ret := em->GetKernelWorkGroupInfo(kernel, ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	fmt.eprintfln("WGS: %d; max_size: %d", WGS, max_size);
@@ -70,7 +76,7 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	}
 
 	if nof_work_groups < 1 {
-		ret = em->GetDeviceInfo(cl.DEVICE_MAX_COMPUTE_UNITS, size_of(nof_work_groups), &nof_work_groups, nil);
+		ret = em->GetDeviceInfo(ocl.device, cl.DEVICE_MAX_COMPUTE_UNITS, size_of(nof_work_groups), &nof_work_groups, nil);
 		fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 		work_group_size = NOF_STEPS / (nof_work_groups * NOF_ITERS);
 	}
@@ -83,7 +89,7 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	partial_sums, merr := mem.make([^]cl.Float, cast(int)nof_work_groups);
 	assert(merr == .None);
 	defer mem.free(partial_sums);
-	partial_sums_mem := em->CreateBuffer(cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
+	partial_sums_mem := em->CreateBuffer(ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	defer em->ReleaseMemObject(partial_sums_mem);
 
@@ -97,7 +103,7 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	//ret = em->EnqueueNDRangeKernelEx(kernel, 1, nil, &nof_steps, &work_group_size);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	assert(em->FinishCommandQueue() == cl.SUCCESS);
+	assert(em->FinishCommandQueue(ocl.queue) == cl.SUCCESS);
 
 	//fmt.eprintfln("EnqueueReadBufferEx(mem: %v, blocking: %v, offset: %v, size: %v, host_ptr: %v)", partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums)
 	//ret = em->EnqueueReadBufferEx(partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums);
@@ -112,6 +118,18 @@ pi_test :: proc(em: ^Emulator, $vector_size: int) {
 	fmt.eprintfln("Result: %f", final_sum);
 }
 
+query_proc :: proc(proc_desc: ^Proc_Desc) {
+	switch proc_desc.name {
+	case "my_kernel":
+		proc_desc.addr = my_kernels.my_kernel_nullcl_wrapper;
+		return;
+	case "pi":
+		proc_desc.addr = my_kernels.pi_nullcl_wrapper;
+		return;
+	}
+	unreachable();
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator;
@@ -120,13 +138,14 @@ main :: proc() {
 		context.allocator = mem.tracking_allocator(&track);
 	}
 
-	#assert(false, "TODO: WE NEED TO SOMEHOW SOLVE THE PROBLEM OF @(buildin_kernel) BEING INSIDE ANOTHER PACKAGE (aka `emulator`) WHILE ALL OF THE OTHER FUCNTIONS BEING SOMEWHERE ELSE... ALSO WE NEED TO TAKE INTO ACCOUNT THAT \"BUILDING\" HAS ALREADY BEEN DONE WHEN COMPILING ODIN, SO em[NullCL]->BuildProgram IS USELESS; MAKE SOMETHING ELSE (aka NEW METHOD WITH \"Ex\" OR \"Null\")");
-	em := init_emulator_full();
+	ocl: OpenCL_Context;
+	merr := compile(&ocl, .Null, query_proc);
+	assert(merr == .None);
 	fmt.eprintfln("\nmy_kernel:\n");
-	my_kernel_test(&em);
+	my_kernel_test(&ocl);
 	fmt.eprintfln("\npi:\n");
-	pi_test(&em, 1);
-	delete_emulator(&em);
+	pi_test(&ocl, 1);
+	delete_cl_context(&ocl);
 
 	when ODIN_DEBUG {
 		if len(track.allocation_map) <= 0 do fmt.println("\x1b[32mNo leaks\x1b[0m");

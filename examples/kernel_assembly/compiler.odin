@@ -8,6 +8,7 @@ import "core:strings"
 import "core:odin/parser"
 import "core:odin/ast"
 
+import "emulator"
 import cl "shared:opencl"
 
 Compiler :: struct {
@@ -17,12 +18,15 @@ Compiler :: struct {
 	 */
 	proc_table:	map[string]Proc_Desc,
 	types:		map[string]string,
+	builtin_path:	string, /**< path to @(builtin) kernel procs */
+	package_path:	string, /**< path to @(kernel) procs */
+	query_addr:	#type proc(^Proc_Desc), /**< procedure to query an address from Proc_Desc */
 }
 
-init_compiler :: proc(allocator := context.allocator) -> Compiler {
+init_compiler :: proc(query_addr_proc: #type proc(^Proc_Desc), builtin_path, package_path: string, allocator := context.allocator) -> Compiler {
 	p := mem.make(map[string]Proc_Desc, allocator);
 	t := generate_opencl_type_map(allocator);
-	return Compiler { p, t };
+	return Compiler { p, t, builtin_path, package_path, query_addr_proc, };
 }
 
 delete_compiler :: proc(using compiler: ^Compiler) {
@@ -61,8 +65,9 @@ Proc_Desc :: struct {
 	name:        string,
 	params:      map[string]Proc_Desc_Param,
 	kind:        Proc_Kind,
+	addr:        emulator.Kernel_Null_Proc_Wrapper,
 }
-PROC_DESC_INVALID := Proc_Desc { nil, nil, "", nil, .Default };
+PROC_DESC_INVALID := Proc_Desc { nil, nil, "", nil, .Default, nil };
 
 Is_Proc_Ret :: enum {
 	OK = 0,
@@ -77,11 +82,12 @@ is_proc_lit :: #force_inline proc(any_stmt: ^ast.Any_Stmt, proc_desc: ^Proc_Desc
 			proc_lit, is_proc_lit := val_decl.values[0].derived_expr.(^ast.Proc_Lit);
 			if is_proc_lit {
 				proc_desc^ = Proc_Desc {
-					val_decl.attributes[:],
-					proc_lit,
-					val_decl.names[0].derived_expr.(^ast.Ident).name,
-					nil,
-					.Default,
+					attributes = val_decl.attributes[:],
+					lit = proc_lit,
+					name = val_decl.names[0].derived_expr.(^ast.Ident).name,
+					params = nil,
+					kind = .Default,
+					addr = nil,
 				};
 				return .OK;
 			}
@@ -244,8 +250,19 @@ delete_assemble_kernels_res :: proc(akr: Assemble_Kernels_Result) {
 
 SHOW_TIMINGS :: #config(SHOW_TIMINGS, ODIN_DEBUG);
 
-compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> (OpenCL_Context, mem.Allocator_Error) {
-	compiler := init_compiler();
+/**
+ * @brief "compiles" kernel procedures into OpenCL kernels and initializes OpenCL_Context with a program containing them
+ * @param query_addr_proc to query procedure addresses from Proc_Desc (can be 'nil' when `ekind' parameter is not .Null)
+ * @return Allocation_Error if any occured
+ */
+compile :: proc(
+		ocl: ^OpenCL_Context,
+		ekind: emulator.Emulator_Kind,
+		query_addr_proc: #type proc(^Proc_Desc) = nil,
+		builtin_path := "kernel_assembly/emulator",
+		package_path := "kernel_assembly/my_kernels"
+	) -> mem.Allocator_Error {
+	compiler := init_compiler(query_addr_proc, builtin_path, package_path);
 	defer delete_compiler(&compiler);
 
 	// store the allocator which is used in scope of the function caller (for return value allocation)
@@ -257,53 +274,47 @@ compile :: proc(em: ^Emulator, package_path := "kernel_assembly/my_kernels") -> 
 	defer compiler_allocator_destroy(&ca);
 
 	kernels_res: Assemble_Kernels_Result;
-	merr: mem.Allocator_Error;
-	when SHOW_TIMINGS {
-		diff: time.Duration;
-		{
-			time.SCOPED_TICK_DURATION(&diff)
-			kernels_res, merr = assemble_kernels(&compiler, package_path);
-		}
-		fmt.eprintfln("Kernel assembly in total took: %v", diff);
-	} else {
-		kernels_res, merr = assemble_kernels(&compiler, package_path);
-	}
-	if merr != .None do return {}, merr;
-	defer delete_assemble_kernels_res(kernels_res);
+	switch ekind {
+		case .Full:
+			when SHOW_TIMINGS {
+				diff: time.Duration;
+				{
+					time.SCOPED_TICK_DURATION(&diff)
+					kernels_res = assemble_kernels(&compiler) or_return;
+				}
+				fmt.eprintfln("Kernel assembly in total took: %v", diff);
+			} else {
+				kernels_res = assemble_kernels(&compiler) or_return;
+			}
+			init_cl_context(ocl, ekind, &compiler, kernels_res, backup_allocator);
+			delete_assemble_kernels_res(kernels_res);
 
-	return init_cl_context(em, &compiler, kernels_res, backup_allocator), .None;
+		case .Null:
+			when SHOW_TIMINGS {
+				diff: time.Duration;
+				{
+					time.SCOPED_TICK_DURATION(&diff)
+					assemble_kernels_partial(&compiler, &kernels_res);
+				}
+				fmt.eprintfln("(Partial) Kernel assembly in total took: %v", diff);
+			} else {
+				assemble_kernels_partial(&compiler, &kernels_res);
+			}
+
+			init_cl_context(ocl, ekind, &compiler, kernels_res, backup_allocator);
+	}
+	return .None;
 }
 
-assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
-	pckg: ^ast.Package;
-	ok: bool;
-	when SHOW_TIMINGS {
-		// timed parsing
-		diff: time.Duration;
-		{
-			time.SCOPED_TICK_DURATION(&diff)
-			pckg, ok = parser.parse_package_from_path(package_path);
-		}
-		fmt.eprintfln("Parsing took: %v", diff);
-	} else {
-		pckg, ok = parser.parse_package_from_path(package_path);
-	}
-	assert(ok);
+assemble_kernels :: proc(compiler: ^Compiler) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
+	assemble_kernels_partial(compiler, &out);
 
-	// register all the functions into a table
-	for _, file in pckg.files {
-		proc_desc: Proc_Desc;
-		for stmt in file.decls do if is_valid_proc(&stmt.derived_stmt, &proc_desc) {
-			map_insert(&compiler.proc_table, proc_desc.name, proc_desc);
-			if proc_desc.kind == .Kernel do out.nof_kernels += 1;
-		}
-	}
-	
 	out.kernel_sizes = mem.make([^]c.size_t, out.nof_kernels) or_return;
 	out.kernel_strings = mem.make([^]cstring, out.nof_kernels) or_return;
 
 	// timed assembly
 	when SHOW_TIMINGS {
+		diff: time.Duration;
 		{
 			time.SCOPED_TICK_DURATION(&diff);
 			assemble_kernels_translate_helper(compiler, &out) or_return;
@@ -315,6 +326,69 @@ assemble_kernels :: proc(compiler: ^Compiler, package_path: string) -> (out: Ass
 	return out, .None;
 }
 
+/**
+ * @brief parses package files and registers valid kernels (aka @builtin/@kernel) into the compiler table
+ * @note function assumes valid parameters (non-nil) and valid package paths inside compiler!
+ */
+@(private="file")
+assemble_kernels_partial :: #force_inline proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) {
+	// parse builtin and "target" package
+	pckg, builtin_pckg: ^ast.Package;
+	ok: bool;
+	builtin_pckg, ok = assemble_kernels_parse_helper(compiler.builtin_path);
+	assert(ok);
+	pckg, ok         = assemble_kernels_parse_helper(compiler.package_path);
+	assert(ok);
+
+	// register all the functions into a (common) compiler table
+	assemble_kernels_register_helper(compiler, builtin_pckg, &out.nof_kernels);
+	assemble_kernels_register_helper(compiler, pckg, &out.nof_kernels);
+}
+
+/**
+ * @brief helper function for assemble_kernels proc, launches parsing of a package from path (with optional timing if SHOW_TIMINGS is defined)
+ * @note function assumes valid package path
+ */
+@(private="file")
+assemble_kernels_parse_helper :: #force_inline proc(path: string) -> (pckg: ^ast.Package, ok: bool) {
+	when SHOW_TIMINGS {
+		// timed parsing
+		diff: time.Duration;
+		{
+			time.SCOPED_TICK_DURATION(&diff)
+			pckg, ok = parser.parse_package_from_path(path);
+		}
+		fmt.eprintfln("Parsing of \"%s\" took: %v", path, diff);
+	} else {
+		parser.parse_package_from_path(path);
+	}
+	return pckg, ok;
+}
+
+/**
+ * @brief registers all valid procedures into the compiler's procedure table (here "valid" means whenever `is_valid_proc' returns true for a given procedure node)
+ * @note function assumes valid parameters (non-nil)
+ */
+@(private="file")
+assemble_kernels_register_helper :: #force_inline proc(compiler: ^Compiler, pckg: ^ast.Package, nof_kernels: ^cl.Uint) {
+	for _, file in pckg.files {
+		proc_desc: Proc_Desc;
+		for stmt in file.decls do if is_valid_proc(&stmt.derived_stmt, &proc_desc) {
+			if proc_desc.kind == .Kernel {
+				if compiler.query_addr != nil {
+					compiler.query_addr(&proc_desc);
+				}
+				nof_kernels^ += 1;
+			}
+			map_insert(&compiler.proc_table, proc_desc.name, proc_desc);
+		}
+	}
+}
+
+/**
+ * @brief generates OpenCL code from procedure nodes (located in the compiler's procedure table)
+ * @note function assumes valid parameters (non-nil) and valid compiler's procedure table; `out' has to be preallocated by the caller
+ */
 @(private="file")
 assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
 	kernel_string_builder: strings.Builder;

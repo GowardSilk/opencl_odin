@@ -11,21 +11,27 @@
 package my_kernels;
 
 import c  "core:c"
+
+import "../emulator"
 import cl "shared:opencl"
 
 @(kernel)
 @(params={input="global", output="global"})
 my_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ cl.Float) {
-	id := get_global_id(0);
+	id := emulator.get_global_id(0);
 	output[id] = input[id] * scale;
 }
 
 my_kernel_nullcl_wrapper :: proc(params: []rawptr) {
-      my_kernel(
-	 cast([^]cl.Float)params[0],
-	 cast([^]cl.Float)params[1],
-	 (cast(^cl.Float)params[2])^
-      );
+      when ODIN_DEBUG do assert(len(params) == 3);
+
+      // TODO(GowardSilk): We should not use this 'casting' strategy here such that we assume the inner
+      // workings of the emulator package... the emulator API should provide a suitable argument (aka the input
+      // parameter of the @(kernel) functions
+      p0 := cast(^^emulator.Mem_Null_Impl)params[0];
+      p1 := cast(^^emulator.Mem_Null_Impl)params[1];
+      p2 := cast(^cl.Float)params[2];
+      my_kernel(cast([^]cl.Float)p0^.data, cast([^]cl.Float)p1^.data, p2^);
 }
 
 // Code replicated from https://github.com/HandsOnOpenCL/Exercises-Solutions/blob/master/Solutions/ExerciseA/pi_vocl.cl
@@ -38,22 +44,22 @@ pi :: proc(
 	local_sums: [^]cl.Float,
 	partial_sums: [^]cl.Float)
 {
-   num_wrk_items  := get_local_size(0);
-   local_id       := get_local_id(0);
-   group_id       := get_group_id(0);
-   x, sum, accum  := 0.0, 0.0, 0.0;
-   istart, iend: int;
+   num_wrk_items  := emulator.get_local_size(0);
+   local_id       := emulator.get_local_id(0);
+   group_id       := emulator.get_group_id(0);
+   x, sum, accum: cl.Float = 0.0, 0.0, 0.0;
+   istart, iend: cl.Int;
    istart = (group_id * num_wrk_items + local_id) * niters;
    iend   = istart + niters;
-   for i: int = istart; i < iend ; i += 1 {
-       x = (i + 0.5) * step_size;
+   for i: cl.Int = istart; i < iend ; i += 1 {
+       x = (cast(cl.Float)i + 0.5) * step_size;
        accum += 4.0 / (1.0 + x * x);
    }
    local_sums[local_id] = accum;
-   barrier(CLK_LOCAL_MEM_FENCE);
+   emulator.barrier(emulator.CLK_LOCAL_MEM_FENCE);
    if local_id == 0 {
-      sum = 0.0;
-      for i: int = 0; i < num_wrk_items; i += 1 {
+      sum: cl.Float = 0.0;
+      for i: cl.Int = 0; i < num_wrk_items; i += 1 {
          sum += local_sums[i];
       }
       partial_sums[group_id] = sum;
@@ -61,11 +67,11 @@ pi :: proc(
 }
 
 pi_nullcl_wrapper :: proc(params: []rawptr) {
-      assert(len(params) == 4);
-      pi(
-	 (cast(^c.int)params[0])^,
-	 (cast(^cl.Float)params[1])^,
-	 cast([^]cl.Float)params[2],
-	 cast([^]cl.Float)params[3]
-      );
+      when ODIN_DEBUG do assert(len(params) == 4);
+
+      p0 := (cast(^c.int)params[0]);
+      p1 := (cast(^cl.Float)params[1]);
+      p2 := cast(^^emulator.Mem_Null_Impl)params[2];
+      p3 := cast(^^emulator.Mem_Null_Impl)params[3];
+      pi(p0^, p1^, cast([^]cl.Float)p2^.data, cast([^]cl.Float)p3^.data);
 }
