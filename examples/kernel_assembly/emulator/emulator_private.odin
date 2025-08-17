@@ -530,8 +530,7 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 		payload = &payload,
 	};
 
-	ndrange_start_task(ndrange, &task_in);
-	ndrange_wait(ndrange);
+	ndrange_exec_task(ndrange, &task_in);
 
 	return cl.SUCCESS;
 }

@@ -8,17 +8,16 @@ import "emulator"
 import "my_kernels"
 import cl "shared:opencl"
 
-my_kernel_test :: proc(ocl: ^OpenCL_Context) {
+my_kernel_test :: proc(ocl: ^OpenCL_Context, work_size: c.size_t) {
 	em := ocl.emulator_base;
 
 	outputs, inputs: []cl.Float;
 	merr: mem.Allocator_Error;
 
-	work_size: c.size_t = 10;
 	inputs, merr  = mem.make([]cl.Float, cast(int)work_size);
 	assert(merr == .None);
 	defer mem.delete(inputs);
-	for i in 0..<10 do inputs[i] = cast(cl.Float)i + 1;
+	for i in 0..<work_size do inputs[i] = cast(cl.Float)i + 1;
 	inputs_mem := emulator.CreateBufferEx(em, ocl._context, cl.MEM_READ_ONLY | cl.MEM_USE_HOST_PTR, &inputs).?;
 	defer em->ReleaseMemObject(inputs_mem);
 
@@ -37,6 +36,7 @@ my_kernel_test :: proc(ocl: ^OpenCL_Context) {
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	ret = em->SetKernelArg(my_kernel, 2, size_of(coeff), &coeff);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+	work_size := work_size;
 	ret = em->EnqueueNDRangeKernel(ocl.queue, my_kernel, 1, nil, &work_size, nil, 0, nil, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	ret = em->FinishCommandQueue(ocl.queue);
@@ -141,7 +141,20 @@ main :: proc() {
 	merr := compile(&ocl, .Null, query_proc);
 	assert(merr == .None);
 	fmt.eprintfln("\nmy_kernel:\n");
-	my_kernel_test(&ocl);
+
+	//my_kernel_test(&ocl, 1);
+	fmt.eprintln();
+	my_kernel_test(&ocl, 5);
+	fmt.eprintln();
+	my_kernel_test(&ocl, 3);
+	fmt.eprintln();
+	max_size: c.size_t;
+	ocl.emulator_base->GetKernelWorkGroupInfo(nil, ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
+	my_kernel_test(&ocl, max_size - 1);
+	fmt.eprintln();
+	my_kernel_test(&ocl, max_size + 1);
+	fmt.eprintln();
+
 	fmt.eprintfln("\npi:\n");
 	//pi_test(&ocl, 1);
 	delete_cl_context(&ocl);
