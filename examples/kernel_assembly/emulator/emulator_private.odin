@@ -6,6 +6,7 @@ import "base:intrinsics"
 import "core:c"
 import "core:fmt"
 import "core:mem"
+import "core:sync"
 import "core:thread"
 import "core:sys/windows"
 import "core:container/intrusive/list"
@@ -80,6 +81,17 @@ GetKernelWorkGroupInfo_FullCL :: proc(this: ^Emulator, kernel: Kernel, device: D
 	return cl.GetKernelWorkGroupInfo(cast(Kernel_Full)kernel, cast(Device_ID_Full)device, param_name, param_value_size, param_value, param_value_size_ret);
 }
 GetKernelWorkGroupInfo_NullCL :: proc(this: ^Emulator, kernel: Kernel, device: Device_ID, param_name: cl.Kernel_Work_Group_Info, param_value_size: c.size_t, param_value: rawptr, param_value_size_ret: ^c.size_t) -> cl.Int {
+	assert(this.kind == .Null);
+	if cast(Device_ID_Null_Impl)device != .Dummy do return cl.INVALID_VALUE;
+	null := cast(^Null_CL)this;
+
+	if param_name == cl.KERNEL_WORK_GROUP_SIZE {
+		assert(param_value != nil);
+		p := cast(^c.size_t)param_value;
+		p^ = auto_cast ndrange_len(&null._context.queue.ndrange);
+		return cl.SUCCESS;
+	}
+
 	unimplemented();
 }
 
@@ -116,6 +128,7 @@ CreateContext_NullCL :: proc(this: ^Emulator, properties: ^cl.Context_Properties
 	_context^ = {
 		device = .Dummy,
 		queue = nil,
+		rc = 1,
 	};
 	null._context = _context;
 	return cast(Context)_context;
@@ -174,8 +187,8 @@ CreateCommandQueue_NullCL :: proc(this: ^Emulator, _context: Context, device: De
 	when ODIN_OS == .Windows {
 		sys_info: windows.SYSTEM_INFO;
 		windows.GetSystemInfo(&sys_info);
-		null._context.queue.max_items = cast(c.size_t)sys_info.dwNumberOfProcessors;
-		fmt.eprintfln("Number of \"processors\": %d", null._context.queue.max_items);
+		null._context.queue.ndrange = ndrange_init(cast(int)sys_info.dwNumberOfProcessors).?;
+		fmt.eprintfln("Number of \"processors\": %d", sys_info.dwNumberOfProcessors);
 	} else do unimplemented("Unsupported OS!");
 
 	return cast(Command_Queue)null._context.queue;
@@ -198,6 +211,8 @@ ReleaseCommandQueue_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue
 
 	if q.rc <= 0 {
 		mem.delete(q.commands);
+		ndrange_destroy(&null._context.queue.ndrange);
+		mem.free(q);
 		null._context.queue = nil;
 	}
 
@@ -241,7 +256,6 @@ CreateBuffer_NullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Fl
 		};
 
 		c := cast(^Context_Null_Impl)_context;
-		fmt.eprintfln("%p", &memobj.node);
 		list.push_back(&c.memobjs, &memobj.node);
 
 		return cast(Mem)memobj;
@@ -261,8 +275,8 @@ ReleaseMemObject_NullCL :: proc(this: ^Emulator, memobj: Mem) -> cl.Int {
 	}
 
 	m := cast(^Mem_Null_Impl)memobj;
-	fmt.eprintfln("%p", &m^.node);
 	list.remove(&null._context.memobjs, &(cast(^Mem_Null_Impl)memobj)^.node);
+	mem.free(memobj);
 	return cl.SUCCESS;
 }
 
@@ -332,7 +346,9 @@ ReleaseProgram_NullCL :: proc(this: ^Emulator, program: Program) -> cl.Int {
 		for &kernel in null.program.kernels {
 			this->ReleaseKernel(cast(Kernel)&kernel);
 		}
+		mem.delete(null.program.kernels);
 		mem.free(null.program);
+		null.program = nil;
 	}
 
 	return cl.SUCCESS;
@@ -360,6 +376,10 @@ SetKernelArg_NullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint,
 		break;
 	}
 	if !kernel_in || cast(int)arg_index >= len(k.args) do return cl.INVALID_VALUE;
+
+	if arg_value == nil {
+		unimplemented("__local buffer!");
+	}
 
 	#no_bounds_check k.args[arg_index].size  = arg_size;
 	#no_bounds_check k.args[arg_index].value = arg_value;
@@ -399,7 +419,7 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 	assert(this.kind == .Null);
 
 	// validate params
-	if global_work_offset != nil || global_work_size == nil do return cl.INVALID_VALUE;
+	if global_work_offset != nil || global_work_size == nil || work_dim > MAX_DIMS do return cl.INVALID_VALUE;
 	p := (cast(^Null_CL)this).program;
 	kernel_in := false;
 	for &ker in p.kernels do if auto_cast &ker == kernel {
@@ -408,110 +428,80 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 	}
 	if !kernel_in do return cl.INVALID_VALUE;
 
-	ndrange: NDRange;
-
-	// get the number of total work items from global dimensions
-	total_items: c.size_t;
-	for i in 0..<work_dim {
-		total_items *= global_work_size[i];
-	}
-
 	q := cast(^Command_Queue_Null_Impl)command_queue;
-	if total_items > q.max_items do return cl.INVALID_VALUE;
+	ndrange: ^NDRange = &q.ndrange;
 
-	thread.pool_init(&ndrange.items, runtime.default_allocator(), cast(int)total_items);
-	defer thread.pool_destroy(&ndrange.items);
-
-	/** @brief designed for Task.user_data value */
-	Task_In :: struct {
-		args: []rawptr, /**< wrapper params */
-		addr: #type proc([]rawptr), /**< @(kernel) wrapper proc addr */
-		groups: []Work_Group, /**< used to get proper sync.Barrier into Kernel_Builtin_Context_Payload */
+	nof_calls: c.size_t = 0; // how many times a kernel needs to be called
+	switch work_dim {
+		case 1: nof_calls = global_work_size[0];
+		case 2: nof_calls = global_work_size[0] * global_work_size[1];
+		case 3: nof_calls = global_work_size[0] * global_work_size[1] * global_work_size[2];
+		case: unreachable();
 	}
 
-	/** @brief general thread task executing @(kernel) wrapper from Task_In */
-	task_proc :: proc(t: thread.Task) {
-		// update payload ids
-		payload := (cast(^Kernel_Builtin_Context_Payload)context.user_ptr)^;
+	@(static)local_work_size_buffer: [MAX_DIMS]c.size_t;
 
-		switch payload.work_dim {
-			case 1:
-				payload.global_pos.x += 1;
+	local_work_size := local_work_size;
+	nof_locals: c.size_t = 1; // number of kernel calls per local area
+	nof_iters: c.size_t = 1; // how many times a work_item has to repeat one kernel
+	if local_work_size == nil {
+		#no_bounds_check local_work_size = &local_work_size_buffer[0];
+		// NOTE(GowardSilk): the user should not expect to even call get_local_id @(builtin)
+		// but it is still easier for us not to duplicate the whole task_proc because of
+		// lacking local_work_size; better to just calculate everything and that way perhaps
+		// enable execution for cases in which the global_pos is too large for real nof_threads
 
-				payload.local_pos.x = payload.global_pos.x % payload.local_work_size[0];
-			case 2:
-				payload.global_pos.x += 1;
-				if payload.global_pos.x >= payload.global_work_size[0] {
-					payload.global_pos.x = 0;
-					payload.global_pos.y += 1;
+		gcd :: #force_inline proc(#any_int u, v: int) -> c.size_t {
+			if u == 0 do return cast(c.size_t)v;
+			if v == 0 do return cast(c.size_t)u;
+
+			u := u;
+			v := v;
+			k: uint = 0;
+			for (u & 0x1 == 0) && (v & 0x1 == 0) {
+				u >>= 1;
+				v >>= 1;
+				k += 1;
+			}
+			t: int;
+			if u & 0x1 == 1 {
+				t = -v;
+			}
+			else do t = u;
+			for t != 0 {
+				for t & 0x1 == 0 {
+					t >>= 1;
 				}
+				if t > 0 do u = t;
+				else do v = -t;
+				t = u - v;
+			}
+			return cast(c.size_t)(u * (1 << k));
+		}
 
-				payload.local_pos.x = payload.global_pos.x % payload.local_work_size[0];
-				payload.local_pos.y = payload.global_pos.y % payload.local_work_size[1];
-			case 3:
-				payload.global_pos.x += 1;
-				if payload.global_pos.x >= payload.global_work_size[0] {
-					payload.global_pos.x = 0;
-					payload.global_pos.y += 1;
-					if payload.global_pos.y >= payload.global_work_size[1] {
-						payload.global_pos.y = 0;
-						payload.global_pos.z += 1;
-					}
-				}
-
-				payload.local_pos.x = payload.global_pos.x % payload.local_work_size[0];
-				payload.local_pos.y = payload.global_pos.y % payload.local_work_size[1];
-				payload.local_pos.z = payload.global_pos.z % payload.local_work_size[2];
+		if nof_calls < cast(uint)ndrange_len(ndrange) {
+			nof_locals = nof_calls;
+			nof_iters  = 1;
+			local_work_size[0] = 1;
+			local_work_size[1] = 1;
+			local_work_size[2] = 1;
+		} else {
+			local_work_size[0] = gcd(nof_calls, ndrange_len(ndrange));
+			local_work_size[1] = 1;
+			local_work_size[2] = 1;
+			fmt.eprintfln("local_work_size.x = %v = gcd(%v, %v)", local_work_size[0], nof_calls, ndrange_len(ndrange));
+			nof_locals = local_work_size[0];
+			nof_iters  = nof_calls / nof_locals;
+		}
+	} else {
+		switch work_dim {
+			case 1: nof_locals = local_work_size[0];
+			case 2: nof_locals = local_work_size[0] * local_work_size[1];
+			case 3: nof_locals = local_work_size[0] * local_work_size[1] * local_work_size[2];
 			case: unreachable();
 		}
-		// reupload payload
-		context.user_ptr = &payload;
-
-		task_in := cast(^Task_In)t.data;
-		task_in.addr(task_in.args);
+		nof_iters = nof_calls / nof_locals;
 	}
-
-	/** @brief general thread task executing @(kernel) wrapper from Task_In (without local work size enabled) */
-	task_proc_nonlocal :: proc(t: thread.Task) {
-		// update payload ids
-		payload := (cast(^Kernel_Builtin_Context_Payload)context.user_ptr)^;
-
-		switch payload.work_dim {
-			case 1:
-				payload.global_pos.x += 1;
-			case 2:
-				payload.global_pos.x += 1;
-				if payload.global_pos.x >= payload.global_work_size[0] {
-					payload.global_pos.x = 0;
-					payload.global_pos.y += 1;
-				}
-			case 3:
-				payload.global_pos.x += 1;
-				if payload.global_pos.x >= payload.global_work_size[0] {
-					payload.global_pos.x = 0;
-					payload.global_pos.y += 1;
-					if payload.global_pos.y >= payload.global_work_size[1] {
-						payload.global_pos.y = 0;
-						payload.global_pos.z += 1;
-					}
-				}
-			case: unreachable();
-		}
-		// reupload payload
-		context.user_ptr = &payload;
-
-		task_in := cast(^Task_In)t.data;
-		task_in.addr(task_in.args);
-	}
-
-	co := (cast(^Null_CL)this)._context;
-	payload: Kernel_Builtin_Context_Payload = {
-		_context = co,
-		work_dim = work_dim,
-		global_work_size = global_work_size,
-		local_work_size = local_work_size,
-	};
-	context.user_ptr = &payload;
 
 	// copy kernel args into Task_In
 	k := cast(^Kernel_Null_Impl)kernel;
@@ -521,21 +511,27 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 		task_in_args[index] = arg.value;
 	}
 
-	task_in: Task_In = {
-		args   = task_in_args[:len(k.args)],
-		addr   = k.addr,
-		groups = ndrange.groups,
+	payload_mutex: sync.Mutex;
+	payload: Kernel_Builtin_Context_Payload = {
+		_context = (cast(^Null_CL)this)._context,
+		work_dim = work_dim,
+		global_work_size = global_work_size,
+		local_work_size = local_work_size,
+		nof_calls = nof_calls,
+		nof_locals = nof_locals,
+		nof_iters = nof_iters,
+
+		mutex = &payload_mutex,
 	};
 
-	task_proc_ := task_proc;
-	if local_work_size == nil {
-		task_proc_ = task_proc_nonlocal;
-	}
-	for i in 0..<len(ndrange.items.threads) {
-		thread.pool_add_task(&ndrange.items, runtime.default_allocator(), task_proc_, &task_in, i);
-	}
-	thread.pool_start(&ndrange.items);
-	thread.pool_finish(&ndrange.items);
+	task_in: Task_In = {
+		args    = task_in_args[:len(k.args)],
+		addr    = k.addr,
+		payload = &payload,
+	};
+
+	ndrange_start_task(ndrange, &task_in);
+	ndrange_wait(ndrange);
 
 	return cl.SUCCESS;
 }

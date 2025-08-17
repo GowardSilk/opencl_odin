@@ -1,25 +1,21 @@
 package playground;
 
-import "../emulator"
-
 import "core:fmt"
+import "core:thread"
 
-Emulator_Wrapper :: struct #raw_union {
-	null: emulator.Null_CL,
-	full: emulator.Full_CL,
-}
-
-S :: struct {
-	emulator: Emulator_Wrapper,
+thread_worker_proc :: proc(t: ^thread.Thread) {
+	fmt.eprintln("Halooo");
 }
 
 main :: proc() {
-	s: S = {
-		emulator = {
-			full = emulator.init_full(),
-		},
-	};
+	t1 := thread.create(thread_worker_proc);
+	t2 := thread.create(thread_worker_proc);
 
-	e_base_ptr: ^emulator.Emulator = &s.emulator.full.base;
-	fmt.eprintfln("%v", e_base_ptr.kind);
+	thread.start(t1);
+	thread.start(t2);
+
+	thread.join_multiple(t1, t2);
+
+	thread.destroy(t1);
+	thread.destroy(t2);
 }

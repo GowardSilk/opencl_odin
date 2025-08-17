@@ -214,8 +214,7 @@ Command_Queue_Null_Impl :: struct {
 	rc: int,
 	commands: [dynamic]#type struct {},
 	flags: Command_Queue_Properties_Null,
-
-	max_items: uint, /**< max number of 'threads' (aka Work_Items) a 'thread pool' (aka NDRange) can have */
+	ndrange: NDRange, /**< contains the maximum number of physical threads (aka Work_Item(s)) */
 }
 Command_Queue_Properties_Null :: enum cl.Command_Queue_Properties {
 	QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE = cl.QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
@@ -236,31 +235,6 @@ Mem_Null_Impl :: struct {
 	flags: cl.Mem_Flags,
 	/* TODO(GowardSilk): FIX guard: sync.Barrier, */
 }
-
-/**
- * @brief stores necessary Emulator and NDRange data for @(kernel_builtin) procs to work properly; the value of this struct is contained in context.user_ptr
- * @note values of this struct are purely READ-ONLY (therefore they do not need any form of sync, not even atomic)
- */
-Kernel_Builtin_Context_Payload :: struct {
-	_context: ^Context_Null_Impl,
-	work_dim: cl.Uint,
-	global_work_size: [^]c.size_t,
-	local_work_size: [^]c.size_t,
-
-	// these values are set inside task_proc dynamically for each Work_Item
-	global_pos: [MAX_DIMS]c.size_t, /**< used for get_global_id(#) */
-	local_pos: [MAX_DIMS]c.size_t, /**< used for get_local_id(#) */
-	barrier: ^sync.Barrier,
-}
-NDRange :: struct {
-	items:  thread.Pool,
-	groups: []Work_Group,
-}
-Work_Group :: struct {
-	work_items: []Work_Item,
-	barrier: sync.Barrier,
-}
-Work_Item :: thread.Thread;
 
 /**
  * @brief Create_Buffer_(Null|Full)CL [Ex]tended version aided by Odin's parapoly

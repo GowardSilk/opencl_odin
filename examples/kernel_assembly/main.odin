@@ -26,7 +26,6 @@ my_kernel_test :: proc(ocl: ^OpenCL_Context) {
 	assert(merr == .None);
 	defer mem.delete(outputs);
 	outputs_mem := emulator.CreateBufferEx(em, ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, &outputs).?;
-	fmt.eprintfln("%p", &(cast(^emulator.Mem_Null_Impl)outputs_mem)^.node);
 	defer em->ReleaseMemObject(outputs_mem);
 
 	coeff: cl.Float = 2;
@@ -144,7 +143,7 @@ main :: proc() {
 	fmt.eprintfln("\nmy_kernel:\n");
 	my_kernel_test(&ocl);
 	fmt.eprintfln("\npi:\n");
-	pi_test(&ocl, 1);
+	//pi_test(&ocl, 1);
 	delete_cl_context(&ocl);
 
 	when ODIN_DEBUG {
