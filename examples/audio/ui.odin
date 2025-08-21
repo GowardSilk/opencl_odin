@@ -38,8 +38,8 @@ UI_Error :: enum {
     Texture_Creation_Fail,
 }
 
-FONT_WIDTH_SCALE_FACTOR  :: 1;
-FONT_HEIGHT_SCALE_FACTOR :: 1;
+FONT_WIDTH_SCALE_FACTOR  :: 3;
+FONT_HEIGHT_SCALE_FACTOR :: 3;
 ATLAS_WIDTH :: mu.DEFAULT_ATLAS_WIDTH * FONT_WIDTH_SCALE_FACTOR;
 ATLAS_HEIGHT :: mu.DEFAULT_ATLAS_HEIGHT * FONT_HEIGHT_SCALE_FACTOR;
 SCALED_STYLE := mu.Style{
@@ -62,8 +62,8 @@ SCALED_STYLE := mu.Style{
 relative_window_size :: #force_inline proc($base: i32, $scale: i32) -> i32 {
     return base + i32((scale - 1.0) * base / 8);
 }
-WINDOW_WIDTH  := relative_window_size(1024, FONT_WIDTH_SCALE_FACTOR); 
-WINDOW_HEIGHT := relative_window_size(1024, FONT_HEIGHT_SCALE_FACTOR);
+WINDOW_WIDTH  := relative_window_size(1224, FONT_WIDTH_SCALE_FACTOR); 
+WINDOW_HEIGHT := relative_window_size(1224, FONT_HEIGHT_SCALE_FACTOR);
 
 atlas_text_width_proc :: proc(font: mu.Font, text: string) -> (width: i32) {
     return mu.default_atlas_text_width(font, text) * FONT_WIDTH_SCALE_FACTOR;
@@ -300,8 +300,6 @@ ui_render :: proc(uim: ^UI_Manager) {
             case ^mu.Command_Jump: unreachable();
         }
     }
-
-    sdl3.RenderPresent(uim.renderer);
 }
 
 delete_ui_manager :: proc(uim: ^UI_Manager) {

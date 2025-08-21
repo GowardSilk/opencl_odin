@@ -15,7 +15,7 @@ Wave_Buffer :: struct {
     frames:         [^]c.short,
     frames_count:   u64,
     index:          u64,
-    max_amplitude:  u64, /**< index of the frame with the peak amplitude (note: when eq to ~0, amplitutde has not been calculate yet) */
+    max_amplitude:  c.short, /**< index of the frame with the peak amplitude (note: when eq to ~0, amplitutde has not been calculate yet) */
 }
 
 Audio_Decorder :: struct {
@@ -431,39 +431,29 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         enqueue_basic(opencl, kernel, &buffer_size);
-
-        //{
-        //    ret := cl.EnqueueReadBuffer(
-        //        opencl^.queue,
-        //        output_buffer.mem,
-        //        cl.TRUE,
-        //        0,
-        //        output_buffer.size,
-        //        &opencl^.audio_buffer_out_host[0],
-        //        0,
-        //        nil,
-        //        nil
-        //    );
-        //
-        //    @static was_init := false;
-        //    @static encoder: ma.encoder;
-        //
-        //    if !was_init {
-        //        config := ma.encoder_config_init(.wav, device.playback.playback_format, cast(u32)channels, device.sampleRate);
-        //        err := ma.encoder_init_file("skuska.wav", &config, &encoder);
-        //        fmt.assertf(err == .SUCCESS, "Failed to init encoder for a `skuska.wav` file! Error: %v", err);
-        //        was_init = true;
-        //    }
-        //    written: u64;
-        //    err := ma.encoder_write_pcm_frames(&encoder, &opencl^.audio_buffer_out_host[0], cast(u64)buffer_size, &written);
-        //    fmt.assertf(err == .SUCCESS, "Failed to encoder pcm frames into `skuska.wav`! Error: %v", err);
-        //    fmt.eprintfln("Written: %d", written);
-        //}
     }
 
     eat_byte_pos := opencl^.eat_pos * sample_size * channels;
     host_len := cast(c.size_t)(u64(len(opencl^.audio_buffer_out_host)) * sample_size - eat_byte_pos);
-    device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
+
+    if first_kernel {
+        // no kernel was really launched, therefore
+        // the audio_buffer_out_host will be empty
+        am := cast(^Audio_Manager)device.pUserData;
+
+        channels := am.guarded_decoder.decoder.config.channels; // no guard really needed?
+        eat_sample_pos := opencl^.eat_pos * u64(channels);
+        sync.mutex_lock(&am.guarded_decoder.guard);
+        mem.copy(
+            &opencl^.audio_buffer_out_host[eat_sample_pos],
+            &am.guarded_decoder.decoder.frames[am.guarded_decoder.decoder.index],
+            cast(int)host_len
+        );
+        sync.mutex_unlock(&am.guarded_decoder.guard);
+    } else {
+        // copy from audio_buffer_out to audio_buffer_out_host
+        device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
+    }
 }
 
 device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, frame_count_u32: u32) {
@@ -995,7 +985,7 @@ init_normalize_settings :: proc(settings: ^AOK_Normalize_Settings) {
 }
 
 AOK_NORMALIZE: cstring: `
-    __kernel void normalize(
+    __kernel void _normalize(
         __global short* input,
         __global short* output,
         float target,
@@ -1007,7 +997,7 @@ AOK_NORMALIZE: cstring: `
     }
 `;
 AOK_NORMALIZE_SIZE: uint: len(AOK_NORMALIZE);
-AOK_NORMALIZE_NAME: cstring: "normalize";
+AOK_NORMALIZE_NAME: cstring: "_normalize";
 
 AOK_Resample_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,

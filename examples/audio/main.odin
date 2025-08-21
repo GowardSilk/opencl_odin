@@ -14,6 +14,7 @@ import "core:reflect"
 import cl "shared:opencl"
 import mu "vendor:microui"
 import ma "vendor:miniaudio"
+import "vendor:sdl3"
 
 Error :: union #shared_nil {
     OpenCL_Error,
@@ -34,6 +35,7 @@ Common :: struct {
         enabled: bool,
         name: string,
     },
+    waveform_tex: ^sdl3.Texture,
 }
 
 init_common :: proc() -> (co: Common) {
@@ -89,6 +91,9 @@ main :: proc() {
         mu.end(co.uim.ctx);
 
         ui_render(&co.uim);
+        show_audio_track(&co);
+
+        sdl3.RenderPresent(co.uim.renderer);
     }
 }
 
@@ -158,10 +163,10 @@ show_sound_list_window :: proc(using co: ^Common) {
                 if res != .SUCCESS do notify_error("Failed to decode selected file", res);
                 assert(frames_out != nil);
 
-                // max_ampltitude: c.short;
-                // for i in 0..<frames_count do if max_ampltitude < frames_out[i] {
-                //     max_ampltitude = frames_out[i];
-                // }
+                max_amplitude: c.short;
+                for i in 0..<frames_count do if max_amplitude < frames_out[i] {
+                    max_amplitude = frames_out[i];
+                }
 
                 // play the new sound
                 sync.mutex_lock(&am.guarded_decoder.guard);
@@ -169,6 +174,7 @@ show_sound_list_window :: proc(using co: ^Common) {
                     am.guarded_decoder.decoder.frames = frames_out;
                     am.guarded_decoder.decoder.frames_count = frames_count;
                     am.guarded_decoder.decoder.index = 0;
+                    am.guarded_decoder.decoder.max_amplitude = max_amplitude;
                 }
                 sync.mutex_unlock(&am.guarded_decoder.guard);
             }
@@ -296,6 +302,73 @@ show_popup_window :: proc(using co: ^Common) {
             label(uim.ctx, popup.name);
         } else do popup.enabled = false;
     }
+}
+
+show_audio_track :: proc(using co: ^Common) {
+    // audio track background
+    sdl3.SetRenderDrawColor(uim.renderer, 20, 20, 20, 255);
+    wavefrom_tex_offset := cast(f32)relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR);
+    sdl3.RenderFillRect(
+        uim.renderer, 
+        &sdl3.FRect {
+            0.0,
+            wavefrom_tex_offset,
+            cast(f32)WINDOW_WIDTH,
+            wavefrom_tex_offset + 100,
+        }
+    );
+    
+    // wavefrom display
+    if waveform_tex == nil && am.guarded_decoder.decoder.frames_count > 0 {
+        WAVEFORM_TEX_HEIGHT :: 100;
+        waveform_tex = sdl3.CreateTexture(uim.renderer, .RGBA8888, .TARGET, WINDOW_WIDTH, WAVEFORM_TEX_HEIGHT);
+        if waveform_tex == nil {
+            log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
+            return;
+        }
+
+        sdl3.SetRenderTarget(uim.renderer, waveform_tex);
+        sdl3.SetRenderViewport(uim.renderer, nil);
+        sdl3.SetRenderClipRect(uim.renderer, nil);
+        sdl3.SetRenderDrawColor(uim.renderer, 255, 255, 255, 255);
+        {
+            decoder := am.guarded_decoder.decoder;
+            points, merr := mem.make([^]sdl3.FPoint, 2 * cast(int)decoder.frames_count);
+            if merr != .None {
+                log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
+                return;
+            }
+            defer mem.free(points);
+            point_idx := 0;
+            x_step: f32 = cast(f32)WINDOW_WIDTH / cast(f32)decoder.frames_count;
+            log.errorf("%v = %v / %v", x_step, WINDOW_WIDTH, decoder.frames_count);
+            x: f32 = 0;
+            CENTER_Y := cast(f32)WAVEFORM_TEX_HEIGHT / 2;
+            for i in 0..<decoder.frames_count {
+                normalized_frame := cast(f32)decoder.frames[i] / cast(f32)decoder.max_amplitude;
+                points[point_idx].x     = x;
+                points[point_idx].y     = CENTER_Y + normalized_frame * CENTER_Y;
+                points[point_idx + 1].x = x;
+                points[point_idx + 1].y = CENTER_Y;
+                point_idx += 2;
+                x += x_step;
+            }
+            sdl3.RenderLines(uim.renderer, points, 2 * cast(i32)decoder.frames_count);
+        }
+        sdl3.SetRenderTarget(uim.renderer, nil);
+    }
+
+    sdl3.RenderTexture(uim.renderer, waveform_tex, nil, 
+        &sdl3.FRect {
+            0.0,
+            wavefrom_tex_offset, 
+            cast(f32)WINDOW_WIDTH,
+            wavefrom_tex_offset + 100,
+        }
+    );
+
+    // playhead
+    // sdl3.RenderFillRect();
 }
 
 reflect_get_generic_float :: #force_inline proc(base: rawptr, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {
