@@ -15,7 +15,6 @@ Wave_Buffer :: struct {
     frames:         [^]c.short,
     frames_count:   u64,
     index:          u64,
-    max_amplitude:  u64, /**< index of the frame with the peak amplitude (note: when eq to ~0, amplitutde has not been calculate yet) */
 }
 
 Audio_Decorder :: struct {
@@ -461,6 +460,41 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
         //}
     }
 
+    if am^.operations.normalize.base.enabled {
+        kernel := deferred_compile_kernel(opencl, am^.operations.normalize.base.kernel_name);
+
+        if first_kernel == true do first_kernel = false;
+        else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
+
+        // first, find peak value
+        peak: c.short;
+        sync.lock(&am^.guarded_decoder.guard);
+        peak = am^.guarded_decoder.decoder.max_amplitude;
+        sync.unlock(&am^.guarded_decoder.guard);
+
+        ret := cl.SetKernelArg(kernel, 0, size_of(cl.Mem), input_buffer);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        max_vals := make([]c.short);
+        defer delete(max_vals);
+        max_vals_buffer := cl.CreateBuffer(
+            opencl^._context,
+            cl.MEM_ALLOC_HOST_PTR | cl.MEM_WRITE_ONLY,
+            len(max_vals) * size_of(c.short),
+            nil,
+            &ret
+        );
+        fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
+        defer cl.ReleaseMemObject(max_vals_buffer);
+
+        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
+
+        ret = cl.SetKernelArg(kernel, 2, size_of(cl.Mem), );
+        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+        enqueue_basic(opencl, kernel, &buffer_size);
+    }
+
     eat_byte_pos := opencl^.eat_pos * sample_size * channels;
     host_len := cast(c.size_t)(u64(len(opencl^.audio_buffer_out_host)) * sample_size - eat_byte_pos);
     device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
@@ -581,7 +615,38 @@ decibel :: distinct cl.Float;
 
 // helper AOK
 AOK_PEAK: cstring: `
-    __kernel void peak(__global short* input, __global TODO) {
+    __kernel void find_peak(
+        __global const short* input,
+        __global short* output,
+        const int N)
+    {
+        int gid = get_global_id(0);
+        int lid = get_local_id(0);
+        int group_size = get_local_size(0);
+        int group_id = get_group_id(0);
+
+        __local short local_data[256];
+
+        int idx = group_id * group_size + lid;
+        if (idx < N) {
+            local_data[lid] = abs(input[idx]);
+        } else {
+            local_data[lid] = 0;
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // WTF is this parallel reduction shit
+        for (int stride = group_size / 2; stride > 0; stride /= 2) {
+            if (lid < stride) {
+                local_data[lid] = max(local_data[lid], local_data[lid + stride]);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+
+        if (lid == 0) {
+            output[group_id] = local_data[0];
+        }
     }
 `;
 AOK_PEAK_SIZE: uint: len(AOK_PEAK);
@@ -1153,6 +1218,10 @@ init_all_aok_settings :: proc(all: ^AOK_Operations) {
 }
 
 AOK := [?]cstring {
+        // helper aok
+        AOK_PEAK,
+
+        // operations
 	AOK_DISTORTION,
 	AOK_CLIP,
 	AOK_GAIN,
@@ -1174,6 +1243,10 @@ AOK := [?]cstring {
 }
 
 AOK_SIZES := [?]uint{
+        // helper aok
+        AOK_PEAK_SIZE,
+
+        // operations
 	AOK_DISTORTION_SIZE,
 	AOK_CLIP_SIZE,
 	AOK_GAIN_SIZE,
