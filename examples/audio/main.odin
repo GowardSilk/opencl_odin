@@ -13,9 +13,10 @@ import "core:strconv"
 import "core:reflect"
 
 import cl "shared:opencl"
-import mu "vendor:microui"
 import ma "vendor:miniaudio"
 import "vendor:sdl3"
+
+import mu "microui"
 
 Error :: union #shared_nil {
     OpenCL_Error,
@@ -37,7 +38,6 @@ Common :: struct {
         name: string,
     },
     waveform_tex: ^sdl3.Texture,
-    waveform_cover_tex: ^sdl3.Texture,
 }
 
 init_common :: proc() -> (co: Common) {
@@ -119,16 +119,18 @@ main :: proc() {
         mu.end(co.uim.ctx);
 
         ui_render(&co.uim);
-        show_audio_track(&co);
 
         sdl3.RenderPresent(co.uim.renderer);
     }
 }
 
 show_windows :: #force_inline proc(co: ^Common) {
+    // Menu bar at the top
+    ctx := co.uim.ctx;
     show_sound_list_window(co);
     show_aok_settings_window(co);
     show_popup_window(co);
+    show_audio_track(co);
 }
 
 label    :: mu.label;
@@ -214,11 +216,13 @@ show_sound_list_window :: proc(using co: ^Common) {
         sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Submit") {
             am.guarded_decoder.decoder.launch_kernel = true;
+            am.guarded_decoder.decoder.pause = false;
 
             restore_waveform_tex(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
 
+        sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(uim.ctx, "Clear") {
             am.guarded_decoder.decoder.launch_kernel = false;
 
@@ -233,6 +237,15 @@ show_sound_list_window :: proc(using co: ^Common) {
 
             restore_waveform_tex(co);
         }
+        sync.unlock(&am.guarded_decoder.guard);
+
+        sync.lock(&am.guarded_decoder.guard);
+        pause := &am.guarded_decoder.decoder.pause;
+        pause_msg := pause^ ? "Resume" : "Pause";
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, pause_msg) {
+            pause^ = !pause^;
+        }
+        sync.unlock(&am.guarded_decoder.guard);
 
         sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Stop") {
@@ -345,151 +358,121 @@ restore_waveform_tex :: #force_inline proc(using co: ^Common) {
         sdl3.DestroyTexture(waveform_tex);
         waveform_tex = nil;
     }
-    if waveform_cover_tex != nil {
-        sdl3.DestroyTexture(waveform_cover_tex);
-        waveform_cover_tex = nil;
-    }
 }
 
 show_audio_track :: proc(using co: ^Common) {
-    // audio track background
-    sdl3.SetRenderDrawColor(uim.renderer, 20, 20, 20, 255);
     waveform_tex_offset := cast(f32)relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR);
-    WAVEFORM_TEX_HEIGHT :: 100;
-    sdl3.RenderFillRect(
-        uim.renderer, 
-        &sdl3.FRect {
-            0.0,
-            waveform_tex_offset,
-            cast(f32)WINDOW_WIDTH,
-            WAVEFORM_TEX_HEIGHT,
-        }
-    );
-    
-    // wavefrom display
-    if waveform_tex == nil && am.guarded_decoder.decoder.frames_count > 0 {
-        waveform_tex = sdl3.CreateTexture(uim.renderer, .RGBA8888, .TARGET, WINDOW_WIDTH, WAVEFORM_TEX_HEIGHT);
-        if waveform_tex == nil {
-            log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
-            return;
-        }
-
-        sdl3.SetRenderTarget(uim.renderer, waveform_tex);
-        sdl3.SetRenderViewport(uim.renderer, nil);
-        sdl3.SetRenderClipRect(uim.renderer, nil);
-        sdl3.SetRenderDrawColor(uim.renderer, 255, 255, 255, 255);
+    WAVEFORM_TEX_HEIGHT :: 250;
+    w_opened := window(
+        uim.ctx,
+        "Waveform Track",
         {
-            decoder := am.guarded_decoder.decoder;
-            points, merr := mem.make([dynamic]sdl3.FPoint);
-            if merr != .None {
-                log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
+            0,
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR),
+            WINDOW_WIDTH,
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR) + WAVEFORM_TEX_HEIGHT,
+        },
+        {.NO_CLOSE}
+    );
+    if w_opened {
+        rect  := mu.get_current_container(uim.ctx).body;
+        frect := sdl3.FRect { cast(f32)rect.x, cast(f32)rect.y, cast(f32)rect.w, cast(f32)rect.h };
+
+        // wavefrom display gen
+        no_waveform := waveform_tex == nil && am.guarded_decoder.decoder.frames_count > 0;
+        if no_waveform {
+            waveform_tex = sdl3.CreateTexture(uim.renderer, .RGBA8888, .TARGET, WINDOW_WIDTH, WAVEFORM_TEX_HEIGHT);
+            if waveform_tex == nil {
+                log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
                 return;
             }
-            defer mem.delete(points);
 
-            CENTER_Y :: WAVEFORM_TEX_HEIGHT / 2;
-            x_step   := cast(f32)WINDOW_WIDTH / cast(f32)decoder.frames_count;
-            delta    :: 10;
-            prev_frame: c.short;
-            last_fpoint: sdl3.FPoint;
-            for i in 0..<decoder.frames_count {
-                frame := decoder.frames[i];
-                if frame > prev_frame + delta || frame < prev_frame - delta {
-                    // this frame has become larger in value, make a new line
-                    append(&points,
-                        last_fpoint,                          // x1, y1
-                        sdl3.FPoint{last_fpoint.x, CENTER_Y}, // x2, y2
-                    );
-
-                    normalized_frame := cast(f32)frame / cast(f32)decoder.max_amplitude;
-                    last_fpoint.y = CENTER_Y + normalized_frame * CENTER_Y;
-                    prev_frame = frame;
+            sdl3.SetRenderTarget(uim.renderer, waveform_tex);
+            sdl3.SetRenderViewport(uim.renderer, nil);
+            sdl3.SetRenderClipRect(uim.renderer, nil);
+            sdl3.SetRenderDrawColor(uim.renderer, 255, 255, 255, 255);
+            {
+                decoder := am.guarded_decoder.decoder;
+                points, merr := mem.make([dynamic]sdl3.FPoint);
+                if merr != .None {
+                    log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
+                    return;
                 }
-                last_fpoint.x += x_step;
+                defer mem.delete(points);
+
+                CENTER_Y :: WAVEFORM_TEX_HEIGHT / 2;
+                x_step   := 1 / cast(f32)WINDOW_WIDTH;
+                bin_size := decoder.frames_count / cast(u64)WINDOW_WIDTH;
+                for x in 0..<cast(u64)WINDOW_WIDTH {
+                    min_val := decoder.frames[x * bin_size];
+                    max_val := min_val;
+                    for i in 1..<bin_size {
+                        frame := decoder.frames[x * bin_size + i];
+                        if frame < min_val do min_val = frame;
+                        if frame > max_val do max_val = frame;
+                    }
+
+                    y_min := CENTER_Y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
+                    y_max := CENTER_Y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
+
+                    append(&points, sdl3.FPoint{cast(f32)x, y_min}, sdl3.FPoint{cast(f32)x, y_max});
+                }
+                sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
+                when ODIN_DEBUG {
+                    nof_points := u64(len(points));
+                    nof_frames := 2 * decoder.frames_count;
+                    nof_saved  := nof_frames - nof_points;
+                    fmt.eprintfln("actual len of points: %d; max len of points: %d; saved: %.3f%%", nof_points, nof_frames, cast(f64)nof_saved / cast(f64)nof_frames * 100);
+                }
             }
-            sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
-            when ODIN_DEBUG {
-                nof_points := u64(len(points));
-                nof_frames := 2 * decoder.frames_count;
-                nof_saved  := nof_frames - nof_points;
-                fmt.eprintfln("actual len of points: %d; max len of points: %d; saved: %.3f%%", nof_points, nof_frames, cast(f64)nof_saved / cast(f64)nof_frames * 100);
+            sdl3.SetRenderTarget(uim.renderer, nil);
+        }
+
+        // waveform
+        mu.draw_texture(uim.ctx, cast(rawptr)waveform_tex, rect);
+
+        // playhead
+        if waveform_tex != nil {
+            PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
+            @static playhead_pos: [2]sdl3.Vertex;
+            pheadx := frect.x + cast(f32)am.guarded_decoder.decoder.index / cast(f32)WINDOW_WIDTH;
+            top    := frect.y;
+            bottom := frect.y + frect.h;
+
+            playhead_pos[0].position = sdl3.FPoint{ pheadx, top };
+            playhead_pos[1].position = sdl3.FPoint{ pheadx, bottom };
+
+            playhead_pos[0].color = PLAYHEAD_FCOLOR;
+            playhead_pos[1].color = PLAYHEAD_FCOLOR;
+
+            draw_geometry(&uim, playhead_pos[:], runtime.nil_allocator(), .Line);
+            {
+                // 2 triangles: 1 top, 1 bottom
+                @static vertices: [6]sdl3.Vertex;
+                TRIANGLE_SIDE_LEN := cast(f32)relative_window_size(15, FONT_HEIGHT_SCALE_FACTOR);
+                vertices[0].position = { pheadx - TRIANGLE_SIDE_LEN, frect.y };
+                vertices[1].position = { pheadx + TRIANGLE_SIDE_LEN, frect.y };
+                vertices[2].position = { pheadx, frect.y + TRIANGLE_SIDE_LEN };
+                vertices[3].position = { pheadx - TRIANGLE_SIDE_LEN, frect.y + frect.h };
+                vertices[4].position = { pheadx + TRIANGLE_SIDE_LEN, frect.y + frect.h };
+                vertices[5].position = { pheadx, frect.y + frect.h - TRIANGLE_SIDE_LEN };
+                for &v in vertices do v.color = PLAYHEAD_FCOLOR;
+
+                draw_geometry(&uim, vertices[:], runtime.nil_allocator());
             }
-        }
-        sdl3.SetRenderTarget(uim.renderer, nil);
-    }
 
-    sdl3.RenderTexture(uim.renderer, waveform_tex, nil, 
-        &sdl3.FRect {
-            0.0,
-            waveform_tex_offset, 
-            cast(f32)WINDOW_WIDTH,
-            WAVEFORM_TEX_HEIGHT,
-        }
-    );
-
-    // playhead
-    PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
-    PLAYHEAD_COLOR  :: sdl3.Color  { 255, 0, 0, 255 };
-    playhead_pos: [4]f32;
-    playhead_pos[0] = cast(f32)am.guarded_decoder.decoder.index / cast(f32)WINDOW_WIDTH;
-    playhead_pos[1] = cast(f32)(0 + waveform_tex_offset);
-    playhead_pos[2] = cast(f32)playhead_pos[0];
-    playhead_pos[3] = WAVEFORM_TEX_HEIGHT + waveform_tex_offset;
-    sdl3.SetRenderDrawColor(uim.renderer, PLAYHEAD_COLOR.r, PLAYHEAD_COLOR.g, PLAYHEAD_COLOR.b, PLAYHEAD_COLOR.a);
-    sdl3.RenderLine(uim.renderer, playhead_pos[0], playhead_pos[1], playhead_pos[2], playhead_pos[3]);
-    {
-        // 2 triangles: 1 top, 1 bottom
-        vertices: [6]sdl3.Vertex;
-        TRIANGLE_SIDE_LEN := cast(f32)relative_window_size(15, FONT_HEIGHT_SCALE_FACTOR);
-        // top left
-        vertices[0].position.x = playhead_pos[0] - TRIANGLE_SIDE_LEN;
-        vertices[0].position.y = 0 + waveform_tex_offset;
-        // top right
-        vertices[1].position.x = playhead_pos[0] + TRIANGLE_SIDE_LEN;
-        vertices[1].position.y = 0 + waveform_tex_offset;
-        // top center
-        vertices[2].position.x = playhead_pos[0];
-        vertices[2].position.y = 0 + waveform_tex_offset + TRIANGLE_SIDE_LEN;
-        // bottom left
-        vertices[3].position.x = playhead_pos[0] - TRIANGLE_SIDE_LEN;
-        vertices[3].position.y = WAVEFORM_TEX_HEIGHT + waveform_tex_offset;
-        // bottom right
-        vertices[4].position.x = playhead_pos[0] + TRIANGLE_SIDE_LEN;
-        vertices[4].position.y = WAVEFORM_TEX_HEIGHT + waveform_tex_offset;
-        // bottom center
-        vertices[5].position.x = playhead_pos[0];
-        vertices[5].position.y = WAVEFORM_TEX_HEIGHT + waveform_tex_offset - TRIANGLE_SIDE_LEN;
-        for &v in vertices do v.color = PLAYHEAD_FCOLOR;
-
-        sdl3.RenderGeometry(uim.renderer, nil, &vertices[0], len(vertices), nil, 0);
-    }
-
-    // waveform cover
-    if waveform_cover_tex == nil {
-        waveform_cover_surface := sdl3.CreateSurface(WINDOW_WIDTH, WAVEFORM_TEX_HEIGHT, .RGBA8888);
-        if waveform_cover_surface == nil {
-            log.errorf("SDL3 Surface Init error: %s", sdl3.GetError());
-            return;
-        }
-        defer sdl3.DestroySurface(waveform_cover_surface);
-
-        color := sdl3.MapSurfaceRGBA(waveform_cover_surface, 50, 50, 50, 50);
-        sdl3.FillSurfaceRect(waveform_cover_surface, nil, color);
-
-        waveform_cover_tex = sdl3.CreateTextureFromSurface(uim.renderer, waveform_cover_surface);
-        if waveform_cover_tex == nil {
-            log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
-            return;
+            mu.draw_rect(
+                uim.ctx,
+                mu.Rect {
+                    cast(i32)playhead_pos[0].position.x,
+                    cast(i32)playhead_pos[0].position.y,
+                    WINDOW_WIDTH - cast(i32)playhead_pos[0].position.x,
+                    rect.h,
+                },
+                mu.Color { 50, 50, 50, 50 }
+            );
         }
     }
-    sdl3.RenderTexture(uim.renderer, waveform_cover_tex, nil,
-        &sdl3.FRect {
-            playhead_pos[0],
-            waveform_tex_offset,
-            cast(f32)WINDOW_WIDTH,
-            WAVEFORM_TEX_HEIGHT,
-        },
-    );
 }
 
 reflect_get_generic_float :: #force_inline proc(base: rawptr, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {

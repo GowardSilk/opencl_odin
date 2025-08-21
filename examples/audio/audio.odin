@@ -26,6 +26,7 @@ Audio_Decorder :: struct {
 
     // temporarily couple it here...
     launch_kernel: bool,
+    pause: bool,
 }
 Audio_Decoder_Guard :: struct {
     guard: sync.Mutex,
@@ -479,7 +480,7 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
     }
 
     // exit if there is no active sound playing
-    if decoder.frames == nil || decoder.frames_count == 0 do return;
+    if decoder.frames == nil || decoder.frames_count == 0 || decoder.pause do return;
 
     // copy frames to the output
     // launch audio kernel operations if any submitted
