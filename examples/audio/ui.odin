@@ -3,11 +3,13 @@ package audio;
 import "base:runtime"
 
 import "core:c"
+import "core:fmt"
 import "core:log"
 import "core:strings"
 
-import mu "vendor:microui"
 import sdl3 "vendor:sdl3"
+
+import mu "microui"
 
 Text_Buf :: struct {
     buf: [16]byte,
@@ -38,8 +40,8 @@ UI_Error :: enum {
     Texture_Creation_Fail,
 }
 
-FONT_WIDTH_SCALE_FACTOR  :: 1;
-FONT_HEIGHT_SCALE_FACTOR :: 1;
+FONT_WIDTH_SCALE_FACTOR  :: 3;
+FONT_HEIGHT_SCALE_FACTOR :: 3;
 ATLAS_WIDTH :: mu.DEFAULT_ATLAS_WIDTH * FONT_WIDTH_SCALE_FACTOR;
 ATLAS_HEIGHT :: mu.DEFAULT_ATLAS_HEIGHT * FONT_HEIGHT_SCALE_FACTOR;
 SCALED_STYLE := mu.Style{
@@ -62,8 +64,8 @@ SCALED_STYLE := mu.Style{
 relative_window_size :: #force_inline proc($base: i32, $scale: i32) -> i32 {
     return base + i32((scale - 1.0) * base / 8);
 }
-WINDOW_WIDTH  := relative_window_size(1024, FONT_WIDTH_SCALE_FACTOR); 
-WINDOW_HEIGHT := relative_window_size(1024, FONT_HEIGHT_SCALE_FACTOR);
+WINDOW_WIDTH  := relative_window_size(1224, FONT_WIDTH_SCALE_FACTOR); 
+WINDOW_HEIGHT := relative_window_size(1224, FONT_HEIGHT_SCALE_FACTOR);
 
 atlas_text_width_proc :: proc(font: mu.Font, text: string) -> (width: i32) {
     return mu.default_atlas_text_width(font, text) * FONT_WIDTH_SCALE_FACTOR;
@@ -283,9 +285,11 @@ ui_render :: proc(uim: ^UI_Manager) {
             case ^mu.Command_Rect:
                 r := v.rect;
                 c := v.color;
+                sdl3.SetRenderDrawBlendMode(uim.renderer, sdl3.BLENDMODE_BLEND);
                 sdl3.SetRenderDrawColor(uim.renderer, c.r, c.g, c.b, c.a);
                 sdl3.RenderFillRect(uim.renderer,
                     &sdl3.FRect{cast(f32)r.x, cast(f32)r.y, cast(f32)r.w, cast(f32)r.h});
+                sdl3.SetRenderDrawBlendMode(uim.renderer, sdl3.BLENDMODE_NONE);
             case ^mu.Command_Clip:
                 sdl3.SetRenderClipRect(uim.renderer, 
                     &sdl3.Rect{v.rect.x, v.rect.y, v.rect.w, v.rect.h});
@@ -297,11 +301,33 @@ ui_render :: proc(uim: ^UI_Manager) {
                 rect.w *= FONT_WIDTH_SCALE_FACTOR;
                 rect.h *= FONT_HEIGHT_SCALE_FACTOR;
                 render_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
+
+            case ^mu.Command_Texture:
+                frect := sdl3.FRect {
+                    cast(f32)v.rect.x,
+                    cast(f32)v.rect.y,
+                    cast(f32)v.rect.w,
+                    cast(f32)v.rect.h,
+                };
+                sdl3.RenderTexture(uim.renderer, cast(^sdl3.Texture)v.texture, nil, &frect);
+
+            case ^mu.Command_Geometry:
+                vertices := cast([^]sdl3.Vertex)v.vertices;
+                switch cast(Geometry_Type)v.index {
+                    case .Triangle:
+                        sdl3.RenderGeometry(uim.renderer, nil, vertices, v.nof_vertices, nil, 0);
+                    case .Line:
+                        for i: i32 = 0; i < v.nof_vertices; i += 2 {
+                            p1 := vertices[i];
+                            p2 := vertices[i + 1];
+                            sdl3.SetRenderDrawColorFloat(uim.renderer, p1.color.r, p1.color.g, p1.color.b, p1.color.a);
+                            sdl3.RenderLine(uim.renderer, p1.position.x, p1.position.y, p2.position.x, p2.position.y);
+                        }
+                }
+
             case ^mu.Command_Jump: unreachable();
         }
     }
-
-    sdl3.RenderPresent(uim.renderer);
 }
 
 delete_ui_manager :: proc(uim: ^UI_Manager) {
@@ -313,4 +339,14 @@ delete_ui_manager :: proc(uim: ^UI_Manager) {
 
     delete(uim^.text_bufs);
     free(uim^.ctx);
+}
+
+Geometry_Type :: enum i32 {
+    Default  = 0,
+    Triangle = Default,
+    Line,
+}
+
+draw_geometry :: proc(uim: ^UI_Manager, vertices: []sdl3.Vertex, allocator := context.allocator, type: Geometry_Type = .Default) {
+    mu.draw_geometry(uim.ctx, raw_data(vertices), cast(i32)len(vertices), cast(i32)type, allocator);
 }

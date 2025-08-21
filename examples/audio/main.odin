@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:c"
 import "core:os"
 import "core:log"
+import "core:fmt"
 import "core:mem"
 import "core:sync"
 import "core:strings"
@@ -12,8 +13,10 @@ import "core:strconv"
 import "core:reflect"
 
 import cl "shared:opencl"
-import mu "vendor:microui"
 import ma "vendor:miniaudio"
+import "vendor:sdl3"
+
+import mu "microui"
 
 Error :: union #shared_nil {
     OpenCL_Error,
@@ -34,6 +37,7 @@ Common :: struct {
         enabled: bool,
         name: string,
     },
+    waveform_tex: ^sdl3.Texture,
 }
 
 init_common :: proc() -> (co: Common) {
@@ -76,7 +80,33 @@ delete_common :: proc(co: ^Common) {
 }
 
 main :: proc() {
+    when ODIN_DEBUG {
+        allocator := context.allocator;
+        track: mem.Tracking_Allocator;
+        mem.tracking_allocator_init(&track, allocator);
+        context.allocator = mem.tracking_allocator(&track);
+
+        defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map));
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location);
+				}
+			}
+			if len(track.bad_free_array) > 0 {
+				fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array));
+				for entry in track.bad_free_array {
+					fmt.eprintf("- %p @ %v\n", entry.memory, entry.location);
+				}
+			}
+			mem.tracking_allocator_destroy(&track);
+
+            context.allocator = allocator;
+		}
+    }
+
     context.logger = log.create_console_logger();
+    defer log.destroy_console_logger(context.logger);
 
     co := init_common();
     defer delete_common(&co);
@@ -89,13 +119,18 @@ main :: proc() {
         mu.end(co.uim.ctx);
 
         ui_render(&co.uim);
+
+        sdl3.RenderPresent(co.uim.renderer);
     }
 }
 
 show_windows :: #force_inline proc(co: ^Common) {
+    // Menu bar at the top
+    ctx := co.uim.ctx;
     show_sound_list_window(co);
     show_aok_settings_window(co);
     show_popup_window(co);
+    show_audio_track(co);
 }
 
 label    :: mu.label;
@@ -158,10 +193,10 @@ show_sound_list_window :: proc(using co: ^Common) {
                 if res != .SUCCESS do notify_error("Failed to decode selected file", res);
                 assert(frames_out != nil);
 
-                // max_ampltitude: c.short;
-                // for i in 0..<frames_count do if max_ampltitude < frames_out[i] {
-                //     max_ampltitude = frames_out[i];
-                // }
+                max_amplitude: c.short;
+                for i in 0..<frames_count do if max_amplitude < frames_out[i] {
+                    max_amplitude = frames_out[i];
+                }
 
                 // play the new sound
                 sync.mutex_lock(&am.guarded_decoder.guard);
@@ -169,17 +204,25 @@ show_sound_list_window :: proc(using co: ^Common) {
                     am.guarded_decoder.decoder.frames = frames_out;
                     am.guarded_decoder.decoder.frames_count = frames_count;
                     am.guarded_decoder.decoder.index = 0;
+                    am.guarded_decoder.decoder.max_amplitude = max_amplitude;
                 }
                 sync.mutex_unlock(&am.guarded_decoder.guard);
+
+                // restore state of the waveform texture
+                restore_waveform_tex(co);
             }
         }
 
         sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Submit") {
             am.guarded_decoder.decoder.launch_kernel = true;
+            am.guarded_decoder.decoder.pause = false;
+
+            restore_waveform_tex(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
 
+        sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(uim.ctx, "Clear") {
             am.guarded_decoder.decoder.launch_kernel = false;
 
@@ -192,11 +235,23 @@ show_sound_list_window :: proc(using co: ^Common) {
                 base_enabled_field^ = false;
             }
 
+            restore_waveform_tex(co);
         }
+        sync.unlock(&am.guarded_decoder.guard);
+
+        sync.lock(&am.guarded_decoder.guard);
+        pause := &am.guarded_decoder.decoder.pause;
+        pause_msg := pause^ ? "Resume" : "Pause";
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, pause_msg) {
+            pause^ = !pause^;
+        }
+        sync.unlock(&am.guarded_decoder.guard);
 
         sync.lock(&am.guarded_decoder.guard);
         if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Stop") {
             delete_wavebuffer(&am.guarded_decoder.decoder.wb);
+
+            restore_waveform_tex(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
     }
@@ -295,6 +350,128 @@ show_popup_window :: proc(using co: ^Common) {
         if window(uim.ctx, "Modal Window", {0, 0, 200, 200}, {.NO_SCROLL}) {
             label(uim.ctx, popup.name);
         } else do popup.enabled = false;
+    }
+}
+
+restore_waveform_tex :: #force_inline proc(using co: ^Common) {
+    if waveform_tex != nil {
+        sdl3.DestroyTexture(waveform_tex);
+        waveform_tex = nil;
+    }
+}
+
+show_audio_track :: proc(using co: ^Common) {
+    waveform_tex_offset := cast(f32)relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR);
+    WAVEFORM_TEX_HEIGHT :: 250;
+    w_opened := window(
+        uim.ctx,
+        "Waveform Track",
+        {
+            0,
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR),
+            WINDOW_WIDTH,
+            relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR) + WAVEFORM_TEX_HEIGHT,
+        },
+        {.NO_CLOSE}
+    );
+    if w_opened {
+        rect  := mu.get_current_container(uim.ctx).body;
+        frect := sdl3.FRect { cast(f32)rect.x, cast(f32)rect.y, cast(f32)rect.w, cast(f32)rect.h };
+
+        // wavefrom display gen
+        no_waveform := waveform_tex == nil && am.guarded_decoder.decoder.frames_count > 0;
+        if no_waveform {
+            waveform_tex = sdl3.CreateTexture(uim.renderer, .RGBA8888, .TARGET, WINDOW_WIDTH, WAVEFORM_TEX_HEIGHT);
+            if waveform_tex == nil {
+                log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
+                return;
+            }
+
+            sdl3.SetRenderTarget(uim.renderer, waveform_tex);
+            sdl3.SetRenderViewport(uim.renderer, nil);
+            sdl3.SetRenderClipRect(uim.renderer, nil);
+            sdl3.SetRenderDrawColor(uim.renderer, 255, 255, 255, 255);
+            {
+                decoder := am.guarded_decoder.decoder;
+                points, merr := mem.make([dynamic]sdl3.FPoint);
+                if merr != .None {
+                    log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
+                    return;
+                }
+                defer mem.delete(points);
+
+                CENTER_Y :: WAVEFORM_TEX_HEIGHT / 2;
+                x_step   := 1 / cast(f32)WINDOW_WIDTH;
+                bin_size := decoder.frames_count / cast(u64)WINDOW_WIDTH;
+                for x in 0..<cast(u64)WINDOW_WIDTH {
+                    min_val := decoder.frames[x * bin_size];
+                    max_val := min_val;
+                    for i in 1..<bin_size {
+                        frame := decoder.frames[x * bin_size + i];
+                        if frame < min_val do min_val = frame;
+                        if frame > max_val do max_val = frame;
+                    }
+
+                    y_min := CENTER_Y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
+                    y_max := CENTER_Y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
+
+                    append(&points, sdl3.FPoint{cast(f32)x, y_min}, sdl3.FPoint{cast(f32)x, y_max});
+                }
+                sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
+                when ODIN_DEBUG {
+                    nof_points := u64(len(points));
+                    nof_frames := 2 * decoder.frames_count;
+                    nof_saved  := nof_frames - nof_points;
+                    fmt.eprintfln("actual len of points: %d; max len of points: %d; saved: %.3f%%", nof_points, nof_frames, cast(f64)nof_saved / cast(f64)nof_frames * 100);
+                }
+            }
+            sdl3.SetRenderTarget(uim.renderer, nil);
+        }
+
+        // waveform
+        mu.draw_texture(uim.ctx, cast(rawptr)waveform_tex, rect);
+
+        // playhead
+        if waveform_tex != nil {
+            PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
+            @static playhead_pos: [2]sdl3.Vertex;
+            pheadx := frect.x + cast(f32)am.guarded_decoder.decoder.index / cast(f32)WINDOW_WIDTH;
+            top    := frect.y;
+            bottom := frect.y + frect.h;
+
+            playhead_pos[0].position = sdl3.FPoint{ pheadx, top };
+            playhead_pos[1].position = sdl3.FPoint{ pheadx, bottom };
+
+            playhead_pos[0].color = PLAYHEAD_FCOLOR;
+            playhead_pos[1].color = PLAYHEAD_FCOLOR;
+
+            draw_geometry(&uim, playhead_pos[:], runtime.nil_allocator(), .Line);
+            {
+                // 2 triangles: 1 top, 1 bottom
+                @static vertices: [6]sdl3.Vertex;
+                TRIANGLE_SIDE_LEN := cast(f32)relative_window_size(15, FONT_HEIGHT_SCALE_FACTOR);
+                vertices[0].position = { pheadx - TRIANGLE_SIDE_LEN, frect.y };
+                vertices[1].position = { pheadx + TRIANGLE_SIDE_LEN, frect.y };
+                vertices[2].position = { pheadx, frect.y + TRIANGLE_SIDE_LEN };
+                vertices[3].position = { pheadx - TRIANGLE_SIDE_LEN, frect.y + frect.h };
+                vertices[4].position = { pheadx + TRIANGLE_SIDE_LEN, frect.y + frect.h };
+                vertices[5].position = { pheadx, frect.y + frect.h - TRIANGLE_SIDE_LEN };
+                for &v in vertices do v.color = PLAYHEAD_FCOLOR;
+
+                draw_geometry(&uim, vertices[:], runtime.nil_allocator());
+            }
+
+            mu.draw_rect(
+                uim.ctx,
+                mu.Rect {
+                    cast(i32)playhead_pos[0].position.x,
+                    cast(i32)playhead_pos[0].position.y,
+                    WINDOW_WIDTH - cast(i32)playhead_pos[0].position.x,
+                    rect.h,
+                },
+                mu.Color { 50, 50, 50, 50 }
+            );
+        }
     }
 }
 

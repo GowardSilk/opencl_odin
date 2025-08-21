@@ -42,16 +42,13 @@ delete_compiler :: proc(using compiler: ^Compiler) {
 	}
 }
 
-OpenCL_Qualifier :: distinct string;
-OpenCL_Qualifier_Invalid :: "";
-OpenCL_Qualifier_Const 	 :: "__const";
-OpenCL_Qualifier_Global	 :: "__global";
-OpenCL_Qualifier_Local	 :: "__local";
+OpenCL_Qualifier :: emulator.OpenCL_Qualifier;
+OpenCL_Qualifier_Invalid :: emulator.OpenCL_Qualifier_Invalid;
+OpenCL_Qualifier_Const 	 :: emulator.OpenCL_Qualifier_Const;
+OpenCL_Qualifier_Global	 :: emulator.OpenCL_Qualifier_Global;
+OpenCL_Qualifier_Local	 :: emulator.OpenCL_Qualifier_Local;
 
-Proc_Desc_Param :: struct {
-	name: string,
-	qual: OpenCL_Qualifier,
-}
+Proc_Desc_Param :: emulator.Proc_Desc_Param;
 
 Proc_Kind :: enum {
 	Default = 0, /**< "odin" proc */
@@ -533,7 +530,19 @@ to_opencl_lang :: proc(using _in: ^To_Opencl_Lang_In) -> bool {
 				);
 			}
 		case ^ast.Type_Cast:
-			fmt.sbprintfln(builder, "(%s)", v.tok.text);
+			fmt.eprintfln("%v", v.pos);
+			fmt.eprintfln("v.tok.text = %s", v.tok.text);
+			fmt.eprintfln("v.type = %v", v.type.derived_expr);
+			fmt.eprintfln("v.expr = %v", v.expr.derived_expr);
+			ident, ok := v.type.derived_expr.(^ast.Ident);
+			if ok {
+				fmt.sbprintfln(builder, "(%s)", ident.name);
+			} else {
+				strings.write_byte(builder, '(');
+				to_opencl_lang_selector(_in, v.type.derived_expr.(^ast.Selector_Expr)) or_return;
+				strings.write_byte(builder, ')');
+			}
+			return to_opencl_lang(update_active_node(_in, v.expr.expr_base));
 		case ^ast.Ternary_If_Expr:
 			return err_return(v.expr_base, "TODO ternary: Not yet implemented");
 		case ^ast.Selector_Expr:
@@ -783,7 +792,18 @@ to_opencl_lang_value_decl :: #force_inline proc(using _in: ^To_Opencl_Lang_In, v
 			);
 		}
 	} else {
-		type = v.type.derived_expr.(^ast.Ident).name;
+		ident, ok := v.type.derived_expr.(^ast.Ident);
+		if ok {
+			type = ident.name;
+		} else {
+			backup_builder := _in.builder;
+			selector_builder: strings.Builder;
+			strings.builder_init(&selector_builder);
+			_in.builder = &selector_builder;
+			to_opencl_lang_selector(_in, v.type.derived_expr.(^ast.Selector_Expr));
+			_in.builder = backup_builder;
+			type = strings.to_string(selector_builder);
+		}
 	}
 	for name, index in v.names {
 		val_ident, is_val_ident := name.derived.(^ast.Ident);
@@ -843,9 +863,16 @@ query_type_from_value_decl :: #force_inline proc(using _in: ^To_Opencl_Lang_In, 
 	if len(val.values) <= 0 do return "";
 	#partial switch v in val.values[0].derived_expr {
 		case ^ast.Call_Expr:
-			name := v.expr.derived_expr.(^ast.Ident).name;
-			_proc, ok := compiler.proc_table[name];
+			name: string;
+			ident, ok := v.expr.derived_expr.(^ast.Ident);
 			if ok {
+				name = ident.name;
+			} else {
+				selector := v.expr.derived_expr.(^ast.Selector_Expr);
+				name = selector.field.name;
+			}
+			_proc, found := compiler.proc_table[name];
+			if found {
 				return query_type_from_value_decl_grab_proc_ret_type(_in, _proc.lit.type);
 			}
 			return "";
@@ -962,16 +989,19 @@ generate_opencl_type_map :: proc(allocator: mem.Allocator) -> map[string]string 
 to_opencl_lang_selector :: #force_inline proc(using _in: ^To_Opencl_Lang_In, selector: ^ast.Selector_Expr) -> bool {
 	// NOTE(GowardSilk): For a type, selector expr means having a specific package being accessed
 	name := selector.expr.derived_expr.(^ast.Ident).name;
-	if name == "cl" {
+	switch name {
 		// NOTE(GowardSilk): Assuming cl and c are package names... not particularly great though???
-		strings.write_byte(builder, selector.field.name[0] | 32);
-		strings.write_string(builder, selector.field.name[1:]);
-	} else if name == "c" {
-		strings.write_string(builder, selector.field.name)
-	} else {
-		to_opencl_lang(update_active_node(_in, selector.expr.expr_base)) or_return;
-		strings.write_string(builder, selector.op.text);
-		strings.write_string(builder, selector.field.name);
+		case "cl":
+			strings.write_byte(builder, selector.field.name[0] | 32);
+			strings.write_string(builder, selector.field.name[1:]);
+		case "c":
+			strings.write_string(builder, selector.field.name);
+		case "emulator":
+			strings.write_string(builder, selector.field.name);
+		case:
+			to_opencl_lang(update_active_node(_in, selector.expr.expr_base)) or_return;
+			strings.write_string(builder, selector.op.text);
+			strings.write_string(builder, selector.field.name);
 	}
 	return true;
 }

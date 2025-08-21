@@ -34,11 +34,13 @@ Kernel_Builtin_Context_Payload :: struct {
 	// these values are set inside _worker_proc dynamically for each Work_Item
 	global_pos: [MAX_DIMS]c.size_t, /**< used for get_global_id(#) */
 	local_pos:  [MAX_DIMS]c.size_t, /**< used for get_local_id(#) */
-	barrier:    ^sync.Barrier,
+	wg_idx:     c.size_t,			/**< work group idx */
+	barrier:    ^sync.Barrier, 		/**< LOCAL_MEM_FENCE */
 }
 NDRange :: struct {
 	items:  []Work_Item, /**< pool of all threads */
 	groups: []Work_Group, /**< partitions of `items' with common memory barrier */
+	barrier: ^sync.Barrier,
 }
 Work_Group :: struct {
 	barrier: sync.Barrier, /**< fence for all threads in one group (aka 'shared-memory barrier' in OpenCL terms) */
@@ -54,7 +56,9 @@ Work_Item :: struct {
 worker_proc :: proc(t: ^thread.Thread) {
 	for {
 		wi := cast(^Work_Item)t.data;
+		fmt.eprintfln("id[%d]: waiting", t.id);
 		sync.sema_wait(&wi.sema); // wait until flagged to execute
+		fmt.eprintfln("id[%d]: working (%p)", t.id, wi.task_in);
 
 		if wi.task_in == nil do break;
 
@@ -137,7 +141,7 @@ _worker_proc :: #force_inline proc(id: int, task_in: ^Task_In) {
 	context.user_ptr = &payload_context_local;
 
 	sync.lock(payload.mutex);
-	fmt.eprintfln("id[%v]: %v", id, payload.global_pos.x - 1);
+	// fmt.eprintfln("id[%v]: %v", id, payload.global_pos.x - 1);
 	sync.unlock(payload.mutex);
 
 	task_in.addr(task_in.args);
@@ -149,29 +153,45 @@ ndrange_init :: proc(max_items: int) -> Maybe(NDRange) {
 	ndrange.items, merr = mem.make([]Work_Item, max_items);
 	if merr != .None do return nil;
 	ndrange.groups, merr = mem.make([]Work_Group, max_items);
-	if merr != .None do return nil;
+	if merr != .None {
+		mem.delete(ndrange.items);
+		return nil;
+	}
+	ndrange.barrier, merr = mem.new(sync.Barrier);
+	if merr != .None {
+		mem.delete(ndrange.items);
+		mem.delete(ndrange.groups);
+		return nil;
+	}
 
 	for index in 0..<max_items {
-		ndrange.items[index].thread = thread.create(worker_proc);
-		ndrange.items[index].thread.data = &ndrange.items[index]
-		thread.start(ndrange.items[index].thread);
+		wi := &ndrange.items[index];
+		wi.group_signal = ndrange.barrier;
+		wi.thread = thread.create(worker_proc);
+		wi.thread.data = wi;
+		thread.start(wi.thread);
 	}
 
 	return ndrange;
 }
 
 ndrange_destroy :: proc(ndrange: ^NDRange) {
-	if ndrange != nil && ndrange.items != nil {
-		for &wi in ndrange.items {
-			wi.task_in = nil;
-			sync.sema_post(&wi.sema);
-			thread.join(wi.thread);
-			thread.destroy(wi.thread);
+	if ndrange != nil {
+		if ndrange.items != nil {
+			for &wi in ndrange.items {
+				wi.task_in = nil;
+				sync.sema_post(&wi.sema);
+				thread.destroy(wi.thread);
+			}
+			mem.delete(ndrange.items);
 		}
-		mem.delete(ndrange.items);
 
 		if ndrange.groups != nil {
 			mem.delete(ndrange.groups);
+		}
+
+		if ndrange.barrier != nil {
+			mem.free(ndrange.barrier);
 		}
 	}
 }
@@ -183,18 +203,16 @@ ndrange_exec_task :: proc(ndrange: ^NDRange, task_in: ^Task_In) {
 
 	task_in.groups = ndrange.groups[:task_in.payload.nof_locals];
 
-	group_barrier: sync.Barrier;
-	sync.barrier_init(&group_barrier, cast(int)task_in.payload.nof_locals + 1);
+	sync.barrier_init(ndrange.barrier, cast(int)task_in.payload.nof_locals + 1);
 
 	for i in 0..<task_in.payload.nof_locals {
 		wi := &ndrange.items[i];
 		wi.task_in = task_in;
-		wi.group_signal = &group_barrier;
-		wi.thread.data = cast(rawptr)&ndrange.items[i];
+		wi.group_signal = ndrange.barrier;
 		sync.sema_post(&wi.sema); // launch the worker
 	}
 
-	sync.barrier_wait(&group_barrier);
+	sync.barrier_wait(ndrange.barrier);
 }
 
 ndrange_groups :: #force_inline proc(ndrange: ^NDRange) -> []Work_Group {

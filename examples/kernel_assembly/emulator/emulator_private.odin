@@ -230,14 +230,11 @@ FinishCommandQueue_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue)
 CreateBuffer_FullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, size: c.size_t, host_ptr: rawptr, errcode_ret: ^cl.Int) -> Mem {
 	return cast(Mem)cl.CreateBuffer(cast(Context_Full)_context, flags, size, host_ptr, errcode_ret);
 }
+CREATE_BUFFER_SUPPORTED_FLAGS: cl.Mem_Flags : cl.MEM_USE_HOST_PTR | cl.MEM_WRITE_ONLY | cl.MEM_READ_ONLY | cl.MEM_READ_WRITE;
 CreateBuffer_NullCL :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, size: c.size_t, host_ptr: rawptr, errcode_ret: ^cl.Int) -> Mem {
-	// only cl.MEM_USE_HOST_PTR, cl.MEM_WRITE_ONLY, cl.MEM_READ_ONLY, cl.MEM_READ_WRITE are supported
-
-	SUPPORTED_FLAGS: cl.Mem_Flags : cl.MEM_USE_HOST_PTR | cl.MEM_WRITE_ONLY | cl.MEM_READ_ONLY | cl.MEM_READ_WRITE;
-
 	// check if `flags' contain unsupported flags
 	// this is inverted implication in bitwise: ~(~flags | SUPPORTED_FLAGS)
-	if (flags & ~SUPPORTED_FLAGS) != 0 {
+	if (flags & ~CREATE_BUFFER_SUPPORTED_FLAGS) != 0 {
 		if errcode_ret != nil do errcode_ret^ = cl.INVALID_VALUE;
 		return nil;
 	}
@@ -377,12 +374,24 @@ SetKernelArg_NullCL :: proc(this: ^Emulator, kernel: Kernel, arg_index: cl.Uint,
 	}
 	if !kernel_in || cast(int)arg_index >= len(k.args) do return cl.INVALID_VALUE;
 
-	if arg_value == nil {
-		unimplemented("__local buffer!");
+	#no_bounds_check arg := &k.args[arg_index];
+
+	if arg.local {
+		if arg_value != nil do return cl.INVALID_VALUE;
+		return cl.SUCCESS; // have to allocate when enqueueing this kernel
 	}
 
-	#no_bounds_check k.args[arg_index].size  = arg_size;
-	#no_bounds_check k.args[arg_index].value = arg_value;
+	if arg.value != nil {
+		mem.free(arg.value);
+		arg.value = nil;
+	}
+
+	new_value, merr := mem.alloc_bytes_non_zeroed(cast(int)arg_size);
+	if merr != .None do return cl.OUT_OF_HOST_MEMORY;
+
+	arg.value = raw_data(new_value);
+	mem.copy(arg.value, arg_value, cast(int)arg_size);
+	arg.size  = arg_size;
 
 	return cl.SUCCESS;
 }
@@ -404,6 +413,10 @@ ReleaseKernel_NullCL :: proc(this: ^Emulator, kernel: Kernel) -> cl.Int {
 
 	// do not delete the element from kernel program registry
 	// just invalidate the existing object
+	for &arg in k.args do if arg.value != nil {
+		mem.free(arg.value);
+		arg.value = nil;
+	}
 	mem.delete(k.args);
 	mem.zero_item(k);
 
@@ -500,6 +513,7 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 			case 3: nof_locals = local_work_size[0] * local_work_size[1] * local_work_size[2];
 			case: unreachable();
 		}
+		assert(cast(int)nof_locals <= ndrange_len(ndrange) && nof_calls % nof_locals == 0);
 		nof_iters = nof_calls / nof_locals;
 	}
 
@@ -507,7 +521,17 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 	k := cast(^Kernel_Null_Impl)kernel;
 	task_in_args: [10]rawptr;
 	assert(len(task_in_args) >= len(k.args), "Too many function parameters!");
-	for arg, index in k.args {
+	for &arg, index in k.args {
+		// additionally we have to check for __local params that need to be allocated properly
+		if arg.local {
+			if arg.value != nil do mem.free(arg.value);
+
+			new_value, merr := mem.alloc_bytes_non_zeroed(cast(int)(arg.size * nof_iters) + size_of(c.size_t));
+			if merr != .None do return cl.OUT_OF_HOST_MEMORY;
+			arg.value = raw_data(new_value);
+			#assert(size_of(arg.size) == size_of(c.size_t));
+			mem.copy(arg.value, &arg.size, size_of(arg.size));
+		}
 		task_in_args[index] = arg.value;
 	}
 
@@ -520,7 +544,6 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 		nof_calls = nof_calls,
 		nof_locals = nof_locals,
 		nof_iters = nof_iters,
-
 		mutex = &payload_mutex,
 	};
 
@@ -539,5 +562,10 @@ EnqueueReadBuffer_FullCL :: proc(this: ^Emulator, command_queue: Command_Queue, 
 	return cl.EnqueueReadBuffer(cast(Command_Queue_Full)command_queue, cast(Mem_Full)buffer, blocking_read, offset, size, ptr, num_events_in_wait_list, event_wait_list, event);
 }
 EnqueueReadBuffer_NullCL :: proc(this: ^Emulator, command_queue: Command_Queue, buffer: Mem, blocking_read: cl.Bool, offset: c.size_t, size: c.size_t, ptr: rawptr, num_events_in_wait_list: cl.Uint, event_wait_list: ^cl.Event, event: ^cl.Event) -> cl.Int {
-	unimplemented();
+	when (cl.MEM_COPY_HOST_PTR & CREATE_BUFFER_SUPPORTED_FLAGS) != 0 {
+		// Now the NullCL should pipe directly the memory buffer passed into the CreateBuffer as the buffer used inside kernels, making this call useless
+		// but if MEM_COPY_HOST_PTR and others should be used, the situation would be different
+		unimplemented();
+	}
+	return cl.SUCCESS;
 }
