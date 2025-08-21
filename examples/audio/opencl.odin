@@ -65,8 +65,8 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     if c^.audio_buffer_in.mem   != nil do delete_buffer(&c^.audio_buffer_in);
     if c^.audio_buffer_out.mem  != nil do delete_buffer(&c^.audio_buffer_out);
     if c^.audio_buffer_out_host != nil {
-	delete(c^.audio_buffer_out_host);
-	c^.eat_pos = 0;
+        delete(c^.audio_buffer_out_host);
+        c^.eat_pos = 0;
     }
 
     for _, kernel in c^.kernels do delete_kernel(kernel);
@@ -84,7 +84,7 @@ pick_platform :: proc(c: ^OpenCL_Context) -> (err: Error) {
 
 pick_device :: proc(c: ^OpenCL_Context) -> (err: Error) {
     if ret := cl.GetDeviceIDs(c^.platform, cl.DEVICE_TYPE_GPU, 1, &c^.device, nil); ret != cl.SUCCESS {
-	cl_context_errlog(c, "Failed to query device id!", ret);
+        cl_context_errlog(c, "Failed to query device id!", ret);
         return .Device_Query_Fail;
     }
 
