@@ -10,7 +10,8 @@
  */
 package my_kernels;
 
-import c  "core:c"
+import "core:c"
+import "core:mem"
 
 import "../emulator"
 import cl "shared:opencl"
@@ -71,7 +72,16 @@ pi_nullcl_wrapper :: proc(params: []rawptr) {
 
       p0 := (cast(^c.int)params[0]);
       p1 := (cast(^cl.Float)params[1]);
-      p2 := cast(^^emulator.Mem_Null_Impl)params[2];
+
+      payload := cast(^emulator.Kernel_Builtin_Context_Payload)context.user_ptr;
+      // whole emulator.Kernel_Null_Arg_Local is stored as byte array
+      p2_arg_local_bytes := cast([^]byte)params[2];
+      // get the emulator.Kernel_Null_Arg_Local.size (aka size of one __local param)
+      p2_chunk_size := cast(^c.size_t)&p2_arg_local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, size)];
+      // calculate offset of that chunk
+      p2_chunk_begin := payload.wg_idx / payload.nof_iters * p2_chunk_size^;
+      p2_chunk := &p2_arg_local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, buffer) + cast(uintptr)p2_chunk_begin];
+
       p3 := cast(^^emulator.Mem_Null_Impl)params[3];
-      pi(p0^, p1^, cast([^]cl.Float)p2^.data, cast([^]cl.Float)p3^.data);
+      pi(p0^, p1^, cast([^]cl.Float)p2_chunk, cast([^]cl.Float)p3^.data);
 }

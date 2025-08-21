@@ -22,7 +22,9 @@ get_local_id :: #force_inline proc(#any_int dim_index: cl.Int) -> cl.Int {
 
 @(kernel_builtin)
 get_group_id :: #force_inline proc(#any_int dim_index: cl.Int) -> cl.Int {
-  unimplemented();
+	payload := cast(^Kernel_Builtin_Context_Payload)context.user_ptr;
+	if dim_index != 0 do unimplemented();
+	return cast(cl.Int)payload.wg_idx;
 }
 
 @(kernel_builtin)

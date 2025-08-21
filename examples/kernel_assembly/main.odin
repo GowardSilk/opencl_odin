@@ -41,6 +41,8 @@ my_kernel_test :: proc(ocl: ^OpenCL_Context, work_size: c.size_t) {
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	ret = em->FinishCommandQueue(ocl.queue);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+	ret = em->EnqueueReadBuffer(ocl.queue, outputs_mem, cl.TRUE, 0, work_size * size_of(cl.Float), &outputs[0], 0, nil, nil);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	fmt.eprintfln("%v\n* %f\n=========\n%v", inputs, coeff, outputs);
 }
@@ -68,7 +70,6 @@ pi_test :: proc(ocl: ^OpenCL_Context, $vector_size: int) {
 	ret := em->GetKernelWorkGroupInfo(kernel, ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	fmt.eprintfln("WGS: %d; max_size: %d", WGS, max_size);
 	if max_size > WGS {
 		work_group_size = max_size;
 		nof_work_groups = NOF_STEPS / (work_group_size * NOF_ITERS);
@@ -79,6 +80,7 @@ pi_test :: proc(ocl: ^OpenCL_Context, $vector_size: int) {
 		fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 		work_group_size = NOF_STEPS / (nof_work_groups * NOF_ITERS);
 	}
+	fmt.eprintfln("WGS: %d; max_size: %d", work_group_size, max_size);
 	fmt.eprintfln("nof_work_groups: %d", nof_work_groups);
 
 	nof_steps := work_group_size * NOF_ITERS * nof_work_groups;
@@ -88,7 +90,7 @@ pi_test :: proc(ocl: ^OpenCL_Context, $vector_size: int) {
 	partial_sums, merr := mem.make([^]cl.Float, cast(int)nof_work_groups);
 	assert(merr == .None);
 	defer mem.free(partial_sums);
-	partial_sums_mem := em->CreateBuffer(ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups, partial_sums, &ret);
+	partial_sums_mem := em->CreateBuffer(ocl._context, cl.MEM_WRITE_ONLY | cl.MEM_USE_HOST_PTR, nof_work_groups * size_of(cl.Float), partial_sums, &ret);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 	defer em->ReleaseMemObject(partial_sums_mem);
 
@@ -99,14 +101,11 @@ pi_test :: proc(ocl: ^OpenCL_Context, $vector_size: int) {
 	ret |= em->SetKernelArg(kernel, 3, size_of(cl.Mem), &partial_sums_mem);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	//ret = em->EnqueueNDRangeKernelEx(kernel, 1, nil, &nof_steps, &work_group_size);
+	ret = em->EnqueueNDRangeKernel(ocl.queue, kernel, 1, nil, &nof_steps, &work_group_size, 0, nil, nil);
 	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
-	assert(em->FinishCommandQueue(ocl.queue) == cl.SUCCESS);
-
-	//fmt.eprintfln("EnqueueReadBufferEx(mem: %v, blocking: %v, offset: %v, size: %v, host_ptr: %v)", partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums)
-	//ret = em->EnqueueReadBufferEx(partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), partial_sums);
-	//fmt.assertf(ret == cl.SUCCESS, "%v", ret);
+	ret = em->EnqueueReadBuffer(ocl.queue, partial_sums_mem, cl.TRUE, 0, nof_work_groups * size_of(cl.Float), &partial_sums[0], 0, nil, nil);
+	fmt.assertf(ret == cl.SUCCESS, "%v", ret);
 
 	final_sum: cl.Float = 0;
 	for i in 0..<nof_work_groups {
@@ -140,23 +139,25 @@ main :: proc() {
 	ocl: OpenCL_Context;
 	merr := compile(&ocl, .Null, query_proc);
 	assert(merr == .None);
-	fmt.eprintfln("\nmy_kernel:\n");
 
-	//my_kernel_test(&ocl, 1);
-	fmt.eprintln();
-	my_kernel_test(&ocl, 5);
-	fmt.eprintln();
-	my_kernel_test(&ocl, 3);
+	fmt.eprintfln("\nmy_kernel:\n");
+	my_kernel_test(&ocl, 1);
 	fmt.eprintln();
 	max_size: c.size_t;
-	ocl.emulator_base->GetKernelWorkGroupInfo(nil, ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil);
+	{
+		my_kernel := ocl.kernels["my_kernel"];
+		ret := ocl.emulator_base->GetKernelWorkGroupInfo(my_kernel, ocl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(c.size_t), &max_size, nil)
+		fmt.assertf(ret == cl.SUCCESS, "cl.GetKernelWorkGroupInfo failed: %v", ret);
+	}
 	my_kernel_test(&ocl, max_size - 1);
 	fmt.eprintln();
 	my_kernel_test(&ocl, max_size + 1);
 	fmt.eprintln();
+	my_kernel_test(&ocl, 2 * max_size);
+	fmt.eprintln();
 
 	fmt.eprintfln("\npi:\n");
-	//pi_test(&ocl, 1);
+	pi_test(&ocl, 1);
 	delete_cl_context(&ocl);
 
 	when ODIN_DEBUG {

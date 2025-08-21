@@ -203,8 +203,19 @@ Kernel_Null_Impl :: struct {
 }
 Kernel_Null_Proc_Wrapper :: #type proc([]rawptr);
 Kernel_Null_Arg :: struct {
-	size: c.size_t,
+	local: bool,
+	size:  c.size_t,
 	value: rawptr,
+}
+/**
+ * @brief present as a value in Kernel_Null_Arg.value iff Kernel_Null_Arg.local == true
+ */
+Kernel_Null_Arg_Local :: struct {
+	size:   c.size_t, /**< size of one chunk of the `buffer' (aka should be eq to Kernel_Null_Arg.size) */
+
+	// this is incorrect in terms of Odin's type(s), can be handled as flexible array member such that this is just accessed
+	// via manual ptr_offset(local_arg_heap_ptr, offset_of(Kernel_Null_Arg_Local, buffer))
+	buffer: rawptr,  /**< backing buffer, containing all the local instances for each workgroup */
 }
 
 Command_Queue :: distinct rawptr;
@@ -251,10 +262,21 @@ CreateBufferEx :: proc(this: ^Emulator, _context: Context, flags: cl.Mem_Flags, 
 	return nil;
 }
 
+OpenCL_Qualifier :: distinct string;
+OpenCL_Qualifier_Invalid :: "";
+OpenCL_Qualifier_Const 	 :: "__const";
+OpenCL_Qualifier_Global	 :: "__global";
+OpenCL_Qualifier_Local	 :: "__local";
+
+Proc_Desc_Param :: struct {
+	name: string,
+	qual: OpenCL_Qualifier,
+}
+
 /**
  * @brief utility function for Null_CL emulator type when creating Kernel(s)
  */
-CreateKernel_Null :: proc(this: ^Emulator, program: Program, kernel_addr: Kernel_Null_Proc_Wrapper, nof_params: int, errcode_ret: ^cl.Int) -> Kernel {
+CreateKernel_Null :: proc(this: ^Emulator, program: Program, kernel_addr: Kernel_Null_Proc_Wrapper, params: []Proc_Desc_Param, errcode_ret: ^cl.Int) -> Kernel {
 	assert(this.kind == .Null);
 	null := cast(^Null_CL)this;
 	p := null.program;
@@ -270,10 +292,15 @@ CreateKernel_Null :: proc(this: ^Emulator, program: Program, kernel_addr: Kernel
 	merr: mem.Allocator_Error;
 	k := &p.kernels[kernel_idx];
 	k.addr = kernel_addr;
-	k.args, merr = mem.make([]Kernel_Null_Arg, nof_params);
+	k.args, merr = mem.make([]Kernel_Null_Arg, len(params));
 	if merr != .None {
 		if errcode_ret != nil do errcode_ret ^= cl.OUT_OF_HOST_MEMORY;
 		return nil;
+	}
+	for param, index in params {
+		if param.qual == OpenCL_Qualifier_Local {
+			k.args[index].local = true;
+		}
 	}
 
 	kernel_idx += 1;

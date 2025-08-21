@@ -5,6 +5,7 @@ import "core:mem"
 import "core:fmt"
 import "core:time"
 import "core:strings"
+import "core:odin/ast"
 
 import "emulator"
 import cl "shared:opencl"
@@ -149,10 +150,22 @@ _init_cl_context :: proc(ocl: ^OpenCL_Context, ekind: emulator.Emulator_Kind, co
 				);
 			case .Null:
 				nof_params := len(desc.lit.type.params.list);
+				params, merr := mem.make([]Proc_Desc_Param, nof_params);
+				{
+					assert(merr == .None);
+					index := 0;
+					for param in desc.lit.type.params.list {
+						for name in param.names {
+							params[index] = desc.params[name.derived_expr.(^ast.Ident).name];
+							index += 1;
+						}
+					}
+				}
+
 				map_insert(
 					&ocl.kernels,
 					strings.clone(name),
-					emulator.CreateKernel_Null(em, ocl.program, desc.addr, nof_params, &ret)
+					emulator.CreateKernel_Null(em, ocl.program, desc.addr, params, &ret)
 				);
 		}
 		fmt.assertf(ret == cl.SUCCESS, "Failed calling cl.CreateKernel with exit code: %v", ret);
