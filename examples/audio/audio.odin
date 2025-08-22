@@ -440,31 +440,8 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        // first, find peak value
-        peak: c.short;
-        sync.lock(&am^.guarded_decoder.guard);
-        peak = am^.guarded_decoder.decoder.max_amplitude;
-        sync.unlock(&am^.guarded_decoder.guard);
-
-        ret := cl.SetKernelArg(kernel, 0, size_of(cl.Mem), input_buffer);
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
-
-        max_vals := make([]c.short);
-        defer delete(max_vals);
-        max_vals_buffer := cl.CreateBuffer(
-            opencl^._context,
-            cl.MEM_ALLOC_HOST_PTR | cl.MEM_WRITE_ONLY,
-            len(max_vals) * size_of(c.short),
-            nil,
-            &ret
-        );
-        fmt.assertf(ret == cl.SUCCESS, "Failed to create buffer! Reason: %d | %s; %s", ret, err_to_name(ret));
-        defer cl.ReleaseMemObject(max_vals_buffer);
-
-        set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
-
-        ret = cl.SetKernelArg(kernel, 2, size_of(cl.Mem), );
-        fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
+        cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am.operations.normalize.target_level);
+        cl.SetKernelArg(kernel, 3, size_of(c.short), &am.guarded_decoder.decoder.max_amplitude);
 
         enqueue_basic(opencl, kernel, &buffer_size);
     }
@@ -1192,9 +1169,6 @@ AOK := [?]cstring {
 }
 
 AOK_SIZES := [?]uint{
-        // helper aok
-        AOK_PEAK_SIZE,
-
         // operations
 	AOK_DISTORTION_SIZE,
 	AOK_CLIP_SIZE,

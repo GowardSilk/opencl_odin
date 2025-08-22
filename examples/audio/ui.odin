@@ -3,6 +3,7 @@ package audio;
 import "base:runtime"
 
 import "core:c"
+import "core:mem"
 import "core:fmt"
 import "core:log"
 import "core:strings"
@@ -40,8 +41,8 @@ UI_Error :: enum {
     Texture_Creation_Fail,
 }
 
-FONT_WIDTH_SCALE_FACTOR  :: 3;
-FONT_HEIGHT_SCALE_FACTOR :: 3;
+FONT_WIDTH_SCALE_FACTOR  :: 1;
+FONT_HEIGHT_SCALE_FACTOR :: 1;
 ATLAS_WIDTH :: mu.DEFAULT_ATLAS_WIDTH * FONT_WIDTH_SCALE_FACTOR;
 ATLAS_HEIGHT :: mu.DEFAULT_ATLAS_HEIGHT * FONT_HEIGHT_SCALE_FACTOR;
 SCALED_STYLE := mu.Style{
@@ -313,6 +314,7 @@ ui_render :: proc(uim: ^UI_Manager) {
 
             case ^mu.Command_Geometry:
                 vertices := cast([^]sdl3.Vertex)v.vertices;
+                defer mem.free(vertices, v.allocator);
                 switch cast(Geometry_Type)v.index {
                     case .Triangle:
                         sdl3.RenderGeometry(uim.renderer, nil, vertices, v.nof_vertices, nil, 0);
@@ -349,4 +351,53 @@ Geometry_Type :: enum i32 {
 
 draw_geometry :: proc(uim: ^UI_Manager, vertices: []sdl3.Vertex, allocator := context.allocator, type: Geometry_Type = .Default) {
     mu.draw_geometry(uim.ctx, raw_data(vertices), cast(i32)len(vertices), cast(i32)type, allocator);
+}
+
+Button_Type :: enum {
+    Default = 0,
+    Control,
+}
+
+button :: proc(uim: ^UI_Manager, label: string, type: Button_Type = .Default, opt: mu.Options = {.ALIGN_CENTER}) -> (res: mu.Result_Set) {
+    assert(len(label) > 0);
+    id := mu.get_id(uim.ctx, label);
+    r  := mu.layout_next(uim.ctx);
+    text_width := uim.ctx.text_width(uim.ctx.style.font, label);
+    if r.w < text_width {
+        r.w = text_width + 2;
+    }
+    mu.update_control(uim.ctx, id, r, opt);
+    /* handle click */
+    if uim.ctx.mouse_pressed_bits == {.LEFT} && uim.ctx.focus_id == id {
+            res += {.SUBMIT};
+    }
+    /* draw */
+    {
+        if .NO_FRAME in opt {
+                return res;
+        }
+        switch type {
+            case .Default:
+                mu.draw_control_frame(uim.ctx, id, r, .BUTTON, opt);
+            case .Control:
+                mu.draw_rect(uim.ctx, r, mu.Color{ 30, 200, 30, 230 });
+                mu.draw_box(uim.ctx, mu.expand_rect(r, 1), mu.Color {0, 0, 0, 255 });
+        }
+    }
+    mu.draw_control_text(uim.ctx, label, r, .TEXT, opt);
+    return res;
+}
+
+checkbox :: #force_inline proc(uim: ^UI_Manager, label: string, value: ^bool) {
+    layout := mu.layout_next(uim.ctx);
+    text_width := uim.ctx.text_width(uim.ctx.style.font, label);
+    text_height := uim.ctx.text_height(uim.ctx.style.font);
+    r := mu.Rect {
+        layout.x,
+        layout.y,
+        2 * text_height + text_width,
+        text_height,
+    };
+    mu.layout_set_next(uim.ctx, r, false);
+    mu.checkbox(uim.ctx, label, value);
 }

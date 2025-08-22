@@ -38,6 +38,7 @@ Common :: struct {
         name: string,
     },
     waveform_tex: ^sdl3.Texture,
+    bin_size: u64,
 }
 
 init_common :: proc() -> (co: Common) {
@@ -134,9 +135,7 @@ show_windows :: #force_inline proc(co: ^Common) {
 }
 
 label    :: mu.label;
-button   :: mu.button;
 window   :: mu.window;
-checkbox :: mu.checkbox;
 slider   :: mu.slider;
 
 show_sound_list_window :: proc(using co: ^Common) {
@@ -160,7 +159,7 @@ show_sound_list_window :: proc(using co: ^Common) {
         defer os.file_info_slice_delete(infos);
 
         for info in infos do if is_sound_file(info) {
-            if .SUBMIT in button(uim.ctx, info.name) {
+            if .SUBMIT in button(&uim, info.name) {
                 info_cname := make([]byte, len(info.name) + size_of("audio/") + 1);
                 defer delete(info_cname);
                 copy_from_string(info_cname[copy_from_string(info_cname, "audio/"):], info.name);
@@ -213,8 +212,26 @@ show_sound_list_window :: proc(using co: ^Common) {
             }
         }
 
+        // draw a horizontal line
+        {
+            @static line_vertices: [2]sdl3.Vertex;
+            next := mu.layout_next(uim.ctx);
+            vpos := cast(f32)next.y + cast(f32)next.h/2;
+            hpos := cast(f32)next.x;
+            line_vertices[0].position = { 0   + hpos, vpos };
+            line_vertices[1].position = { 100 + hpos, vpos };
+            fcol := sdl3.FColor {
+                cast(f32)uim.ctx.style.colors[.BORDER].r,
+                cast(f32)uim.ctx.style.colors[.BORDER].g,
+                cast(f32)uim.ctx.style.colors[.BORDER].b,
+                cast(f32)uim.ctx.style.colors[.BORDER].a,
+            }
+            line_vertices[0].color = fcol;
+            draw_geometry(&uim, line_vertices[:], runtime.nil_allocator(), .Line);
+        }
+
         sync.lock(&am.guarded_decoder.guard);
-        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Submit") {
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(&uim, "Submit", .Control) {
             am.guarded_decoder.decoder.launch_kernel = true;
             am.guarded_decoder.decoder.pause = false;
 
@@ -223,7 +240,7 @@ show_sound_list_window :: proc(using co: ^Common) {
         sync.unlock(&am.guarded_decoder.guard);
 
         sync.lock(&am.guarded_decoder.guard);
-        if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(uim.ctx, "Clear") {
+        if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(&uim, "Clear", .Control) {
             am.guarded_decoder.decoder.launch_kernel = false;
 
             struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
@@ -242,13 +259,13 @@ show_sound_list_window :: proc(using co: ^Common) {
         sync.lock(&am.guarded_decoder.guard);
         pause := &am.guarded_decoder.decoder.pause;
         pause_msg := pause^ ? "Resume" : "Pause";
-        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, pause_msg) {
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(&uim, pause_msg, .Control) {
             pause^ = !pause^;
         }
         sync.unlock(&am.guarded_decoder.guard);
 
         sync.lock(&am.guarded_decoder.guard);
-        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(uim.ctx, "Stop") {
+        if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(&uim, "Stop", .Control) {
             delete_wavebuffer(&am.guarded_decoder.decoder.wb);
 
             restore_waveform_tex(co);
@@ -282,10 +299,9 @@ show_aok_settings_window :: proc(using co: ^Common) {
             field := reflect.struct_field_by_name(type_of(am^.operations), name);
             base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
             base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
-            checkbox(uim.ctx, name, base_enabled_field);
+            checkbox(&uim, name, base_enabled_field);
 
-            // also append new window with additional settings
-            // if were set
+            // also append new window with additional settings if any were set
             // this can be set iff there are other members besides "base"
             field_info_named := field.type.variant.(runtime.Type_Info_Named);
             field_info := field_info_named.base.variant.(runtime.Type_Info_Struct);
@@ -393,7 +409,7 @@ show_audio_track :: proc(using co: ^Common) {
             sdl3.SetRenderDrawColor(uim.renderer, 255, 255, 255, 255);
             {
                 decoder := am.guarded_decoder.decoder;
-                points, merr := mem.make([dynamic]sdl3.FPoint);
+                points, merr := mem.make([]sdl3.FPoint, 2 * cast(int)WINDOW_WIDTH);
                 if merr != .None {
                     log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
                     return;
@@ -402,7 +418,7 @@ show_audio_track :: proc(using co: ^Common) {
 
                 CENTER_Y :: WAVEFORM_TEX_HEIGHT / 2;
                 x_step   := 1 / cast(f32)WINDOW_WIDTH;
-                bin_size := decoder.frames_count / cast(u64)WINDOW_WIDTH;
+                bin_size = decoder.frames_count / cast(u64)WINDOW_WIDTH;
                 for x in 0..<cast(u64)WINDOW_WIDTH {
                     min_val := decoder.frames[x * bin_size];
                     max_val := min_val;
@@ -415,7 +431,8 @@ show_audio_track :: proc(using co: ^Common) {
                     y_min := CENTER_Y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
                     y_max := CENTER_Y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * CENTER_Y;
 
-                    append(&points, sdl3.FPoint{cast(f32)x, y_min}, sdl3.FPoint{cast(f32)x, y_max});
+                    points[2 * x]     = sdl3.FPoint{cast(f32)x, y_min};
+                    points[2 * x + 1] = sdl3.FPoint{cast(f32)x, y_max};
                 }
                 sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
                 when ODIN_DEBUG {
@@ -435,7 +452,8 @@ show_audio_track :: proc(using co: ^Common) {
         if waveform_tex != nil {
             PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
             @static playhead_pos: [2]sdl3.Vertex;
-            pheadx := frect.x + cast(f32)am.guarded_decoder.decoder.index / cast(f32)WINDOW_WIDTH;
+            i := am.guarded_decoder.decoder.index;
+            pheadx := frect.x + cast(f32)i / cast(f32)bin_size;
             top    := frect.y;
             bottom := frect.y + frect.h;
 
