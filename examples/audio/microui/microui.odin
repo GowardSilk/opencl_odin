@@ -31,6 +31,7 @@ import "core:strings"
 import "core:strconv"
 import "core:math"
 import textedit "core:text/edit"
+import sdl3 "vendor:sdl3"
 
 COMMAND_LIST_SIZE    :: #config(MICROUI_COMMAND_LIST_SIZE,    256 * 1024)
 ROOT_LIST_SIZE       :: #config(MICROUI_ROOT_LIST_SIZE,       32)
@@ -180,9 +181,9 @@ Command_Icon :: struct {
  * @brief extension to the mu.Command_* types for texture rendering
  */
 Command_Texture :: struct {
-	using command: Command, 
-    texture: rawptr,
-	rect: Rect,
+	using command: Command,
+	texture: rawptr,
+	srect, drect: Maybe(sdl3.FRect),
 }
 /**
  * @brief extension to the mu.Command_* types for (any) Geometry render
@@ -691,10 +692,11 @@ draw_rect :: proc(ctx: ^Context, rect: Rect, color: Color) {
 	}
 }
 
-draw_texture :: proc(ctx: ^Context, texture: rawptr, rect: Rect) {
+draw_texture :: proc(ctx: ^Context, texture: rawptr, srect, drect: Maybe(sdl3.FRect)) {
     tex_cmd := push_command(ctx, Command_Texture);
     tex_cmd.texture = texture;
-    tex_cmd.rect    = rect;
+    tex_cmd.srect   = srect;
+    tex_cmd.drect   = drect;
 }
 
 draw_geometry :: proc(ctx: ^Context, vertices: rawptr, nof_vertices: i32, index: i32, allocator := context.allocator) {

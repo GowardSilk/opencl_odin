@@ -38,7 +38,6 @@ Audio_Manager :: struct {
     guarded_decoder: ^Audio_Decoder_Guard,
     opencl: ^OpenCL_Context,
     operations: AOK_Operations,
-    operations_hash: int,
 }
 
 delete_wavebuffer :: #force_inline proc(wb: ^Wave_Buffer) {
@@ -492,7 +491,9 @@ device_data_proc :: proc "cdecl" (device: ^ma.device, output, input: rawptr, fra
     }
 
     // exit if there is no active sound playing
-    if decoder.frames == nil || decoder.frames_count == 0 || decoder.pause do return;
+    if decoder.frames == nil || decoder.frames_count == 0 || decoder.pause {
+        return;
+    }
 
     // copy frames to the output
     // launch audio kernel operations if any submitted

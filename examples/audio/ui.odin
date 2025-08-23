@@ -62,11 +62,21 @@ SCALED_STYLE := mu.Style{
     colors = mu.default_style.colors,
 };
 
-relative_window_size :: #force_inline proc($base: i32, $scale: i32) -> i32 {
+relative_window_size :: proc {
+    relative_window_isize,
+    relative_window_fsize,
+}
+
+relative_window_isize :: #force_inline proc(base: i32, scale: i32) -> i32 {
     return base + i32((scale - 1.0) * base / 8);
 }
-WINDOW_WIDTH  := relative_window_size(1224, FONT_WIDTH_SCALE_FACTOR); 
-WINDOW_HEIGHT := relative_window_size(1224, FONT_HEIGHT_SCALE_FACTOR);
+relative_window_fsize :: #force_inline proc(base: f32, scale: f32) -> f32 {
+    return base + (scale - 1.0) * base / 8;
+}
+WINDOW_WIDTH_BASE :: 1224;
+WINDOW_HEIGHT_BASE :: 1224;
+WINDOW_WIDTH  := relative_window_size(WINDOW_WIDTH_BASE, FONT_WIDTH_SCALE_FACTOR); 
+WINDOW_HEIGHT := relative_window_size(WINDOW_HEIGHT_BASE, FONT_HEIGHT_SCALE_FACTOR);
 
 atlas_text_width_proc :: proc(font: mu.Font, text: string) -> (width: i32) {
     return mu.default_atlas_text_width(font, text) * FONT_WIDTH_SCALE_FACTOR;
@@ -304,13 +314,9 @@ ui_render :: proc(uim: ^UI_Manager) {
                 render_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
 
             case ^mu.Command_Texture:
-                frect := sdl3.FRect {
-                    cast(f32)v.rect.x,
-                    cast(f32)v.rect.y,
-                    cast(f32)v.rect.w,
-                    cast(f32)v.rect.h,
-                };
-                sdl3.RenderTexture(uim.renderer, cast(^sdl3.Texture)v.texture, nil, &frect);
+                srect := &v.srect.(sdl3.FRect) or_else nil;
+                drect := &v.drect.(sdl3.FRect) or_else nil;
+                sdl3.RenderTexture(uim.renderer, cast(^sdl3.Texture)v.texture, srect, drect);
 
             case ^mu.Command_Geometry:
                 vertices := cast([^]sdl3.Vertex)v.vertices;
