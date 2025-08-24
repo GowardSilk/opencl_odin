@@ -321,6 +321,8 @@ ui_render :: proc(uim: ^UI_Manager) {
             case ^mu.Command_Geometry:
                 vertices := cast([^]sdl3.Vertex)v.vertices;
                 defer mem.free(vertices, v.allocator);
+                sdl3.SetRenderClipRect(uim.renderer, transmute(^sdl3.Rect)&v.clip_rect);
+                defer sdl3.SetRenderClipRect(uim.renderer, nil);
                 switch cast(Geometry_Type)v.index {
                     case .Triangle:
                         sdl3.RenderGeometry(uim.renderer, nil, vertices, v.nof_vertices, nil, 0);
@@ -355,8 +357,12 @@ Geometry_Type :: enum i32 {
     Line,
 }
 
+/**
+ * @note function does not update mu.Context's layout automatically, this has to be done at call site
+ */
 draw_geometry :: proc(uim: ^UI_Manager, vertices: []sdl3.Vertex, allocator := context.allocator, type: Geometry_Type = .Default) {
-    mu.draw_geometry(uim.ctx, raw_data(vertices), cast(i32)len(vertices), cast(i32)type, allocator);
+    clip_rect := mu.get_clip_rect(uim.ctx);
+    mu.draw_geometry(uim.ctx, raw_data(vertices), cast(i32)len(vertices), cast(i32)type, clip_rect, allocator);
 }
 
 Button_Type :: enum {
@@ -432,6 +438,22 @@ vtext :: proc(uim: ^UI_Manager, label: string, box: sdl3.FRect, target: ^^sdl3.T
     }
 
     text_fheight := cast(f32)text_height;
+    box := box;
+    box.w *= cast(f32)target^.w; // update real width  value (scaled)
+    box.h *= cast(f32)len(label) * text_fheight; // update real height value (scaled)
+    ibox := mu.Rect {
+        cast(i32)box.x, cast(i32)box.y,
+        cast(i32)box.w, cast(i32)box.h
+    };
+    ibox = mu.intersect_rects(ibox, mu.get_clip_rect(uim.ctx));
+    if ibox.w <= 0 || ibox.h <= 0 {
+        return;
+    }
+    box = sdl3.FRect {
+        cast(f32)ibox.x, cast(f32)ibox.y,
+        cast(f32)ibox.w, cast(f32)ibox.h
+    };
+
     prev_target  := sdl3.GetRenderTarget(uim.renderer);
     sdl3.SetRenderTarget(uim.renderer, target^);
     sdl3.RenderClear(uim.renderer);
@@ -458,7 +480,7 @@ vtext :: proc(uim: ^UI_Manager, label: string, box: sdl3.FRect, target: ^^sdl3.T
         target^,
         nil,
         sdl3.FRect {
-            box.x, box.y, box.w * cast(f32)target^.w, box.h * cast(f32)target^.h
+            box.x, box.y, box.w, box.h
         },
     );
 }

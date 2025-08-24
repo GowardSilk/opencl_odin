@@ -193,6 +193,7 @@ Command_Geometry :: struct {
 	vertices: rawptr,
 	nof_vertices: i32,
 	index: i32, /**< custom index */
+	clip_rect: Rect,
 	allocator: mem.Allocator,
 }
 
@@ -692,18 +693,43 @@ draw_rect :: proc(ctx: ^Context, rect: Rect, color: Color) {
 	}
 }
 
+/**
+ * @note function does not update Context's layout, this has to be done at call site
+ */
 draw_texture :: proc(ctx: ^Context, texture: rawptr, srect, drect: Maybe(sdl3.FRect)) {
     tex_cmd := push_command(ctx, Command_Texture);
     tex_cmd.texture = texture;
     tex_cmd.srect   = srect;
-    tex_cmd.drect   = drect;
+    clip_rect := get_clip_rect(ctx);
+    clip_frect := sdl3.FRect {
+        cast(f32)clip_rect.x,
+        cast(f32)clip_rect.y,
+        cast(f32)clip_rect.w,
+        cast(f32)clip_rect.h,
+    };
+    switch &v in drect {
+	case sdl3.FRect:
+		prev_v := v;
+	    _ = sdl3.GetRectIntersectionFloat(clip_frect, v, &v);
+            tex_cmd.drect = v;
+	    src, ok := &tex_cmd.srect.(sdl3.FRect);
+	    if ok {
+		src.x += v.x - prev_v.x;
+		src.y += v.y - prev_v.y;
+		src.w = v.w;
+		src.h = v.h;
+	    }
+	case:
+	    tex_cmd.drect = clip_frect;
+    }
 }
 
-draw_geometry :: proc(ctx: ^Context, vertices: rawptr, nof_vertices: i32, index: i32, allocator := context.allocator) {
+draw_geometry :: proc(ctx: ^Context, vertices: rawptr, nof_vertices: i32, index: i32, clip_rect: Rect, allocator := context.allocator) {
     geom_cmd := push_command(ctx, Command_Geometry);
     geom_cmd.vertices  = vertices;
     geom_cmd.nof_vertices = nof_vertices;
-	geom_cmd.index = index;
+    geom_cmd.index = index;
+    geom_cmd.clip_rect = clip_rect;
     geom_cmd.allocator = allocator;
 }
 

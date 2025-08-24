@@ -192,10 +192,18 @@ main :: proc() {
 
 show_windows :: #force_inline proc(co: ^Common) {
     // Menu bar at the top
-    ctx := co.uim.ctx;
+    //ctx := co.uim.ctx;
+    //if window(co.uim.ctx, "XXX", mu.Rect { 0, 0, 200, 200 }) {
+    //    for i in 0..<10 {
+    //        r := mu.layout_next(co.uim.ctx);
+    //        r.x += 1;
+    //        mu.layout_set_next(co.uim.ctx, r, false);
+    //        button(&co.uim, fmt.tprintf("A%d", i), .Control);
+    //    }
+    //}
     show_sound_list_window(co);
-    show_aok_settings_window(co);
-    show_popup_window(co);
+    //show_aok_settings_window(co);
+    //show_popup_window(co);
     show_audio_track(co);
 }
 
@@ -506,6 +514,15 @@ create_new_waveform_tex :: #force_inline proc(using co: ^Common) {
     }
 }
 
+update_layout :: proc(using co: ^Common, r: mu.Rect) {
+    l := mu.get_layout(uim.ctx);
+    l.position.x += r.w + track_style.spacing;
+    l.next_row = max(l.next_row, r.y + r.h + track_style.spacing);
+    l.max.x = max(l.max.x, r.x + r.w);
+    l.max.y = max(l.max.y, r.y + r.h);
+    mu.layout_set_next(uim.ctx, r, false);
+}
+
 show_audio_track :: proc(using co: ^Common) {
     w_opened := window(
         uim.ctx,
@@ -590,22 +607,22 @@ show_audio_track :: proc(using co: ^Common) {
             it := next_it;
             for box in list.iterate_next(&next_it) {
                 defer r.y += 2 * (cast(i32)track_style.move_button_size.y + track_style.spacing);
-                mu.layout_set_next(uim.ctx, r, false);
+                update_layout(co, r);
                 // "move up" button
                 button_name := [16]byte { 0 = 'a', 1 = cast(byte)box_idx + '0', 2..<16=0 };
                 button_id := mu.get_id_bytes(uim.ctx, button_name[:]);
                 button_text, ok := uim.text_bufs[button_id];
                 if !ok do map_insert(&uim.text_bufs, button_id, Text_Buf { button_name, 2 });
-                //if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
+                if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
                 r2 := mu.Rect { r.x, r.y + cast(i32)track_style.move_button_size.y + track_style.spacing, r.w, r.h };
-                mu.layout_set_next(uim.ctx, r2, false);
+                update_layout(co, r2);
                 // "move down" button
                 button_name = [16]byte { 0 = 'b', 1 = cast(byte)box_idx + '0', 2..<16=0 };
                 button_id = mu.get_id_bytes(uim.ctx, button_name[:]);
                 button_text, ok = uim.text_bufs[button_id];
                 if !ok do map_insert(&uim.text_bufs, button_id, Text_Buf { button_name, 2 });
-                //if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
+                if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
                 // custom "icons" for moveup/movedown buttons
                 vertices, merr := mem.make([]sdl3.Vertex, 6, context.temp_allocator);
@@ -624,7 +641,7 @@ show_audio_track :: proc(using co: ^Common) {
                     vertices[5].position = { fr2.x + button_width/2, fr2.y + button_height };
                     for &v in vertices do v.color = MOVE_BUTTON_FCOLOR;
                 }
-                //draw_geometry(&uim, vertices, context.temp_allocator);
+                draw_geometry(&uim, vertices, context.temp_allocator);
                 vtext(
                     &uim,
                     WAVEFORM_CHANNEL_NAMES[box_idx],
@@ -637,12 +654,17 @@ show_audio_track :: proc(using co: ^Common) {
                     0, cast(f32)box.index * track_style.waveform_tex_size.y,
                     cast(f32)waveform_texs.w, track_style.waveform_tex_size.y,
                 };
+                scroll := mu.get_current_container(uim.ctx).scroll;
                 drect := sdl3.FRect {
-                    track_style.cnt_fbody.x + button_width,
-                    track_style.cnt_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y,
+                    track_style.cnt_fbody.x + button_width - cast(f32)scroll.x,
+                    track_style.cnt_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y - cast(f32)scroll.y,
                     cast(f32)waveform_texs.w,
                     track_style.waveform_tex_size.y,
                 };
+                update_layout(co, mu.Rect {
+                    r.x + cast(i32)button_width, r.y,
+                    waveform_texs.w, cast(i32)track_style.waveform_tex_size.y
+                });
                 mu.draw_texture(uim.ctx, cast(rawptr)waveform_texs, srect, drect);
 
                 box_idx += 1;
