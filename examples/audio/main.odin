@@ -33,6 +33,7 @@ notify_error :: proc($err_msg: string, err: Error) {
 Waveform_Channel_Box :: struct {
     minimized: bool,
     index: int,
+    vtexture: ^sdl3.Texture,
 
     node: list.Node,
 }
@@ -48,10 +49,11 @@ Waveform_Channel_Box_List :: struct {
 }
 
 AUDIO_TRACK_WINDOW_WIDTH := relative_window_size(WINDOW_WIDTH_BASE, FONT_WIDTH_SCALE_FACTOR);
-AUDIO_TRACK_WINDOW_HEIGHT := relative_window_size(512, FONT_HEIGHT_SCALE_FACTOR);
+AUDIO_TRACK_WINDOW_HEIGHT := relative_window_size(3 * WAVEFORM_TEX_HEIGHT/2, FONT_HEIGHT_SCALE_FACTOR);
 WAVEFORM_TEX_HEIGHT    :: 250;
 WAVEFORM_BUTTON_HEIGHT :: WAVEFORM_TEX_HEIGHT / 2;
 WAVEFORM_BUTTON_WIDTH  :: WAVEFORM_BUTTON_HEIGHT / 3;
+PLAYHEAD_TRIANGLE_LEN  :: 12;
 WAVEFORM_COLORS : [8][4]byte = {
     {255,  64,  64, 255}, // Front Left   - bright red
     { 64, 128, 255, 255}, // Front Right  - bright blue
@@ -62,14 +64,28 @@ WAVEFORM_COLORS : [8][4]byte = {
     {255, 128, 255, 255}, // Rear L       - magenta/pink
     {255, 255, 255, 255}, // Rear R       - white (ambient/high)
 };
+WAVEFORM_CHANNEL_NAMES := [?]string {
+    "Front Left",
+    "Front Right",
+    "Center",
+    "LFE",
+    "Surround L",
+    "Surround R",
+    "Rear L",
+    "Rear R",
+};
 Audio_Track_Style :: struct {
     window_body: mu.Rect,
-    window_fbody: sdl3.FRect,
+
+    cnt_body: mu.Rect,
+    cnt_fbody: sdl3.FRect,
 
     spacing: i32,
 
+    scale: [2]f32,
     waveform_tex_size: [2]f32, /**< size of one waveform (per-channel) */
     move_button_size: [2]f32,  /**< size of "move up"/"move down" button */
+    playhead_triangle_size: [2]f32,
 }
 
 Common :: struct {
@@ -451,27 +467,32 @@ audio_track_left_controls_size :: #force_inline proc(using style: ^Audio_Track_S
     };
 }
 
-update_audio_track_style :: proc(using style: ^Audio_Track_Style, ctx: ^mu.Context, cnt_body: mu.Rect) {
-    window_body  = cnt_body;
-    window_fbody = sdl3.FRect { cast(f32)cnt_body.x, cast(f32)cnt_body.y, cast(f32)cnt_body.w, cast(f32)cnt_body.h };
+update_audio_track_style :: proc(using style: ^Audio_Track_Style, ctx: ^mu.Context, window: ^mu.Container) {
+    // calculate the scale from the WHOLE window
+    {
+        scale.x = cast(f32)window.rect.w / cast(f32)AUDIO_TRACK_WINDOW_WIDTH;
+        scale.y = cast(f32)window.rect.h / cast(f32)AUDIO_TRACK_WINDOW_HEIGHT;
+    }
 
-    scale := [2]f32 {
-        window_fbody.w / cast(f32)AUDIO_TRACK_WINDOW_WIDTH,
-        window_fbody.h / cast(f32)AUDIO_TRACK_WINDOW_HEIGHT,
-    };
+    // consider the real "window" to be the one which contents we can change
+    cnt_body  = window.body;
+    cnt_fbody = sdl3.FRect { cast(f32)cnt_body.x, cast(f32)cnt_body.y, cast(f32)cnt_body.w, cast(f32)cnt_body.h };
 
-    waveform_tex_size.x = window_fbody.w;
+    waveform_tex_size.x = cnt_fbody.w;
     waveform_tex_size.y = scale.y * WAVEFORM_TEX_HEIGHT;
 
     move_button_size.x  = scale.x * WAVEFORM_BUTTON_WIDTH;
     move_button_size.y  = scale.y * WAVEFORM_BUTTON_HEIGHT;
+
+    playhead_triangle_size.x = scale.x * PLAYHEAD_TRIANGLE_LEN;
+    playhead_triangle_size.y = scale.y * PLAYHEAD_TRIANGLE_LEN;
 
     spacing = ctx.style.spacing;
 }
 
 create_new_waveform_tex :: #force_inline proc(using co: ^Common) {
     waveform_texs_height := i32(am.device.playback.channels) * i32(track_style.waveform_tex_size.y);
-    waveform_texs_width  := i32(track_style.window_body.w - audio_track_left_controls_size(&track_style).x);
+    waveform_texs_width  := i32(track_style.cnt_body.w - audio_track_left_controls_size(&track_style).x);
     waveform_texs = sdl3.CreateTexture(
         uim.renderer,
         .RGBA8888,
@@ -491,20 +512,20 @@ show_audio_track :: proc(using co: ^Common) {
         "Waveform Track",
         {
             0,
-            AUDIO_TRACK_WINDOW_HEIGHT,
+            relative_window_size(512, FONT_WIDTH_SCALE_FACTOR),
             AUDIO_TRACK_WINDOW_WIDTH,
-            AUDIO_TRACK_WINDOW_HEIGHT + WAVEFORM_TEX_HEIGHT,
+            AUDIO_TRACK_WINDOW_HEIGHT,
         },
         {.NO_CLOSE}
     );
     if w_opened {
-        rect  := mu.get_current_container(uim.ctx).body;
+        cnt := mu.get_current_container(uim.ctx);
 
         // if state of the window (size/pos) changed, trigger waveform gen
-        #assert (size_of(track_style.window_body) == size_of(rect))
+        #assert (size_of(track_style.window_body) == size_of(cnt.rect))
         no_waveform := waveform_texs == nil;
-        if mem.compare_ptrs(&track_style.window_body, &rect, size_of(rect)) != 0 {
-            update_audio_track_style(&track_style, uim.ctx, rect);
+        if mem.compare_ptrs(&track_style.window_body, &cnt.rect, size_of(cnt.rect)) != 0 {
+            update_audio_track_style(&track_style, uim.ctx, cnt);
             no_waveform = true; // trigger waveform regen
         }
 
@@ -527,9 +548,9 @@ show_audio_track :: proc(using co: ^Common) {
 
                 channel_box_yoffset := track_style.waveform_tex_size.y;
                 center_y := channel_box_yoffset / 2;
-                x_step := 1 / track_style.window_fbody.w;
+                x_step := 1 / track_style.cnt_fbody.w;
                 samples_count := decoder.frames_count / cast(u64)channels;
-                bin_size = samples_count / cast(u64)track_style.window_body.w;
+                bin_size = samples_count / cast(u64)track_style.cnt_body.w;
                 // generate waveform textures for each channel
                 for i in 0..<channels {
                     wc := WAVEFORM_COLORS[i];
@@ -553,12 +574,6 @@ show_audio_track :: proc(using co: ^Common) {
 
                     sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
 
-                    when ODIN_DEBUG {
-                        nof_points := u64(len(points));
-                        nof_frames := 2 * decoder.frames_count;
-                        nof_saved  := nof_frames - nof_points;
-                        fmt.eprintfln("actual len of points: %d; max len of points: %d; saved: %.3f%%", nof_points, nof_frames, cast(f64)nof_saved / cast(f64)nof_frames * 100);
-                    }
                     center_y += channel_box_yoffset;
                 }
             }
@@ -581,16 +596,16 @@ show_audio_track :: proc(using co: ^Common) {
                 button_id := mu.get_id_bytes(uim.ctx, button_name[:]);
                 button_text, ok := uim.text_bufs[button_id];
                 if !ok do map_insert(&uim.text_bufs, button_id, Text_Buf { button_name, 2 });
-                if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
+                //if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
                 r2 := mu.Rect { r.x, r.y + cast(i32)track_style.move_button_size.y + track_style.spacing, r.w, r.h };
                 mu.layout_set_next(uim.ctx, r2, false);
                 // "move down" button
-                button_name = [16]byte { 0 = 'b', 1 = cast(byte)box_idx, 2..<16=0 };
+                button_name = [16]byte { 0 = 'b', 1 = cast(byte)box_idx + '0', 2..<16=0 };
                 button_id = mu.get_id_bytes(uim.ctx, button_name[:]);
                 button_text, ok = uim.text_bufs[button_id];
                 if !ok do map_insert(&uim.text_bufs, button_id, Text_Buf { button_name, 2 });
-                if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
+                //if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
                 // custom "icons" for moveup/movedown buttons
                 vertices, merr := mem.make([]sdl3.Vertex, 6, context.temp_allocator);
@@ -609,7 +624,13 @@ show_audio_track :: proc(using co: ^Common) {
                     vertices[5].position = { fr2.x + button_width/2, fr2.y + button_height };
                     for &v in vertices do v.color = MOVE_BUTTON_FCOLOR;
                 }
-                draw_geometry(&uim, vertices, context.temp_allocator);
+                //draw_geometry(&uim, vertices, context.temp_allocator);
+                vtext(
+                    &uim,
+                    WAVEFORM_CHANNEL_NAMES[box_idx],
+                    sdl3.FRect { fr.x, fr.y, track_style.scale.x, track_style.scale.y },
+                    &box.vtexture
+                );
 
                 // waveform texture of the current channel
                 srect := sdl3.FRect {
@@ -617,8 +638,8 @@ show_audio_track :: proc(using co: ^Common) {
                     cast(f32)waveform_texs.w, track_style.waveform_tex_size.y,
                 };
                 drect := sdl3.FRect {
-                    track_style.window_fbody.x + button_width,
-                    track_style.window_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y,
+                    track_style.cnt_fbody.x + button_width,
+                    track_style.cnt_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y,
                     cast(f32)waveform_texs.w,
                     track_style.waveform_tex_size.y,
                 };
@@ -632,9 +653,9 @@ show_audio_track :: proc(using co: ^Common) {
             PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
             @static playhead_pos: [2]sdl3.Vertex;
             i := am.guarded_decoder.decoder.index;
-            pheadx := track_style.window_fbody.x + track_style.move_button_size.x + cast(f32)i / cast(f32)(bin_size * u64(channels));
-            top    := track_style.window_fbody.y;
-            bottom := track_style.window_fbody.y + track_style.window_fbody.h;
+            pheadx := track_style.cnt_fbody.x + track_style.move_button_size.x + cast(f32)i / cast(f32)(bin_size * u64(channels));
+            top    := track_style.cnt_fbody.y;
+            bottom := track_style.cnt_fbody.y + track_style.cnt_fbody.h;
 
             playhead_pos[0].position = sdl3.FPoint{ pheadx, top };
             playhead_pos[1].position = sdl3.FPoint{ pheadx, bottom };
@@ -646,13 +667,13 @@ show_audio_track :: proc(using co: ^Common) {
             {
                 // 2 triangles: 1 top, 1 bottom
                 @static vertices: [6]sdl3.Vertex;
-                TRIANGLE_SIDE_LEN := relative_window_size(8.0, track_style.window_fbody.w/track_style.window_fbody.h);
-                vertices[0].position = { pheadx, track_style.window_fbody.y };
-                vertices[1].position = { pheadx + TRIANGLE_SIDE_LEN, track_style.window_fbody.y };
-                vertices[2].position = { pheadx, track_style.window_fbody.y + TRIANGLE_SIDE_LEN };
-                vertices[3].position = { pheadx, track_style.window_fbody.y + track_style.window_fbody.h };
-                vertices[4].position = { pheadx + TRIANGLE_SIDE_LEN, track_style.window_fbody.y + track_style.window_fbody.h };
-                vertices[5].position = { pheadx, track_style.window_fbody.y + track_style.window_fbody.h - TRIANGLE_SIDE_LEN };
+                TRIANGLE_SIDE_LEN := relative_window_size(8.0, track_style.cnt_fbody.w/track_style.cnt_fbody.h);
+                vertices[0].position = { pheadx, track_style.cnt_fbody.y };
+                vertices[1].position = { pheadx + track_style.playhead_triangle_size.x, track_style.cnt_fbody.y };
+                vertices[2].position = { pheadx, track_style.cnt_fbody.y + track_style.playhead_triangle_size.y };
+                vertices[3].position = { pheadx, track_style.cnt_fbody.y + track_style.cnt_fbody.h };
+                vertices[4].position = { pheadx + track_style.playhead_triangle_size.x, track_style.cnt_fbody.y + track_style.cnt_fbody.h };
+                vertices[5].position = { pheadx, track_style.cnt_fbody.y + track_style.cnt_fbody.h - track_style.playhead_triangle_size.y };
                 for &v in vertices do v.color = PLAYHEAD_FCOLOR;
 
                 draw_geometry(&uim, vertices[:], runtime.nil_allocator());
@@ -663,8 +684,8 @@ show_audio_track :: proc(using co: ^Common) {
                 mu.Rect {
                     cast(i32)playhead_pos[0].position.x,
                     cast(i32)playhead_pos[0].position.y,
-                    rect.w - cast(i32)playhead_pos[0].position.x,
-                    rect.h,
+                    cnt.body.w - cast(i32)playhead_pos[0].position.x,
+                    cnt.body.h,
                 },
                 mu.Color { 50, 50, 50, 50 }
             );

@@ -272,7 +272,7 @@ ui_render :: proc(uim: ^UI_Manager) {
     sdl3.SetRenderDrawColor(uim.renderer, 51, 51, 51, 255);
     sdl3.RenderClear(uim.renderer);
 
-    render_texture :: proc(uim: ^UI_Manager, src: mu.Rect, dst: mu.Rect) {
+    render_atlas_texture :: proc(uim: ^UI_Manager, src: mu.Rect, dst: mu.Rect) {
         src := sdl3.FRect{cast(f32)src.x, cast(f32)src.y, cast(f32)src.w, cast(f32)src.h};
         dst := sdl3.FRect{cast(f32)dst.x, cast(f32)dst.y, cast(f32)dst.w, cast(f32)dst.h};
         sdl3.RenderTexture(uim.renderer, uim.atlas_texture.texture, &src, &dst);
@@ -290,7 +290,7 @@ ui_render :: proc(uim: ^UI_Manager) {
                     rect.w *= FONT_WIDTH_SCALE_FACTOR;
                     rect.y *= FONT_HEIGHT_SCALE_FACTOR;
                     rect.h *= FONT_HEIGHT_SCALE_FACTOR;
-                    render_texture(uim, rect, {pos.x, pos.y, rect.w, rect.h});
+                    render_atlas_texture(uim, rect, {pos.x, pos.y, rect.w, rect.h});
                     pos.x += rect.w;
                 }
             case ^mu.Command_Rect:
@@ -311,7 +311,7 @@ ui_render :: proc(uim: ^UI_Manager) {
                 rect.y *= FONT_HEIGHT_SCALE_FACTOR;
                 rect.w *= FONT_WIDTH_SCALE_FACTOR;
                 rect.h *= FONT_HEIGHT_SCALE_FACTOR;
-                render_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
+                render_atlas_texture(uim, rect, {v.rect.x + (v.rect.w-rect.w)/2, v.rect.y + (v.rect.h-rect.h)/2, rect.w, rect.h});
 
             case ^mu.Command_Texture:
                 srect := &v.srect.(sdl3.FRect) or_else nil;
@@ -406,4 +406,59 @@ checkbox :: #force_inline proc(uim: ^UI_Manager, label: string, value: ^bool) {
     };
     mu.layout_set_next(uim.ctx, r, false);
     mu.checkbox(uim.ctx, label, value);
+}
+
+/**
+ * @note `box' parameters of width and height are only multipliers (for responsive scaling)
+ */
+vtext :: proc(uim: ^UI_Manager, label: string, box: sdl3.FRect, target: ^^sdl3.Texture) {
+    assert(len(label) > 0);
+
+    text_height := uim.ctx.text_height(uim.ctx.style.font);
+    if target^ == nil {
+        max_text_width: i32 = 0;
+        for c in label {
+            tw := mu.default_atlas[mu.DEFAULT_ATLAS_FONT + cast(int)c].w;
+            if tw > max_text_width do max_text_width = tw;
+        }
+
+        target^ = sdl3.CreateTexture(
+            uim.renderer, .RGBA8888, .TARGET, max_text_width, cast(i32)len(label) * text_height
+        );
+        if target^ == nil {
+            log.errorf("SDL3 Texture Init error: %s", sdl3.GetError());
+            unreachable();
+        }
+    }
+
+    text_fheight := cast(f32)text_height;
+    prev_target  := sdl3.GetRenderTarget(uim.renderer);
+    sdl3.SetRenderTarget(uim.renderer, target^);
+    sdl3.RenderClear(uim.renderer);
+    {
+        drect: sdl3.FRect;
+        drect.h = text_fheight;
+        for c in label {
+            srect := mu.default_atlas[mu.DEFAULT_ATLAS_FONT + cast(int)c];
+            drect.w = cast(f32)srect.w;
+            sdl3.RenderTexture(
+                uim.renderer,
+                uim.atlas_texture.texture,
+                &sdl3.FRect { cast(f32)srect.x, cast(f32)srect.y, cast(f32)srect.w, cast(f32)srect.h },
+                &drect,
+            );
+            drect.y += text_fheight;
+        }
+    }
+    sdl3.SetRenderTarget(uim.renderer, prev_target);
+
+    sdl3.SetTextureScaleMode(target^, .LINEAR);
+    mu.draw_texture(
+        uim.ctx,
+        target^,
+        nil,
+        sdl3.FRect {
+            box.x, box.y, box.w * cast(f32)target^.w, box.h * cast(f32)target^.h
+        },
+    );
 }
