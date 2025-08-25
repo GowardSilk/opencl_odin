@@ -191,19 +191,9 @@ main :: proc() {
 }
 
 show_windows :: #force_inline proc(co: ^Common) {
-    // Menu bar at the top
-    //ctx := co.uim.ctx;
-    //if window(co.uim.ctx, "XXX", mu.Rect { 0, 0, 200, 200 }) {
-    //    for i in 0..<10 {
-    //        r := mu.layout_next(co.uim.ctx);
-    //        r.x += 1;
-    //        mu.layout_set_next(co.uim.ctx, r, false);
-    //        button(&co.uim, fmt.tprintf("A%d", i), .Control);
-    //    }
-    //}
     show_sound_list_window(co);
-    //show_aok_settings_window(co);
-    //show_popup_window(co);
+    show_aok_settings_window(co);
+    show_popup_window(co);
     show_audio_track(co);
 }
 
@@ -569,15 +559,44 @@ show_audio_track :: proc(using co: ^Common) {
                 samples_count := decoder.frames_count / cast(u64)channels;
                 bin_size = samples_count / cast(u64)track_style.cnt_body.w;
                 // generate waveform textures for each channel
+                waveforms_data: [^]c.short;
+                if am.opencl.audio_buffer_out.mem != nil {
+                    clret: cl.Int;
+                    waveforms_data = cast([^]c.short)cl.EnqueueMapBuffer(
+                        am.opencl.queue,
+                        am.opencl.audio_buffer_out.mem,
+                        cl.TRUE,
+                        cl.MAP_READ,
+                        0,
+                        cast(c.size_t)decoder.frames_count * size_of(c.short),
+                        0, nil, nil, &clret
+                    );
+                    if clret != cl.SUCCESS {
+                        log.errorf("Failed to map buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
+                    }
+                } else {
+                    waveforms_data = am.guarded_decoder.decoder.frames;
+                }
+                defer if am.opencl.audio_buffer_out.mem != nil {
+                    clret := cl.EnqueueUnmapMemObject(
+                        am.opencl.queue,
+                        am.opencl.audio_buffer_out.mem,
+                        waveforms_data,
+                        0, nil, nil
+                    );
+                    if clret != cl.SUCCESS {
+                        log.errorf("Failed to unmap buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
+                    }
+                }
                 for i in 0..<channels {
                     wc := WAVEFORM_COLORS[i];
                     sdl3.SetRenderDrawColor(uim.renderer, wc.r, wc.g, wc.b, wc.a);
 
                     for x in 0..<cast(u64)waveform_texs.w {
-                        min_val := decoder.frames[x * bin_size];
+                        min_val := waveforms_data[x * bin_size];
                         max_val := min_val;
                         for i in 1..<bin_size {
-                            frame := decoder.frames[x * bin_size + i];
+                            frame := waveforms_data[x * bin_size + i];
                             if frame < min_val do min_val = frame;
                             if frame > max_val do max_val = frame;
                         }
