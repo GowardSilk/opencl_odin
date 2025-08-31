@@ -24,8 +24,10 @@ OpenCL_Error :: enum {
     Kernel_Creation_Fail,
 }
 
+// OpenCL_Audio_Buffer HAS TO BE initialized with this flag
+OPENCL_AUDIO_BUFFER_FLAGS: cl.Mem_Flags: cl.MEM_ALLOC_HOST_PTR;
 OpenCL_Audio_Buffer :: struct {
-    mem: cl.Mem,
+    mem:  cl.Mem,
     size: c.size_t,
 }
 
@@ -38,11 +40,14 @@ OpenCL_Context :: struct {
     queue:      cl.Command_Queue,
 
     audio_buffer_in: OpenCL_Audio_Buffer,
-    audio_buffer_out: OpenCL_Audio_Buffer,
+    audio_buffer_out: #type struct {
+        using _: OpenCL_Audio_Buffer,
+        host_access_event: cl.Event,
+    },
     audio_buffer_out_host: []c.short, /**< latest chunk of processed samples */
     eat_pos: u64, /**< how much data has already been read from audio_buffer_out_host by device_data_proc */
 
-    kernels: map[cstring]cl.Kernel,
+    kernels: map[cstring]cl.Kernel, /**< registered kernels (queried by name: AOK_###_NAME) */
 }
 
 init_cl_context :: proc() -> (c: OpenCL_Context, err: Error) {

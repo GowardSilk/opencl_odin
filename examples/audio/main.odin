@@ -8,6 +8,7 @@ import "core:log"
 import "core:fmt"
 import "core:mem"
 import "core:sync"
+import "core:thread"
 import "core:strings"
 import "core:strconv"
 import "core:reflect"
@@ -22,7 +23,8 @@ import mu "microui"
 Error :: union #shared_nil {
     OpenCL_Error,
     UI_Error,
-    ma.result
+    ma.result,
+    mem.Allocator_Error,
 }
 
 notify_error :: proc($err_msg: string, err: Error) {
@@ -75,7 +77,7 @@ WAVEFORM_CHANNEL_NAMES := [?]string {
     "Rear R",
 };
 Audio_Track_Style :: struct {
-    window_body: mu.Rect,
+    window_rect: mu.Rect,
 
     cnt_body: mu.Rect,
     cnt_fbody: sdl3.FRect,
@@ -102,12 +104,20 @@ Common :: struct {
     waveform_texs: ^sdl3.Texture, /**< texture of a rendered waveform of currently playing audio (contains multiple smaller textures, per sound channel) */
     waveform_boxes: Waveform_Channel_Box_List,
     bin_size: u64, /**< nof frames interpolated for one line rendered */
+    waveform_gen_thread: ^thread.Thread,
+    wgt_sem: ^sync.Sema, /**< [w]aveform [g]en [t]hread semaphore for signalling when to launch work */
+    _wgt_done: ^sync.Sema, /**< used to sync main thread (deferred waveform_texs render) with the wgt once its iteration is finished */
+    wgt_done: ^sync.Sema,
+    wgt_exit: int, /**< signals to wgt that it should terminate */
 }
 
-init_common :: proc() -> (co: Common) {
+init_common :: proc() -> (co: ^Common) {
+    err: Error;
+    co, err = mem.new(Common);
+    if err != nil do notify_error("Failed to allocate `Common' struct", err);
+
     am: ^Audio_Manager;
     uim: UI_Manager;
-    err: Error;
     os_err: os.Error;
 
     /// AUDIO MANAGER
@@ -134,15 +144,30 @@ init_common :: proc() -> (co: Common) {
         if os_err != nil do notify_error("Failed to open current directory handle", err);
     }
 
+    /// AUDIO TRACK STATE
+    co.wgt_exit = 0;
+    co.waveform_gen_thread = thread.create_and_start_with_poly_data(co, generate_waveform_texs_from_opencl_out_buffer);
+    co.wgt_sem, err = mem.new(sync.Sema);
+    if err != nil do notify_error("Failed to allocate `sync.Sema' [co.wgt_sem] struct", err);
+    co._wgt_done, err = mem.new(sync.Sema);
+    if err != nil do notify_error("Failed to allocate `sync.Sema' [co._wgt_done] struct", err);
+
     return co;
 }
 
 delete_common :: proc(co: ^Common) {
+    assert(co != nil);
     delete_audio_manager(co.am);
     delete_ui_manager(&co.uim);
     os.close(co.curr_dir_handle);
     if co.waveform_texs != nil do sdl3.DestroyTexture(co.waveform_texs);
     if len(co.waveform_boxes.memory) > 0 do mem.delete(co.waveform_boxes.memory);
+    co.wgt_exit = 1;
+    sync.post(co.wgt_sem);
+    thread.destroy(co.waveform_gen_thread);
+    mem.free(co._wgt_done);
+    mem.free(co.wgt_sem);
+    mem.free(co);
 }
 
 main :: proc() {
@@ -175,13 +200,13 @@ main :: proc() {
     defer log.destroy_console_logger(context.logger);
 
     co := init_common();
-    defer delete_common(&co);
+    defer delete_common(co);
 
     for !co.uim.should_close {
         ui_register_events(&co.uim);
 
         mu.begin(co.uim.ctx);
-        show_windows(&co);
+        show_windows(co);
         mu.end(co.uim.ctx);
 
         ui_render(&co.uim);
@@ -271,7 +296,7 @@ show_sound_list_window :: proc(using co: ^Common) {
                 sync.mutex_unlock(&am.guarded_decoder.guard);
 
                 // restore state of the waveform texture
-                restore_waveform_tex(co);
+                restore_waveform_texs(co);
                 if !list.is_empty(&co.waveform_boxes.list) {
                     mem.zero_item(&co.waveform_boxes.list);
                     mem.zero_slice(co.waveform_boxes.memory);
@@ -315,7 +340,7 @@ show_sound_list_window :: proc(using co: ^Common) {
             am.guarded_decoder.decoder.launch_kernel = true;
             am.guarded_decoder.decoder.pause = false;
 
-            restore_waveform_tex(co);
+            restore_waveform_texs(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
 
@@ -332,7 +357,7 @@ show_sound_list_window :: proc(using co: ^Common) {
                 base_enabled_field^ = false;
             }
 
-            restore_waveform_tex(co);
+            restore_waveform_texs(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
 
@@ -349,7 +374,7 @@ show_sound_list_window :: proc(using co: ^Common) {
             delete_wavebuffer(&am.guarded_decoder.decoder.wb);
 
             pause^ = false;
-            restore_waveform_tex(co);
+            restore_waveform_texs(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
     }
@@ -450,7 +475,7 @@ show_popup_window :: proc(using co: ^Common) {
     }
 }
 
-restore_waveform_tex :: #force_inline proc(using co: ^Common) {
+restore_waveform_texs :: #force_inline proc(using co: ^Common) {
     if waveform_texs != nil {
         sdl3.DestroyTexture(waveform_texs);
         waveform_texs = nil;
@@ -466,6 +491,7 @@ audio_track_left_controls_size :: #force_inline proc(using style: ^Audio_Track_S
 }
 
 update_audio_track_style :: proc(using style: ^Audio_Track_Style, ctx: ^mu.Context, window: ^mu.Container) {
+    window_rect = window.rect;
     // calculate the scale from the WHOLE window
     {
         scale.x = cast(f32)window.rect.w / cast(f32)AUDIO_TRACK_WINDOW_WIDTH;
@@ -529,103 +555,59 @@ show_audio_track :: proc(using co: ^Common) {
         cnt := mu.get_current_container(uim.ctx);
 
         // if state of the window (size/pos) changed, trigger waveform gen
-        #assert (size_of(track_style.window_body) == size_of(cnt.rect))
+        #assert (size_of(track_style.window_rect) == size_of(cnt.rect))
         no_waveform := waveform_texs == nil;
-        if mem.compare_ptrs(&track_style.window_body, &cnt.rect, size_of(cnt.rect)) != 0 {
+        if mem.compare_ptrs(&track_style.window_rect, &cnt.rect, size_of(cnt.rect)) != 0 {
             update_audio_track_style(&track_style, uim.ctx, cnt);
             no_waveform = true; // trigger waveform regen
         }
 
+        // executing show_audio_track before am.opencl.audio_buffer_out.mem
+        // is allocated/prepared for any reads, we will have to create a "promise"
+        // to re-render once the opencl buffer is not longer nil
+        @static waveform_regen_promise := false;
+        deferred_waveform_texture_gen :: #force_inline proc(using co: ^Common) {
+            fmt.eprintfln("Generating new (deferred) waveform texture!");
+            wgt_done = _wgt_done;
+            waveform_texs_surface: ^sdl3.Surface;
+            sdl3.LockTextureToSurface(waveform_texs, nil, &waveform_texs_surface);
+            sdl3.FillSurfaceRect(waveform_texs_surface, nil, sdl3.MapSurfaceRGBA(waveform_texs_surface, 0, 0, 0, 0));
+            sdl3.UnlockTexture(waveform_texs);
+            sync.post(wgt_sem); // launch generate_waveform_texs_from_opencl_out_buffer
+        }
+
         // waveform(s) gen
         channels := am.device.playback.channels;
-        if no_waveform && am.guarded_decoder.decoder.frames_count > 0 {
+        if waveform_regen_promise && am.opencl.audio_buffer_out.mem != nil {
+            assert(waveform_texs != nil);
+            deferred_waveform_texture_gen(co);
+            waveform_regen_promise = false;
+        } else if no_waveform && am.guarded_decoder.decoder.frames_count > 0 {
             create_new_waveform_tex(co);
 
-            sdl3.SetRenderTarget(uim.renderer, waveform_texs);
-            sdl3.SetRenderViewport(uim.renderer, nil);
-            sdl3.SetRenderClipRect(uim.renderer, nil);
-            {
-                decoder := am.guarded_decoder.decoder;
-                points, merr := mem.make([]sdl3.FPoint, 2 * cast(int)waveform_texs.w);
-                if merr != .None {
-                    log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
-                    return;
-                }
-                defer mem.delete(points);
+            if am.opencl.audio_buffer_out.mem != nil {
+                deferred_waveform_texture_gen(co);
+            } else {
+                waveform_regen_promise = am.guarded_decoder.decoder.launch_kernel;
 
-                channel_box_yoffset := track_style.waveform_tex_size.y;
-                center_y := channel_box_yoffset / 2;
-                x_step := 1 / track_style.cnt_fbody.w;
-                samples_count := decoder.frames_count / cast(u64)channels;
-                bin_size = samples_count / cast(u64)track_style.cnt_body.w;
-                // generate waveform textures for each channel
-                waveforms_data: [^]c.short;
-                if am.opencl.audio_buffer_out.mem != nil {
-                    clret: cl.Int;
-                    waveforms_data = cast([^]c.short)cl.EnqueueMapBuffer(
-                        am.opencl.queue,
-                        am.opencl.audio_buffer_out.mem,
-                        cl.TRUE,
-                        cl.MAP_READ,
-                        0,
-                        cast(c.size_t)decoder.frames_count * size_of(c.short),
-                        0, nil, nil, &clret
-                    );
-                    if clret != cl.SUCCESS {
-                        log.errorf("Failed to map buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
-                    }
-                } else {
-                    waveforms_data = am.guarded_decoder.decoder.frames;
-                }
-                defer if am.opencl.audio_buffer_out.mem != nil {
-                    clret := cl.EnqueueUnmapMemObject(
-                        am.opencl.queue,
-                        am.opencl.audio_buffer_out.mem,
-                        waveforms_data,
-                        0, nil, nil
-                    );
-                    if clret != cl.SUCCESS {
-                        log.errorf("Failed to unmap buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
-                    }
-                }
-                for i in 0..<channels {
-                    wc := WAVEFORM_COLORS[i];
-                    sdl3.SetRenderDrawColor(uim.renderer, wc.r, wc.g, wc.b, wc.a);
-
-                    for x in 0..<cast(u64)waveform_texs.w {
-                        min_val := waveforms_data[x * bin_size];
-                        max_val := min_val;
-                        for i in 1..<bin_size {
-                            frame := waveforms_data[x * bin_size + i];
-                            if frame < min_val do min_val = frame;
-                            if frame > max_val do max_val = frame;
-                        }
-
-                        y_min := center_y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * track_style.waveform_tex_size.y/2;
-                        y_max := center_y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * track_style.waveform_tex_size.y/2;
-
-                        points[2 * x]     = sdl3.FPoint{cast(f32)x, y_min};
-                        points[2 * x + 1] = sdl3.FPoint{cast(f32)x, y_max};
-                    }
-
-                    sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
-
-                    center_y += channel_box_yoffset;
-                }
+                fmt.eprintfln("Generating new (non-deferred) waveform texture!");
+                waveforms_data := am.guarded_decoder.decoder.frames;
+                generate_waveform_texs(co, waveforms_data);
             }
-            sdl3.SetRenderTarget(uim.renderer, nil);
         }
 
         if waveform_texs != nil {
             box_idx := 0;
-            r := mu.layout_next(uim.ctx);
+            initial_layout := mu.layout_next(uim.ctx);
+            r := initial_layout;
             r.w = cast(i32)track_style.move_button_size.x;
             r.h = cast(i32)track_style.move_button_size.y;
             // waveform(s) render
             next_it := list.iterator_head(waveform_boxes.list, Waveform_Channel_Box, "node");
             it := next_it;
             for box in list.iterate_next(&next_it) {
-                defer r.y += 2 * (cast(i32)track_style.move_button_size.y + track_style.spacing);
+                move_up_button_offset := cast(i32)track_style.move_button_size.y;
+                defer r.y += 2 * move_up_button_offset;
                 update_layout(co, r);
                 // "move up" button
                 button_name := [16]byte { 0 = 'a', 1 = cast(byte)box_idx + '0', 2..<16=0 };
@@ -634,7 +616,7 @@ show_audio_track :: proc(using co: ^Common) {
                 if !ok do map_insert(&uim.text_bufs, button_id, Text_Buf { button_name, 2 });
                 if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
-                r2 := mu.Rect { r.x, r.y + cast(i32)track_style.move_button_size.y + track_style.spacing, r.w, r.h };
+                r2 := mu.Rect { r.x, r.y + move_up_button_offset, r.w, r.h };
                 update_layout(co, r2);
                 // "move down" button
                 button_name = [16]byte { 0 = 'b', 1 = cast(byte)box_idx + '0', 2..<16=0 };
@@ -644,31 +626,59 @@ show_audio_track :: proc(using co: ^Common) {
                 if .SUBMIT in button(&uim, cast(string)button_text.buf[:2], .Control) { unimplemented(); }
 
                 // custom "icons" for moveup/movedown buttons
-                vertices, merr := mem.make([]sdl3.Vertex, 6, context.temp_allocator);
+                vertices, merr := mem.make([]sdl3.Vertex, 12, context.temp_allocator);
                 assert(merr == .None);
                 button_width  := track_style.move_button_size.x;
                 button_height := track_style.move_button_size.y;
-                fr  := sdl3.FRect { cast(f32)r.x, cast(f32)r.y, button_width, button_height };
-                fr2 := sdl3.FRect { cast(f32)r2.x, cast(f32)r2.y, fr.x, fr.y };
+                fr  := sdl3.FRect { cast(f32)r.x,  cast(f32)r.y, button_width, button_height };
+                fr2 := sdl3.FRect { cast(f32)r2.x, cast(f32)r2.y, fr.w, fr.h };
                 {
-                    MOVE_BUTTON_FCOLOR :: sdl3.FColor { 255, 255, 255, 255 };
+                    shrink_triangle :: #force_inline proc(result: []sdl3.Vertex, verts: []sdl3.Vertex) {
+                        cx := (verts[0].position.x + verts[1].position.x + verts[2].position.x) / 3.0;
+                        cy := (verts[0].position.y + verts[1].position.y + verts[2].position.y) / 3.0;
+                        #unroll for i in 0..<3 {
+                            dx := verts[i].position.x - cx;
+                            dy := verts[i].position.y - cy;
+                            result[i].position.x = cx + dx * 0.85;
+                            result[i].position.y = cy + dy * 0.85;
+                            result[i].color = MOVE_BUTTON_FCOLOR;
+                        }
+                    }
+
+                    MOVE_BUTTON_FCOLOR        :: sdl3.FColor { 255, 255, 255, 255 };
+                    MOVE_BUTTON_BORDER_FCOLOR :: sdl3.FColor { 0, 0, 0, 255 };
+
                     vertices[0].position = { fr.x, fr.y + button_height };
                     vertices[1].position = { fr.x + button_width, fr.y + button_height };
                     vertices[2].position = { fr.x + button_width/2, fr.y };
                     vertices[3].position = { fr2.x, fr2.y };
-                    vertices[4].position = { fr2.x + button_width, fr2.y };
-                    vertices[5].position = { fr2.x + button_width/2, fr2.y + button_height };
-                    for &v in vertices do v.color = MOVE_BUTTON_FCOLOR;
+                    vertices[4].position = { fr2.x + button_width/2, fr2.y + button_height };
+                    vertices[5].position = { fr2.x + button_width, fr2.y };
+                    for &v in vertices[:6] do v.color = MOVE_BUTTON_BORDER_FCOLOR;
+
+                    shrink_triangle(vertices[6:9], vertices[:3]);
+                    shrink_triangle(vertices[9:12], vertices[3:6]);
                 }
                 draw_geometry(&uim, vertices, context.temp_allocator);
                 vtext(
                     &uim,
                     WAVEFORM_CHANNEL_NAMES[box_idx],
-                    sdl3.FRect { fr.x, fr.y, track_style.scale.x, track_style.scale.y },
+                    sdl3.FRect { fr.x, fr.y + (track_style.waveform_tex_size.y - cast(f32)(cast(i32)len(WAVEFORM_CHANNEL_NAMES[box_idx]) * uim.ctx.text_height(uim.ctx.style.font)))/2, track_style.scale.x, track_style.scale.y },
                     &box.vtexture
                 );
 
-                // waveform texture of the current channel
+                // NOTE(GowardSilk): Waveform textures moved at the end of this function
+
+                box_idx += 1;
+                it = next_it;
+            }
+
+            // (potential) deferred waveform texture render
+            if wgt_done != nil do sync.wait(wgt_done);
+            button_width := track_style.move_button_size.x;
+            next_it = list.iterator_head(waveform_boxes.list, Waveform_Channel_Box, "node");
+            r = initial_layout; // backward to the origianl position
+            for box in list.iterate_next(&next_it) {
                 srect := sdl3.FRect {
                     0, cast(f32)box.index * track_style.waveform_tex_size.y,
                     cast(f32)waveform_texs.w, track_style.waveform_tex_size.y,
@@ -677,17 +687,15 @@ show_audio_track :: proc(using co: ^Common) {
                 drect := sdl3.FRect {
                     track_style.cnt_fbody.x + button_width - cast(f32)scroll.x,
                     track_style.cnt_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y - cast(f32)scroll.y,
-                    cast(f32)waveform_texs.w,
+                    track_style.waveform_tex_size.x,
                     track_style.waveform_tex_size.y,
                 };
                 update_layout(co, mu.Rect {
-                    r.x + cast(i32)button_width, r.y,
+                    r.x, r.y,
                     waveform_texs.w, cast(i32)track_style.waveform_tex_size.y
                 });
+                r.y += waveform_texs.h;
                 mu.draw_texture(uim.ctx, cast(rawptr)waveform_texs, srect, drect);
-
-                box_idx += 1;
-                it = next_it;
             }
 
             // playhead
@@ -728,10 +736,117 @@ show_audio_track :: proc(using co: ^Common) {
                     cnt.body.w - cast(i32)playhead_pos[0].position.x,
                     cnt.body.h,
                 },
-                mu.Color { 50, 50, 50, 50 }
+                mu.Color { 50, 50, 50, 150 }
             );
         }
     }
+}
+
+generate_waveform_texs_from_opencl_out_buffer :: proc(using co: ^Common) {
+    clret: cl.Int;
+    for {
+        sync.wait(wgt_sem);
+
+        if wgt_exit != 0 do return;
+
+        // NOTE(GowardSilk): This is potentially BUGGY.
+        // Even though we perform on in-order command queue
+        // we cannot know whether the actual work executed
+        // on the audio_buffer_out has been ENQUEUED apriori.
+        // This could introduce potential issues for future calls:
+        // supposing a case when audio modification request would be
+        // launched once and window would not resize, nor anything else
+        // triggering this path (chances are pretty low but still).
+        waveforms_data := cast([^]c.short)cl.EnqueueMapBuffer(
+            am.opencl.queue,
+            am.opencl.audio_buffer_out.mem,
+            cl.FALSE,
+            cl.MAP_READ,
+            0,
+            cast(c.size_t)am.guarded_decoder.decoder.frames_count * size_of(c.short),
+            0, nil, &am.opencl.audio_buffer_out.host_access_event, &clret
+        );
+        if clret != cl.SUCCESS {
+            log.errorf("Failed to map buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
+            return;
+        }
+
+        fmt.eprintln("[WGT]: Generating waveform texture from opencl out buffer");
+        cl.WaitForEvents(1, &am.opencl.audio_buffer_out.host_access_event);
+
+        generate_waveform_texs(co, waveforms_data);
+
+        clret = cl.EnqueueUnmapMemObject(
+            am.opencl.queue,
+            am.opencl.audio_buffer_out.mem,
+            waveforms_data,
+            0, nil, nil
+        );
+        if clret != cl.SUCCESS {
+            log.errorf("Failed to unmap buffer for waveform texture gen! Reason: %s/%s", err_to_name(clret));
+        }
+
+        assert(wgt_done != nil);
+        sync.post(wgt_done);
+        wgt_done = nil;
+    }
+}
+
+generate_waveform_texs :: proc(using co: ^Common, waveforms_data: [^]c.short) {
+    sdl3.SetRenderTarget(uim.renderer, waveform_texs);
+    cc := uim.ctx.style.colors[.WINDOW_BG];
+    sdl3.SetRenderDrawColor(uim.renderer, cc.r, cc.g, cc.b, cc.a);
+    sdl3.RenderClear(uim.renderer);
+    sdl3.SetRenderViewport(uim.renderer, nil);
+    sdl3.SetRenderClipRect(uim.renderer, nil);
+    {
+        decoder := am.guarded_decoder.decoder;
+        points, merr := mem.make([]sdl3.FPoint, 2 * cast(int)waveform_texs.w);
+        if merr != .None {
+            log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
+            return;
+        }
+        defer mem.delete(points);
+
+        channels := am.device.playback.channels;
+
+        channel_box_yoffset := track_style.waveform_tex_size.y;
+        center_y := channel_box_yoffset / 2;
+        x_step := 1 / track_style.cnt_fbody.w;
+        samples_count := decoder.frames_count / cast(u64)channels;
+        bin_size = samples_count / cast(u64)track_style.cnt_body.w;
+        // generate waveform textures for each channel
+        y0_axis_base := track_style.waveform_tex_size.y/2;
+        for i in 0..<channels {
+            wc := WAVEFORM_COLORS[i];
+            sdl3.SetRenderDrawColor(uim.renderer, wc.r, wc.g, wc.b, wc.a);
+
+            for x in 0..<cast(u64)waveform_texs.w {
+                min_val := waveforms_data[x * bin_size];
+                max_val := min_val;
+                for i in 1..<bin_size {
+                    frame := waveforms_data[x * bin_size + i];
+                    if frame < min_val do min_val = frame;
+                    if frame > max_val do max_val = frame;
+                }
+
+                y_min := center_y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * y0_axis_base;
+                y_max := center_y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * y0_axis_base;
+
+                points[2 * x]     = sdl3.FPoint{cast(f32)x, y_min};
+                points[2 * x + 1] = sdl3.FPoint{cast(f32)x, y_max};
+            }
+
+            sdl3.RenderLines(uim.renderer, raw_data(points), auto_cast len(points));
+            // add horizontal line (y = 0)
+            sdl3.SetRenderDrawColorFloat(uim.renderer, 1, 1, 1, 1);
+            y0_axis := y0_axis_base + cast(f32)i * track_style.waveform_tex_size.y;
+            sdl3.RenderLine(uim.renderer, 0, y0_axis, track_style.waveform_tex_size.x, y0_axis);
+
+            center_y += channel_box_yoffset;
+        }
+    }
+    sdl3.SetRenderTarget(uim.renderer, nil);
 }
 
 reflect_get_generic_float :: #force_inline proc(base: rawptr, setting: reflect.Struct_Field, field_offset: uintptr) -> ^f32 {

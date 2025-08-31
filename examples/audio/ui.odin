@@ -41,8 +41,8 @@ UI_Error :: enum {
     Texture_Creation_Fail,
 }
 
-FONT_WIDTH_SCALE_FACTOR  :: 2;
-FONT_HEIGHT_SCALE_FACTOR :: 2;
+FONT_WIDTH_SCALE_FACTOR  :: 1;
+FONT_HEIGHT_SCALE_FACTOR :: 1;
 ATLAS_WIDTH :: mu.DEFAULT_ATLAS_WIDTH * FONT_WIDTH_SCALE_FACTOR;
 ATLAS_HEIGHT :: mu.DEFAULT_ATLAS_HEIGHT * FONT_HEIGHT_SCALE_FACTOR;
 SCALED_STYLE := mu.Style{
@@ -454,8 +454,9 @@ vtext :: proc(uim: ^UI_Manager, label: string, box: sdl3.FRect, target: ^^sdl3.T
         cast(f32)ibox.w, cast(f32)ibox.h
     };
 
-    prev_target  := sdl3.GetRenderTarget(uim.renderer);
+    prev_target := sdl3.GetRenderTarget(uim.renderer);
     sdl3.SetRenderTarget(uim.renderer, target^);
+    sdl3.SetRenderDrawColorFloat(uim.renderer, 0, 0, 0, 1);
     sdl3.RenderClear(uim.renderer);
     {
         drect: sdl3.FRect;
@@ -479,8 +480,6 @@ vtext :: proc(uim: ^UI_Manager, label: string, box: sdl3.FRect, target: ^^sdl3.T
         uim.ctx,
         target^,
         nil,
-        sdl3.FRect {
-            box.x, box.y, box.w, box.h
-        },
+        box,
     );
 }
