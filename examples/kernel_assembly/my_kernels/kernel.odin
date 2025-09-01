@@ -18,21 +18,29 @@ import cl "shared:opencl"
 
 @(kernel)
 @(params={input="global", output="global"})
-my_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ cl.Float) {
+copy_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float) {
+    id := emulator.get_global_id(0);
+    output[id] = input[id];
+}
+
+@(kernel)
+@(params={input="global", output="global"})
+scale_kernel :: proc(input: [^]cl.Float, output: [^]cl.Float, scale: /* __const */ cl.Float) {
 	id := emulator.get_global_id(0);
 	output[id] = input[id] * scale;
 }
 
-my_kernel_nullcl_wrapper :: proc(params: []rawptr) {
-      when ODIN_DEBUG do assert(len(params) == 3);
+@(kernel)
+@(params={data="global", scratch="local"})
+local_mem_kernel :: proc(data: [^]cl.Float, scratch: [^]cl.Float) {
+    lid := emulator.get_local_id(0);
+    gid := emulator.get_global_id(0);
 
-      // TODO(GowardSilk): We should not use this 'casting' strategy here such that we assume the inner
-      // workings of the emulator package... the emulator API should provide a suitable argument (aka the input
-      // parameter of the @(kernel) functions
-      p0 := cast(^^emulator.Mem_Null_Impl)params[0];
-      p1 := cast(^^emulator.Mem_Null_Impl)params[1];
-      p2 := cast(^cl.Float)params[2];
-      my_kernel(cast([^]cl.Float)p0^.data, cast([^]cl.Float)p1^.data, p2^);
+    scratch[lid] = data[gid];
+    emulator.barrier(emulator.CLK_LOCAL_MEM_FENCE);
+
+    next := (lid + 1) % emulator.get_local_size(0);
+    data[gid] = scratch[next];
 }
 
 // Code replicated from https://github.com/HandsOnOpenCL/Exercises-Solutions/blob/master/Solutions/ExerciseA/pi_vocl.cl
@@ -67,21 +75,58 @@ pi :: proc(
    }
 }
 
-pi_nullcl_wrapper :: proc(params: []rawptr) {
+copy_kernel_nullcl_wrapper :: proc(params: []rawptr) {
+      when ODIN_DEBUG do assert(len(params) == 2);
+
+      p0 := cast(^^emulator.Mem_Null_Impl)params[0];
+      p1 := cast(^^emulator.Mem_Null_Impl)params[1];
+      copy_kernel(cast([^]cl.Float)p0^.data, cast([^]cl.Float)p1^.data);
+}
+
+scale_kernel_nullcl_wrapper :: proc(params: []rawptr) {
+      when ODIN_DEBUG do assert(len(params) == 3);
+
+      // TODO(GowardSilk): We should not use this 'casting' strategy here such that we assume the inner
+      // workings of the emulator package... the emulator API should provide a suitable argument (aka the input
+      // parameter of the @(kernel) functions
+      p0 := cast(^^emulator.Mem_Null_Impl)params[0];
+      p1 := cast(^^emulator.Mem_Null_Impl)params[1];
+      p2 := cast(^cl.Float)params[2];
+      scale_kernel(cast([^]cl.Float)p0^.data, cast([^]cl.Float)p1^.data, p2^);
+}
+
+local_mem_kernel_nullcl_wrapper :: proc(params: []rawptr) {
+      when ODIN_DEBUG do assert(len(params) == 2);
+      
+      p0 := cast(^^emulator.Mem_Null_Impl)params[0];
+      p1_arg_local_bytes := cast([^]byte)params[1];
+      p1 := get_local_arg(p1_arg_local_bytes);
+      local_mem_kernel(cast([^]cl.Float)p0^.data, cast([^]cl.Float)p1);
+}
+
+pi_kernel_nullcl_wrapper :: proc(params: []rawptr) {
       when ODIN_DEBUG do assert(len(params) == 4);
 
-      p0 := (cast(^c.int)params[0]);
-      p1 := (cast(^cl.Float)params[1]);
+      p0 := cast(^c.int)params[0];
+      p1 := cast(^cl.Float)params[1];
 
-      payload := cast(^emulator.Kernel_Builtin_Context_Payload)context.user_ptr;
       // whole emulator.Kernel_Null_Arg_Local is stored as byte array
       p2_arg_local_bytes := cast([^]byte)params[2];
-      // get the emulator.Kernel_Null_Arg_Local.size (aka size of one __local param)
-      p2_chunk_size := cast(^c.size_t)&p2_arg_local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, size)];
-      // calculate offset of that chunk
-      p2_chunk_begin := payload.wg_idx / payload.nof_iters * p2_chunk_size^;
-      p2_chunk := &p2_arg_local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, buffer) + cast(uintptr)p2_chunk_begin];
+      p2 := get_local_arg(p2_arg_local_bytes);
 
       p3 := cast(^^emulator.Mem_Null_Impl)params[3];
-      pi(p0^, p1^, cast([^]cl.Float)p2_chunk, cast([^]cl.Float)p3^.data);
+      pi(p0^, p1^, cast([^]cl.Float)p2, cast([^]cl.Float)p3^.data);
+}
+
+/**
+ * @brief helper function to extract __local kernel arg
+ */
+@(private="file")
+get_local_arg :: #force_inline proc(local_bytes: [^]byte) -> rawptr {
+      payload := cast(^emulator.Kernel_Builtin_Context_Payload)context.user_ptr;
+      // get the emulator.Kernel_Null_Arg_Local.size (aka size of one __local param)
+      chunk_size := cast(^c.size_t)&local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, size)];
+      // calculate offset of that chunk
+      chunk_begin := payload.wg_idx / payload.nof_iters * chunk_size^;
+      return &local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, buffer) + cast(uintptr)chunk_begin];
 }

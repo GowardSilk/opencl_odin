@@ -513,8 +513,13 @@ EnqueueNDRangeKernel_NullCL :: proc(this: ^Emulator, command_queue: Command_Queu
 			case 3: nof_locals = local_work_size[0] * local_work_size[1] * local_work_size[2];
 			case: unreachable();
 		}
-		assert(cast(int)nof_locals <= ndrange_len(ndrange) && nof_calls % nof_locals == 0);
-		nof_iters = nof_calls / nof_locals;
+		fmt.assertf(
+			cast(int)nof_locals <= ndrange_len(ndrange) /* && nof_calls % nof_locals == 0 */,
+			"%v <= %v && %v %% %v = 0 (=%v)",
+			nof_locals, ndrange_len(ndrange), nof_calls, nof_locals, nof_calls % nof_locals
+		);
+		if nof_calls < nof_locals do nof_iters = 1;
+		else do nof_iters = nof_calls / nof_locals;
 	}
 
 	// copy kernel args into Task_In
