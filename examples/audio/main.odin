@@ -280,14 +280,14 @@ show_sound_list_window :: proc(using co: ^Common) {
                 if res != .SUCCESS do notify_error("Failed to decode selected file", res);
                 assert(frames_out != nil);
 
-                max_amplitude: c.short;
-                for i in 0..<frames_count do if max_amplitude < frames_out[i] {
-                    max_amplitude = frames_out[i];
-                }
-
                 // play the new sound
                 sync.mutex_lock(&am.guarded_decoder.guard);
                 {
+                    max_amplitude := ~c.short(0);
+                    for i in 0..<frames_count do if max_amplitude < frames_out[i] {
+                        max_amplitude = frames_out[i];
+                    }
+
                     am.guarded_decoder.decoder.frames = frames_out;
                     am.guarded_decoder.decoder.frames_count = frames_count;
                     am.guarded_decoder.decoder.index = 0;
@@ -348,14 +348,7 @@ show_sound_list_window :: proc(using co: ^Common) {
         if am.guarded_decoder.decoder.launch_kernel && .SUBMIT in button(&uim, "Clear", .Control) {
             am.guarded_decoder.decoder.launch_kernel = false;
 
-            struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
-            struct_info := struct_info_named.base.variant.(runtime.Type_Info_Struct);
-            for i in 0..<struct_info.field_count {
-                field := reflect.struct_field_by_name(type_of(am^.operations), struct_info.names[i]);
-                base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
-                base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
-                base_enabled_field^ = false;
-            }
+            clear_aok_settings(am);
 
             restore_waveform_texs(co);
         }
@@ -373,10 +366,23 @@ show_sound_list_window :: proc(using co: ^Common) {
         if am.guarded_decoder.decoder.frames != nil && .SUBMIT in button(&uim, "Stop", .Control) {
             delete_wavebuffer(&am.guarded_decoder.decoder.wb);
 
+            clear_aok_settings(am);
+            am.guarded_decoder.decoder.launch_kernel = false;
             pause^ = false;
             restore_waveform_texs(co);
         }
         sync.unlock(&am.guarded_decoder.guard);
+    }
+}
+
+clear_aok_settings :: proc(am: ^Audio_Manager) {
+    struct_info_named := type_info_of(AOK_Operations).variant.(runtime.Type_Info_Named);
+    struct_info := struct_info_named.base.variant.(runtime.Type_Info_Struct);
+    for i in 0..<struct_info.field_count {
+        field := reflect.struct_field_by_name(type_of(am^.operations), struct_info.names[i]);
+        base_enabled_offset := reflect.struct_field_by_name(field.type.id, "enabled").offset;
+        base_enabled_field := cast(^bool)(cast(uintptr)&am^.operations + field.offset + base_enabled_offset);
+        base_enabled_field^ = false;
     }
 }
 
@@ -600,6 +606,8 @@ show_audio_track :: proc(using co: ^Common) {
             box_idx := 0;
             initial_layout := mu.layout_next(uim.ctx);
             r := initial_layout;
+            r.x -= track_style.spacing;
+            r.y -= track_style.spacing;
             r.w = cast(i32)track_style.move_button_size.x;
             r.h = cast(i32)track_style.move_button_size.y;
             // waveform(s) render
@@ -687,14 +695,14 @@ show_audio_track :: proc(using co: ^Common) {
                 drect := sdl3.FRect {
                     track_style.cnt_fbody.x + button_width - cast(f32)scroll.x,
                     track_style.cnt_fbody.y + cast(f32)box.index * track_style.waveform_tex_size.y - cast(f32)scroll.y,
-                    track_style.waveform_tex_size.x,
+                    cast(f32)waveform_texs.w,
                     track_style.waveform_tex_size.y,
                 };
                 update_layout(co, mu.Rect {
                     r.x, r.y,
-                    waveform_texs.w, cast(i32)track_style.waveform_tex_size.y
+                    cast(i32)track_style.waveform_tex_size.x, cast(i32)track_style.waveform_tex_size.y
                 });
-                r.y += waveform_texs.h;
+                r.y += cast(i32)track_style.waveform_tex_size.y;
                 mu.draw_texture(uim.ctx, cast(rawptr)waveform_texs, srect, drect);
             }
 
@@ -702,7 +710,8 @@ show_audio_track :: proc(using co: ^Common) {
             PLAYHEAD_FCOLOR :: sdl3.FColor { 255, 0, 0, 255 };
             @static playhead_pos: [2]sdl3.Vertex;
             i := am.guarded_decoder.decoder.index;
-            pheadx := track_style.cnt_fbody.x + track_style.move_button_size.x + cast(f32)i / cast(f32)(bin_size * u64(channels));
+            scroll_x := cast(f32)mu.get_current_container(uim.ctx).scroll.x;
+            pheadx := track_style.cnt_fbody.x + button_width - scroll_x + cast(f32)i / (cast(f32)bin_size * cast(f32)channels) * track_style.waveform_tex_size.x / cast(f32)waveform_texs.w;
             top    := track_style.cnt_fbody.y;
             bottom := track_style.cnt_fbody.y + track_style.cnt_fbody.h;
 
@@ -711,6 +720,17 @@ show_audio_track :: proc(using co: ^Common) {
 
             playhead_pos[0].color = PLAYHEAD_FCOLOR;
             playhead_pos[1].color = PLAYHEAD_FCOLOR;
+
+            mu.draw_rect(
+                uim.ctx,
+                mu.Rect {
+                    cast(i32)playhead_pos[0].position.x,
+                    cast(i32)playhead_pos[0].position.y,
+                    cnt.body.w,
+                    cnt.body.h,
+                },
+                mu.Color { 50, 50, 50, 150 }
+            );
 
             draw_geometry(&uim, playhead_pos[:], runtime.nil_allocator(), .Line);
             {
@@ -727,17 +747,6 @@ show_audio_track :: proc(using co: ^Common) {
 
                 draw_geometry(&uim, vertices[:], runtime.nil_allocator());
             }
-
-            mu.draw_rect(
-                uim.ctx,
-                mu.Rect {
-                    cast(i32)playhead_pos[0].position.x,
-                    cast(i32)playhead_pos[0].position.y,
-                    cnt.body.w - cast(i32)playhead_pos[0].position.x,
-                    cnt.body.h,
-                },
-                mu.Color { 50, 50, 50, 150 }
-            );
         }
     }
 }
@@ -772,9 +781,8 @@ generate_waveform_texs_from_opencl_out_buffer :: proc(using co: ^Common) {
         }
 
         fmt.eprintln("[WGT]: Generating waveform texture from opencl out buffer");
-        cl.WaitForEvents(1, &am.opencl.audio_buffer_out.host_access_event);
 
-        generate_waveform_texs(co, waveforms_data);
+        generate_waveform_texs(co, waveforms_data, true);
 
         clret = cl.EnqueueUnmapMemObject(
             am.opencl.queue,
@@ -792,7 +800,7 @@ generate_waveform_texs_from_opencl_out_buffer :: proc(using co: ^Common) {
     }
 }
 
-generate_waveform_texs :: proc(using co: ^Common, waveforms_data: [^]c.short) {
+generate_waveform_texs :: proc(using co: ^Common, waveforms_data: [^]c.short, wait := false) {
     sdl3.SetRenderTarget(uim.renderer, waveform_texs);
     cc := uim.ctx.style.colors[.WINDOW_BG];
     sdl3.SetRenderDrawColor(uim.renderer, cc.r, cc.g, cc.b, cc.a);
@@ -801,35 +809,62 @@ generate_waveform_texs :: proc(using co: ^Common, waveforms_data: [^]c.short) {
     sdl3.SetRenderClipRect(uim.renderer, nil);
     {
         decoder := am.guarded_decoder.decoder;
-        points, merr := mem.make([]sdl3.FPoint, 2 * cast(int)waveform_texs.w);
+        points, merr := mem.make([]sdl3.FPoint, 2 * cast(int)track_style.cnt_body.w);
         if merr != .None {
             log.errorf("Failed to allocate waveform fpoint line buffer! Reason: %v", merr);
             return;
         }
         defer mem.delete(points);
 
-        channels := am.device.playback.channels;
-
+        channels := cast(u64)am.device.playback.channels;
         channel_box_yoffset := track_style.waveform_tex_size.y;
         center_y := channel_box_yoffset / 2;
-        x_step := 1 / track_style.cnt_fbody.w;
-        samples_count := decoder.frames_count / cast(u64)channels;
-        bin_size = samples_count / cast(u64)track_style.cnt_body.w;
+        bin_size = decoder.frames_count / channels / cast(u64)track_style.cnt_body.w;
         // generate waveform textures for each channel
         y0_axis_base := track_style.waveform_tex_size.y/2;
+
+        if wait {
+            cl.WaitForEvents(1, &am.opencl.audio_buffer_out.host_access_event);
+        }
+
+        for !sync.atomic_load(&am.guarded_decoder.decoder.max_amplitude_valid) {
+            sync.cond_wait(
+                &am.guarded_decoder.decoder.max_amplitude_signal,
+                &am.guarded_decoder.decoder.max_amplitude_mutex
+            );
+        }
+
         for i in 0..<channels {
             wc := WAVEFORM_COLORS[i];
             sdl3.SetRenderDrawColor(uim.renderer, wc.r, wc.g, wc.b, wc.a);
 
-            for x in 0..<cast(u64)waveform_texs.w {
-                min_val := waveforms_data[x * bin_size];
-                max_val := min_val;
-                for i in 1..<bin_size {
-                    frame := waveforms_data[x * bin_size + i];
-                    if frame < min_val do min_val = frame;
-                    if frame > max_val do max_val = frame;
+            for x in 0..<cast(u64)track_style.cnt_body.w {
+                frame_start := x * bin_size;
+                min_val := i16(0x7FFF);
+                max_val := i16(-0x7FFF);
+
+                for j: u64 = 0; j < bin_size; j += 1 {
+                    frame_index := frame_start + j;
+                    sample := waveforms_data[frame_index * channels + i];
+
+                    if sample < min_val do min_val = sample;
+                    if sample > max_val do max_val = sample;
                 }
 
+                when ODIN_DEBUG {
+                    // because of sync problems
+                    // leave this here in debug
+                    fmt.assertf(
+                        cast(f32)min_val / cast(f32)decoder.max_amplitude <= 1,
+                        "Min: %d; Max_Am: %d; ratio: %f",
+                        min_val, decoder.max_amplitude, cast(f32)min_val / cast(f32)decoder.max_amplitude
+                    );
+                    fmt.assertf(
+                        cast(f32)max_val / cast(f32)decoder.max_amplitude <= 1,
+                        "Max: %d; Max_Am: %d; ratio: %f",
+                        max_val, decoder.max_amplitude, cast(f32)max_val / cast(f32)decoder.max_amplitude
+                    );
+                }
                 y_min := center_y + (cast(f32)min_val / cast(f32)decoder.max_amplitude) * y0_axis_base;
                 y_max := center_y + (cast(f32)max_val / cast(f32)decoder.max_amplitude) * y0_axis_base;
 

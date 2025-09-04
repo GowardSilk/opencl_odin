@@ -3,6 +3,7 @@ package audio;
 import "base:runtime"
 
 import "core:c"
+import "core:mem"
 import "core:fmt"
 import "core:log"
 import "core:strings"
@@ -67,11 +68,25 @@ delete_cl_context :: proc(c: ^OpenCL_Context) {
     delete_program(c^.program);
     delete_command_queue(c^.queue);
 
-    if c^.audio_buffer_in.mem   != nil do delete_buffer(&c^.audio_buffer_in);
-    if c^.audio_buffer_out.mem  != nil do delete_buffer(&c^.audio_buffer_out);
+    if c^.audio_buffer_in.mem   != nil {
+        delete_buffer(&c^.audio_buffer_in);
+        mem.zero_item(&c^.audio_buffer_in);
+    }
+    if c^.audio_buffer_out.mem  != nil {
+        delete_buffer(&c^.audio_buffer_out);
+        mem.zero_item(&c^.audio_buffer_out);
+    }
     if c^.audio_buffer_out_host != nil {
-        delete(c^.audio_buffer_out_host);
+        when ODIN_DEBUG {
+            // NOTE(GowardSilk): The problem with this allocation is that
+            // it is allocated inside the data_proc of miniaudio where
+            // apparently Odin's context is not copied properly with the
+            // Tracking_Allocator from main; therefore we have to use
+            // the correct (default) allocator
+            delete(c^.audio_buffer_out_host, runtime.heap_allocator());
+        }
         c^.eat_pos = 0;
+        c^.audio_buffer_out_host = nil;
     }
 
     for _, kernel in c^.kernels do delete_kernel(kernel);

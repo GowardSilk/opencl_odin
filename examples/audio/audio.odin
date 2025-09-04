@@ -16,6 +16,7 @@ Wave_Buffer :: struct {
     frames_count:   u64,
     index:          u64,
     max_amplitude:  c.short, /**< index of the frame with the peak amplitude (note: when eq to ~0, amplitutde has not been calculate yet) */
+    max_amplitude_valid:  bool, /**< indicates whether the max amplitude has to be recalculated again */
 }
 
 Audio_Decorder :: struct {
@@ -54,6 +55,7 @@ init_decoder :: proc(am: ^Audio_Manager) -> ma.result {
 
     am^.guarded_decoder                 = new(Audio_Decoder_Guard);
     am^.guarded_decoder.decoder.config  = ma.decoder_config_init(.s16, am.device.playback.channels, am.device.sampleRate);
+    am^.guarded_decoder.decoder.max_amplitude_valid = true;
     return .SUCCESS;
 }
 
@@ -141,8 +143,7 @@ device_data_proc_request_outbuffer :: proc(device: ^ma.device, expected_buffer_s
         opencl^.audio_buffer_out.size = expected_buffer_size;
     }
 
-    @static
-    last_ops := AOK_Operations{};
+    @static last_ops := AOK_Operations{};
 
     if opencl^.audio_buffer_in.mem == nil {
         init_opencl_audio_buffers(am, expected_buffer_size);
@@ -264,14 +265,17 @@ device_data_proc_copy_to_host :: proc(using am: ^Audio_Manager, host_len, offset
     fmt.eprintfln("Host len: %d; Offset: %d; Bufsize: %d", host_len, offset, opencl^.audio_buffer_out.size);
     fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue map buffer for read! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-    sync.lock(&guarded_decoder.guard);
-    channels := guarded_decoder.decoder.config.channels;
-    sync.unlock(&guarded_decoder.guard);
-    eat_sample_pos := opencl^.eat_pos * u64(channels);
-    mem.copy(&opencl^.audio_buffer_out_host[eat_sample_pos], buf_map, cast(int)host_len);
+    device_data_proc_mapped_copy_to_host(am, buf_map, host_len);
 
     ret = cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_out.mem, buf_map, 0, nil, nil);
     fmt.assertf(ret == cl.SUCCESS, "Failed to unmap buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+}
+
+@(private="file")
+device_data_proc_mapped_copy_to_host :: proc(using am: ^Audio_Manager, buf_map: rawptr, host_len: c.size_t) {
+    channels := guarded_decoder.decoder.config.channels;
+    eat_sample_pos := opencl^.eat_pos * u64(channels);
+    mem.copy(&opencl^.audio_buffer_out_host[eat_sample_pos], buf_map, cast(int)host_len);
 }
 
 @(private="file")
@@ -283,13 +287,12 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
     sample_size := cast(u64)ma.get_bytes_per_sample(device.playback.playback_format);
     channels := cast(u64)device.playback.channels;
 
-    // TODO(GowardSilk): make sure we have some kind of Error pipeline established for the main thread!
-
     input_buffer  := opencl^.audio_buffer_in;
     output_buffer := opencl^.audio_buffer_out;
     assert(opencl^.audio_buffer_in.size == opencl^.audio_buffer_out.size);
     buffer_size   := cast(c.size_t)opencl^.audio_buffer_in.size - process_offset;
     first_kernel  := true;
+    recalc_amplt  := &am.guarded_decoder.decoder.max_amplitude_valid;
 
     deferred_compile_kernel :: #force_inline proc(opencl: ^OpenCL_Context, name: cstring) -> cl.Kernel {
         /* deferred kernel initialization */
@@ -347,102 +350,150 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
         fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue kernel! Reason: %d | %s; %s", ret, err_to_name(ret));
     }
 
+    reset_ampltitude_recalc :: #force_inline proc(v: ^bool, resets: bool) {
+        if resets do v^ = true;
+    }
+
     if am^.operations.distortion.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.distortion.base.kernel_name);
+        using am^.operations.distortion;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else { unreachable(/* copy output_buffer -> input_buffer */); }
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amplt, base.amplitude_recalc);
     }
 
     if am^.operations.clip.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.clip.base.kernel_name);
+        using am^.operations.clip;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
-        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.clip.threshold);
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &threshold);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
     }
 
     if am^.operations.gain.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.gain.base.kernel_name);
+        using am^.operations.gain;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
-        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.gain.gain);
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &gain);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
     }
 
     if am^.operations.pan.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.pan.base.kernel_name);
+        using am^.operations.pan;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
-        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.pan.pan.actual);
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &pan.actual);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         mono_buffer_size := buffer_size >> 1;
         enqueue_basic(opencl, kernel, &mono_buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
     }
 
     if am^.operations.lowpass_iir.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.lowpass_iir.base.kernel_name);
+        using am^.operations.lowpass_iir;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
-        cutoff := am^.operations.lowpass_iir.cutoff;
         x := math.exp(-2.0 * math.PI * cutoff / cast(cl.Float)device.sampleRate);
         ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &x);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
     }
 
     if am^.operations.envelope_follow.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.envelope_follow.base.kernel_name);
+        using am^.operations.envelope_follow;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
         set_input_output_args(kernel, &input_buffer.mem, &output_buffer.mem);
 
-        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am^.operations.envelope_follow.attack);
+        ret := cl.SetKernelArg(kernel, 2, size_of(cl.Float), &attack);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
-        ret  = cl.SetKernelArg(kernel, 3, size_of(cl.Float), &am^.operations.envelope_follow.release);
+        ret  = cl.SetKernelArg(kernel, 3, size_of(cl.Float), &release);
         fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel arg! Reason: %d | %s; %s", ret, err_to_name(ret));
 
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
+
+        unimplemented("Envelope follow AOK requires max_amplitude to be up-to-date!");
+
     }
 
     if am^.operations.normalize.base.enabled {
-        kernel := deferred_compile_kernel(opencl, am^.operations.normalize.base.kernel_name);
+        using am^.operations.normalize;
+
+        kernel := deferred_compile_kernel(opencl, base.kernel_name);
 
         if first_kernel == true do first_kernel = false;
         else do copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
 
-        cl.SetKernelArg(kernel, 2, size_of(cl.Float), &am.operations.normalize.target_level);
+        cl.SetKernelArg(kernel, 2, size_of(cl.Float), &target_level);
         cl.SetKernelArg(kernel, 3, size_of(c.short), &am.guarded_decoder.decoder.max_amplitude);
 
         enqueue_basic(opencl, kernel, &buffer_size);
+
+        reset_ampltitude_recalc(recalc_amlt, base.amplitude_recalc);
+
+        unimplemented("Normalize AOK requires max_amplitude to be up-to-date!");
+    }
+
+    if am^.operations.compress.base.enabled {
+        unimplemented("Compress AOK requires max_amplitude to be up-to-date!");
+    }
+
+    if am^.operations.apply_adsr.base.enabled {
+        unimplemented("Apply ADSR AOK requires max_amplitude to be up-to-date!");
+    }
+
+    if am^.operations.rms .base.enabled {
+        unimplemented("RMS AOK requires max_amplitude to be up-to-date!");
     }
 
     eat_byte_pos := opencl^.eat_pos * sample_size * channels;
@@ -464,7 +515,132 @@ device_data_proc_process_buffer :: proc(device: ^ma.device, process_offset: c.si
         sync.mutex_unlock(&am.guarded_decoder.guard);
     } else {
         // copy from audio_buffer_out to audio_buffer_out_host
-        device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
+        // device_data_proc_copy_to_host(am, min(host_len, buffer_size), process_offset);
+        host_len = min(host_len, buffer_size);
+
+        orig_ptr, buf_map: [^]c.short;
+        ret: cl.Int;
+        if recalc_amplt {
+            // TODO(GowardSilk): EVEN THOUGH THIS COULD TECHNICALLY WORK
+            // IT CREATES A LOT OF POTENTIAL ISSUES IF MAPPING WOULD TAKE A LONG TIME TO PROCESS
+            orig_ptr = cast([^]c.short)cl.EnqueueMapBuffer(
+                opencl^.queue,
+                opencl^.audio_buffer_out.mem,
+                cl.TRUE,
+                cl.MAP_READ,
+                0,
+                opencl^.audio_buffer_out.size,
+                0,
+                nil,
+                nil,
+                &ret
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue map buffer for read! Reason: %d | %s; %s", ret, err_to_name(ret));
+
+            max_value: c.short = -0x8000;
+            for i in 0..<am.guarded_decoder.decoder.frames_count {
+                if max_value < orig_ptr[i] {
+                    max_value = orig_ptr[i];
+                }
+            }
+            fmt.eprintfln("[PEAK]: new peak changed from value: %d; to: %d",
+                am.guarded_decoder.decoder.max_amplitude, max_value);
+            am.guarded_decoder.decoder.max_amplitude = max_value;
+
+            // move buf_map base ptr by process_offset so we can read
+            // the latest chunk needed
+            buf_map = &orig_ptr[process_offset];
+
+        } else {
+            orig_ptr = cast([^]c.short)cl.EnqueueMapBuffer(
+                opencl^.queue,
+                opencl^.audio_buffer_out.mem,
+                cl.TRUE,
+                cl.MAP_READ,
+                process_offset,
+                host_len,
+                0,
+                nil,
+                nil,
+                &ret
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue map buffer for read! Reason: %d | %s; %s", ret, err_to_name(ret));
+            buf_map = orig_ptr;
+        }
+
+        device_data_proc_mapped_copy_to_host(am, buf_map, host_len);
+
+        ret = cl.EnqueueUnmapMemObject(opencl^.queue, opencl^.audio_buffer_out.mem, orig_ptr, 0, nil, nil);
+        fmt.assertf(ret == cl.SUCCESS, "Failed to unmap buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+        /*
+        if recalc_amplt {
+            // NOTE(GowardSilk): The fact that we do not copy the whole buffer to the CPU
+            // upon exchange is proving to be rather very unuseful. Since we cannot capture
+            // the peak across the whole CPU buffer, we need to launch a kernel to do it instead.
+            kernel := deferred_compile_kernel(opencl, AOK_FIND_PEAK_HELPER_NAME);
+
+            nof_units: c.size_t;
+            ret := cl.GetKernelWorkGroupInfo(kernel, opencl.device, cl.KERNEL_WORK_GROUP_SIZE, size_of(nof_units), &nof_units, nil);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to load kernel work group info: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            nof_samples := am.guarded_decoder.decoder.frames_count;
+            nof_work_groups := nof_samples / nof_units / nof_units;
+            global_size := nof_work_groups * nof_units;
+            assert(nof_work_groups > 0); // nof_samples >= nof_units ^ 2
+            remained := nof_samples - global_size * nof_units;
+
+            copy_out_to_in(opencl, input_buffer, output_buffer, buffer_size, process_offset);
+
+            max_values_mem := cl.CreateBuffer(opencl._context, cl.MEM_WRITE_ONLY | cl.MEM_ALLOC_HOST_PTR, nof_work_groups * size_of(c.short), nil, &ret);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to create max_values buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+            defer cl.ReleaseMemObject(max_values_mem);
+
+            ret |= cl.SetKernelArg(kernel, 0, size_of(cl.Mem), opencl.audio_buffer_in);
+            ret |= cl.SetKernelArg(kernel, 1, size_of(c.size_t), &nof_units);
+            ret |= cl.SetKernelArg(kernel, 2, size_of(c.short) * nof_units, nil);
+            ret |= cl.SetKernelArg(kernel, 3, size_of(cl.Mem), max_values_mem);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to set kernel args: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            ret = cl.EnqueueNDRangeKernel(
+                opencl.queue, kernel, 1,
+                nil, &global_size, &nof_units,
+                0, nil, nil
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to enqueue ndrange: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            buf_map := cl.EnqueueMapBuffer(
+                opencl^.queue,
+                max_values_mem,
+                cl.TRUE,
+                cl.MAP_READ,
+                0,
+                nof_work_groups * size_of(c.short),
+                0,
+                nil,
+                nil,
+                &ret
+            );
+            fmt.assertf(ret == cl.SUCCESS, "Failed to map buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            max_value := ~c.short(0);
+            for i in 0..<nof_work_groups {
+                curr_value := buf_map[i];
+                if max_value < curr_value {
+                    max_value = curr_value;
+                }
+            }
+
+            ret = cl.EnqueueUnmapMemObject(opencl^.queue, max_values_mem, buf_map, 0, nil, nil);
+            fmt.assertf(ret == cl.SUCCESS, "Failed to unmap buffer: %v; (aka %s | %s)", ret, err_to_name(ret));
+
+            if remained > 0 {
+                fmt.eprintf("Max amplitude calculation; Remaining: %d samples.", remained);
+            }
+
+            am.guarded_decoder.decoder.max_amplitude = max_value;
+        }
+        */
     }
 }
 
@@ -585,8 +761,55 @@ decibel :: distinct cl.Float;
 
 AOK_Operation_Base :: struct #no_copy {
     enabled: bool,
-    kernel_name: cstring,
+    amplitude_recalc: bool, /**< readonly; specifies whether given operation changes the amplitude */
+    kernel_name: cstring, /**< key for OpenCL_Context.kernels; specifies which Kernel object to use for this operation */
 }
+
+//AOK_Find_Peak_Helper :: struct #no_copy {
+//    #subtype base: AOK_Operation_Base,
+//}
+//
+//init_find_peak_helper :: proc(peak_helper: ^AOK_Find_Peak_Helper) {
+//    peak_helper.base.kernel_name = AOK_FIND_PEAK_HELPER;
+//}
+//
+//AOK_FIND_PEAK_HELPER: cstring: `
+//    short find_max(short* buffer, size_t len) {
+//        short max_value = SHRT_MIN;
+//        for (size_t i = 0; i < len; i++) {
+//            short curr_value = buffer[i];
+//            if (max_value < curr_value) {
+//                max_value = curr_value;
+//            }
+//        }
+//        return max_value;
+//    }
+//
+//    __kernel void find_peak_helper(
+//        __global short* input,
+//        __const size_t  nof_locals,
+//        __local short*  local_max_values,
+//        __global short* max_values)
+//    {
+//        int gid = get_global_id(0);
+//        int lid = get_local_id(0);
+//
+//        short max_value = find_max(&input[gid * nof_locals], nof_locals);
+//        local_max_values[lid] = max_value;
+//
+//        barrier(CLK_LOCAL_MEM_FENCE);
+//
+//        // only one worker item per group will filter
+//        // the results and plug in the final max_value
+//        // for nof_locals * nof_locals values from 'input'
+//        if (lid == 0) {
+//            max_value = find_max(local_max_values, nof_locals);
+//            max_values[gid/nof_locals] = max_value;
+//        }
+//    }
+//`;
+//AOK_FIND_PEAK_HELPER_SIZE: uint: len(AOK_FIND_PEAK_HELPER);
+//AOK_FIND_PEAK_HELPER_NAME: cstring: "find_peak_helper";
 
 AOK_Distortion_Settings :: struct #no_copy {
     #subtype base:  AOK_Operation_Base,
@@ -594,6 +817,7 @@ AOK_Distortion_Settings :: struct #no_copy {
 
 init_distortion_settings :: proc(settings: ^AOK_Distortion_Settings) {
     settings.base.kernel_name = AOK_DISTORTION_NAME;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_DISTORTION: cstring: `
@@ -617,6 +841,7 @@ AOK_Clip_Settings :: struct #no_copy {
 init_clip_settings :: proc(settings: ^AOK_Clip_Settings) {
     settings.base.kernel_name = AOK_CLIP_NAME;
     settings.threshold = -6.0;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_CLIP: cstring: `
@@ -644,6 +869,7 @@ AOK_Gain_Settings :: struct #no_copy {
 init_gain_settings :: proc(settings: ^AOK_Gain_Settings) {
     settings.base.kernel_name = AOK_GAIN_NAME;
     settings.gain = 3.2;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_GAIN: cstring: `
@@ -708,6 +934,7 @@ AOK_Lowpass_IIR_Settings :: struct #no_copy {
 init_lowpass_iir_settings :: proc(settings: ^AOK_Lowpass_IIR_Settings) {
     settings.base.kernel_name = AOK_LOWPASS_IIR_NAME;
     settings.cutoff = 1000.0;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_LOWPASS_IIR: cstring: `
@@ -734,6 +961,7 @@ init_lowpass_biquad_iir_settings :: proc(settings: ^AOK_Lowpass_Biquad_IIR_Setti
     settings.base.kernel_name = AOK_LOWPASS_BIQUAD_IIR_NAME;
     settings.cutoff = 1000.0;
     settings.resonance = 0.7;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_LOWPASS_BIQUAD_IIR: cstring: `
@@ -762,6 +990,7 @@ init_compress_settings :: proc(settings: ^AOK_Compress_Settings) {
 	settings.ratio = 2.0;
 	settings.attack = 0.01;
 	settings.release = 0.1;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_COMPRESS: cstring: `
@@ -790,6 +1019,7 @@ init_delay_settings :: proc(settings: ^AOK_Delay_Settings) {
 	settings.time = 0.3;
 	settings.feedback = 0.4;
 	settings.mix = 0.5;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_DELAY: cstring: `
@@ -821,6 +1051,7 @@ init_flanger_settings :: proc(settings: ^AOK_Flanger_Settings) {
 	settings.depth = 0.002;
 	settings.feedback = 0.2;
 	settings.mix = 0.5;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_FLANGER: cstring: `
@@ -850,6 +1081,7 @@ init_chorus_settings :: proc(settings: ^AOK_Chorus_Settings) {
 	settings.rate = 0.25;
 	settings.depth = 0.005;
 	settings.mix = 0.4;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_CHORUS: cstring: `
@@ -877,6 +1109,7 @@ init_comb_filter_settings :: proc(settings: ^AOK_Comb_Filter_Settings) {
     settings.base.kernel_name = AOK_COMB_FILTER_NAME;
 	settings.delay_time = 0.05;
 	settings.feedback = 0.6;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_COMB_FILTER: cstring: `
@@ -907,6 +1140,7 @@ init_reverb_settings :: proc(settings: ^AOK_Reverb_Settings) {
 	settings.damping = 0.5;
 	settings.width = 1.0;
 	settings.wet = 0.3;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_REVERB: cstring: `
@@ -987,6 +1221,7 @@ AOK_Normalize_Settings :: struct #no_copy {
 
 init_normalize_settings :: proc(settings: ^AOK_Normalize_Settings) {
     settings.base.kernel_name = AOK_NORMALIZE_NAME;
+    settings.base.amplitude_recalc = true;
 	settings.target_level = 0.9;
 }
 
@@ -1035,6 +1270,7 @@ AOK_Convolve_Settings :: struct #no_copy {
 
 init_convolve_settings :: proc(settings: ^AOK_Convolve_Settings) {
     settings.base.kernel_name = AOK_CONVOLVE_NAME;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_CONVOLVE: cstring: `
@@ -1091,6 +1327,7 @@ init_apply_adsr_settings :: proc(settings: ^AOK_Apply_ADSR_Settings) {
 	settings.decay = 0.1;
 	settings.sustain = 0.7;
 	settings.release = 0.3;
+    settings.base.amplitude_recalc = true;
 }
 
 AOK_APPLY_ADSR: cstring: `
