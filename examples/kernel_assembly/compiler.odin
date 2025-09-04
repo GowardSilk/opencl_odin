@@ -137,7 +137,7 @@ is_kernel_proc :: #force_inline proc(proc_desc: ^Proc_Desc) -> Is_Proc_Ret {
 	}
 
 	// generate default data for procedure params
-	proc_desc.params = make(map[string]Proc_Desc_Param);
+	proc_desc.params = mem.make(map[string]Proc_Desc_Param);
 	for param in proc_desc.lit.type.params.list {
 		for param_name_expr in param.names {
 			param_name := param_name_expr.derived_expr.(^ast.Ident).name;
@@ -255,7 +255,7 @@ SHOW_TIMINGS :: #config(SHOW_TIMINGS, ODIN_DEBUG);
 compile :: proc(
 		ocl: ^OpenCL_Context,
 		ekind: emulator.Emulator_Kind,
-		query_addr_proc: #type proc(^Proc_Desc) = nil,
+		query_addr_proc: #type proc(^Proc_Desc),
 		builtin_path := "kernel_assembly/emulator",
 		package_path := "kernel_assembly/my_kernels"
 	) -> mem.Allocator_Error {
@@ -530,10 +530,6 @@ to_opencl_lang :: proc(using _in: ^To_Opencl_Lang_In) -> bool {
 				);
 			}
 		case ^ast.Type_Cast:
-			fmt.eprintfln("%v", v.pos);
-			fmt.eprintfln("v.tok.text = %s", v.tok.text);
-			fmt.eprintfln("v.type = %v", v.type.derived_expr);
-			fmt.eprintfln("v.expr = %v", v.expr.derived_expr);
 			ident, ok := v.type.derived_expr.(^ast.Ident);
 			if ok {
 				fmt.sbprintfln(builder, "(%s)", ident.name);

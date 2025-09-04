@@ -39,7 +39,7 @@ local_mem_kernel :: proc(data: [^]cl.Float, scratch: [^]cl.Float) {
     scratch[lid] = data[gid];
     emulator.barrier(emulator.CLK_LOCAL_MEM_FENCE);
 
-    next := (lid + 1) % emulator.get_local_size(0);
+    next: cl.Int = (lid + 1) % emulator.get_local_size(0);
     data[gid] = scratch[next];
 }
 
@@ -97,7 +97,7 @@ scale_kernel_nullcl_wrapper :: proc(params: []rawptr) {
 
 local_mem_kernel_nullcl_wrapper :: proc(params: []rawptr) {
       when ODIN_DEBUG do assert(len(params) == 2);
-      
+
       p0 := cast(^^emulator.Mem_Null_Impl)params[0];
       p1_arg_local_bytes := cast([^]byte)params[1];
       p1 := get_local_arg(p1_arg_local_bytes);
@@ -127,6 +127,6 @@ get_local_arg :: #force_inline proc(local_bytes: [^]byte) -> rawptr {
       // get the emulator.Kernel_Null_Arg_Local.size (aka size of one __local param)
       chunk_size := cast(^c.size_t)&local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, size)];
       // calculate offset of that chunk
-      chunk_begin := payload.wg_idx / payload.nof_iters * chunk_size^;
+      chunk_begin := payload.wg_idx * chunk_size^;
       return &local_bytes[offset_of(emulator.Kernel_Null_Arg_Local, buffer) + cast(uintptr)chunk_begin];
 }

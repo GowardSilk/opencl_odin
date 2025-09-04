@@ -151,14 +151,13 @@ _init_cl_context :: proc(ocl: ^OpenCL_Context, ekind: emulator.Emulator_Kind, co
 			case .Null:
 				nof_params := len(desc.lit.type.params.list);
 				params, merr := mem.make([]Proc_Desc_Param, nof_params);
-				{
-					assert(merr == .None);
-					index := 0;
-					for param in desc.lit.type.params.list {
-						for name in param.names {
-							params[index] = desc.params[name.derived_expr.(^ast.Ident).name];
-							index += 1;
-						}
+				assert(merr == .None);
+				defer mem.delete(params);
+				index := 0;
+				for param in desc.lit.type.params.list {
+					for name in param.names {
+						params[index] = desc.params[name.derived_expr.(^ast.Ident).name];
+						index += 1;
 					}
 				}
 

@@ -34,8 +34,8 @@ Kernel_Builtin_Context_Payload :: struct {
 	// these values are set inside _worker_proc dynamically for each Work_Item
 	global_pos: [MAX_DIMS]c.size_t, /**< used for get_global_id(#) */
 	local_pos:  [MAX_DIMS]c.size_t, /**< used for get_local_id(#) */
-	wg_idx:     c.size_t,			/**< work group idx */
-	barrier:    ^sync.Barrier, 		/**< LOCAL_MEM_FENCE */
+	wg_idx:     c.size_t,		/**< work group idx */
+	barrier:    ^sync.Barrier, 	/**< LOCAL_MEM_FENCE */
 }
 NDRange :: struct {
 	items:  []Work_Item, /**< pool of all threads */
@@ -139,11 +139,6 @@ _worker_proc :: #force_inline proc(id: int, task_in: ^Task_In) {
 	// upload immutable payload copy
 	// to the thread's context
 	context.user_ptr = &payload_context_local;
-
-	sync.lock(payload.mutex);
-	// fmt.eprintfln("id[%v]: %v", id, payload.global_pos.x - 1);
-	sync.unlock(payload.mutex);
-
 	task_in.addr(task_in.args);
 }
 
@@ -198,12 +193,16 @@ ndrange_destroy :: proc(ndrange: ^NDRange) {
 
 ndrange_exec_task :: proc(ndrange: ^NDRange, task_in: ^Task_In) {
 	assert(task_in.payload.nof_locals <= cast(uint)ndrange_len(ndrange));
-	// this wait should be only temporary: unless we optimize
-	// to do syncing out of the EnqueueNDRange function
-
 	task_in.groups = ndrange.groups[:task_in.payload.nof_locals];
 
+	// this wait should be only temporary: unless we optimize
+	// syncing out of the EnqueueNDRange function
 	sync.barrier_init(ndrange.barrier, cast(int)task_in.payload.nof_locals + 1);
+
+	for &g in task_in.groups {
+		// preemptively initialize barriers
+		sync.barrier_init(&g.barrier, cast(int)task_in.payload.nof_locals);
+	}
 
 	for i in 0..<task_in.payload.nof_locals {
 		wi := &ndrange.items[i];

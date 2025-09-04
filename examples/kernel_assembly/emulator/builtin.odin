@@ -1,5 +1,8 @@
 package emulator;
 
+import "core:fmt"
+import "core:sync"
+
 import cl "shared:opencl"
 
 @(kernel_builtin)
@@ -70,8 +73,12 @@ CLK_LOCAL_MEM_FENCE  :: 0x01;
 CLK_GLOBAL_MEM_FENCE :: 0x02;
 
 @(kernel_builtin)
-barrier :: #force_inline proc(flags: cl.Int) {
+barrier :: #force_inline proc(#any_int flags: cl.Int) {
 	if flags == CLK_LOCAL_MEM_FENCE {
+		payload := cast(^Kernel_Builtin_Context_Payload)context.user_ptr;
+		// NOTE(GowardSilk): This barrier is reusable, therefore we do not have to re-initialize
+		// it upon returning 'true' (aka when the thread_count == index, see impl)
+		sync.barrier_wait(payload.barrier);
 		return;
 	}
 
@@ -79,6 +86,6 @@ barrier :: #force_inline proc(flags: cl.Int) {
 }
 
 @(kernel_builtin)
-mem_fence :: #force_inline proc(flags: cl.Int) {
+mem_fence :: #force_inline proc(#any_int flags: cl.Int) {
   unimplemented();
 }
