@@ -244,7 +244,7 @@ main :: proc() {
 	}
 
 	ocl: OpenCL_Context;
-	merr := compile(&ocl, .Null, query_proc);
+	merr := compile(&ocl, .Full, .OpenCL_Lang, query_proc);
 	assert(merr == .None);
 
 	{

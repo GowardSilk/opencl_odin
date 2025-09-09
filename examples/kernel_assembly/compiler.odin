@@ -51,6 +51,20 @@ OpenCL_Qualifier_Local	 :: emulator.OpenCL_Qualifier_Local;
 
 Proc_Desc_Param :: emulator.Proc_Desc_Param;
 
+opencl_qualifier_to_storage_class :: #force_inline proc(qual: OpenCL_Qualifier) -> Spirv_Storage_Class {
+	switch qual {
+		case OpenCL_Qualifier_Invalid: unreachable();
+		case OpenCL_Qualifier_Const:
+			return .Uniform_Constant;
+		case OpenCL_Qualifier_Global:
+			// .Storage_Buffer would require spir-v extension ???
+			return .Uniform;
+		case OpenCL_Qualifier_Local:
+			return .Workgroup;
+	}
+	unreachable();
+}
+
 Proc_Kind :: enum {
 	Default = 0, /**< "odin" proc */
 	Kernel,  /**< __kernel function */
@@ -256,6 +270,7 @@ SHOW_TIMINGS :: #config(SHOW_TIMINGS, ODIN_DEBUG);
 compile :: proc(
 		ocl: ^OpenCL_Context,
 		ekind: emulator.Emulator_Kind,
+		$mode: Translation_Type,
 		query_addr_proc: #type proc(^Proc_Desc),
 		builtin_path := "kernel_assembly/emulator",
 		package_path := "kernel_assembly/my_kernels"
@@ -278,11 +293,11 @@ compile :: proc(
 				diff: time.Duration;
 				{
 					time.SCOPED_TICK_DURATION(&diff)
-					kernels_res = assemble_kernels(&compiler) or_return;
+					kernels_res = assemble_kernels(&compiler, mode) or_return;
 				}
 				fmt.eprintfln("Kernel assembly in total took: %v", diff);
 			} else {
-				kernels_res = assemble_kernels(&compiler) or_return;
+				kernels_res = assemble_kernels(&compiler, mode) or_return;
 			}
 			init_cl_context(ocl, ekind, &compiler, kernels_res, backup_allocator);
 			delete_assemble_kernels_res(kernels_res);
@@ -304,22 +319,27 @@ compile :: proc(
 	return .None;
 }
 
-assemble_kernels :: proc(compiler: ^Compiler) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
+assemble_kernels :: proc(compiler: ^Compiler, $mode: Translation_Type) -> (out: Assemble_Kernels_Result, err: mem.Allocator_Error) {
 	assemble_kernels_partial(compiler, &out);
 
-	out.kernel_sizes = mem.make([^]c.size_t, out.nof_kernels) or_return;
-	out.kernel_strings = mem.make([^]cstring, out.nof_kernels) or_return;
+	when mode == .SPIR_V {
+		out.kernel_sizes = mem.make([^]c.size_t, 1) or_return;
+		out.kernel_strings = mem.make([^]cstring, 1) or_return;
+	} else {
+		out.kernel_sizes = mem.make([^]c.size_t, out.nof_kernels) or_return;
+		out.kernel_strings = mem.make([^]cstring, out.nof_kernels) or_return;
+	}
 
 	// timed assembly
 	when SHOW_TIMINGS {
 		diff: time.Duration;
 		{
 			time.SCOPED_TICK_DURATION(&diff);
-			assemble_kernels_translate_helper(compiler, &out) or_return;
+			assemble_kernels_translate_helper(compiler, mode, &out) or_return;
 		}
 		fmt.eprintfln("\"Assembly\" translation took: %v", diff);
 	} else {
-		assemble_kernels_translate_helper(compiler, &out) or_return;
+		assemble_kernels_translate_helper(compiler, mode, &out) or_return;
 	}
 	return out, .None;
 }
@@ -383,12 +403,47 @@ assemble_kernels_register_helper :: #force_inline proc(compiler: ^Compiler, pckg
 	}
 }
 
+@(private="file")
+assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, $mode: Translation_Type, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
+	switch mode {
+		case .OpenCL_Lang:
+			return assemble_kernels_translate_to_opencl_helper(compiler, out);
+		case .SPIR_V:
+			return assemble_kernels_translate_to_spirv_helper(compiler, out);
+	}
+
+	unreachable();
+}
+
+/**
+ * @brief generates SPIR-V code from procedure nodes (located in the compiler's procedure table)
+ * @note function assumes valid parameters (non-nil) and valid compiler's procedure table; `out' has to be preallocated by the caller
+ */
+@(private="file")
+assemble_kernels_translate_to_spirv_helper :: proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
+	sp_in := init_spirv_in(compiler, {}) or_return;
+
+	decl_loop: for _, &proc_desc in compiler.proc_table do if proc_desc.kind == .Kernel {
+		update_active_node(&sp_in, proc_desc.lit);
+		sp_in.active_proc = &proc_desc;
+		to_spirv(&sp_in);
+	}
+
+	spirv_ops_to_binary(&sp_in);
+
+	when ODIN_DEBUG {
+		fmt.eprintfln("Spirv Debug Out:\n%s", strings.to_string(sp_in._debug.builder));
+	}
+
+	return nil;
+}
+
 /**
  * @brief generates OpenCL code from procedure nodes (located in the compiler's procedure table)
  * @note function assumes valid parameters (non-nil) and valid compiler's procedure table; `out' has to be preallocated by the caller
  */
 @(private="file")
-assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
+assemble_kernels_translate_to_opencl_helper :: proc(compiler: ^Compiler, out: ^Assemble_Kernels_Result) -> mem.Allocator_Error {
 	kernel_string_builder: strings.Builder;
 	assert(strings.builder_init(&kernel_string_builder) != nil);
 
@@ -405,17 +460,14 @@ assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, out
 			strings.write_string(&kernel_string_builder, cast(string)qual);
 			strings.write_byte(&kernel_string_builder, ' ');
 
-			_in: Translate_In = {
-				cl_in = {
-					compiler,
-					&kernel_string_builder,
-					param.node,
-					0,
-					true,
-				},
-				type = .OpenCL_Lang,
+			cl_in := To_Opencl_Lang_In {
+				compiler,
+				&kernel_string_builder,
+				param.node,
+				0,
+				true,
 			};
-			if !translate(&_in) do continue decl_loop;
+			if !to_opencl_lang(&cl_in) do continue decl_loop;
 
 			if index < len(lit.type.params.list) - 1 {
 				strings.write_string(&kernel_string_builder, ", ");
@@ -426,17 +478,14 @@ assemble_kernels_translate_helper :: #force_inline proc(compiler: ^Compiler, out
 
 		// assemble kernel body
 		body_block := lit.body.derived.(^ast.Block_Stmt);
-		_in: Translate_In = {
-			cl_in = {
-				compiler,
-				&kernel_string_builder,
-				body_block.stmt_base,
-				0,
-				true,
-			},
-			type = .OpenCL_Lang,
+		cl_in := To_Opencl_Lang_In {
+			compiler,
+			&kernel_string_builder,
+			body_block.stmt_base,
+			0,
+			true,
 		};
-		if !translate(&_in) do continue decl_loop;
+		if !to_opencl_lang(&cl_in) do continue decl_loop;
 		body = strings.clone(strings.to_string(kernel_string_builder));
 		strings.builder_reset(&kernel_string_builder);
 
@@ -464,12 +513,6 @@ Translation_Type :: enum {
 	SPIR_V,
 }
 
-Translate_In :: struct {
-	using cl_in: To_Opencl_Lang_In,
-	using sp_in: To_Spirv_In,
-	type: Translation_Type, /**< indicates which "lang" to translate to */
-}
-
 To_Opencl_Lang_In :: struct {
 	compiler: ^Compiler,	/**< pointer to a valid compiler instance (this is required only for occasional type searches) */
 	builder: ^strings.Builder, /**< pointer to a valid string concatenator */
@@ -478,73 +521,234 @@ To_Opencl_Lang_In :: struct {
 	full: bool,		/**< indicates that next statement is to be properly terminated (aka "full") */
 }
 
-//Spirv_Instruction :: struct($Nof_Operands: int) {
-//	operands: [$Nof_Operands]Spirv_Operand,
-//	code: u16,
-//}
-//
-///**
-// * @brief list of (some) opcodes of spir-v operands
-// */
-//Spirv_Operand_Type :: enum i16 {
-//	Op_Type_Function = 33,
-//}
-//
-//Spirv_Operand :: struct {
-//	offset:		u16,
-//	nof_words:	u16,
-//	type:		Spirv_Operand_Type,
-//}
-
 when ODIN_DEBUG {
 	To_Spirv_In_Debug :: struct {
-		builder: ^strings.Builder, /**< debug string builder for quasi disassembled SPIR-V code representation */
+		builder: strings.Builder, /**< debug string builder for quasi disassembled SPIR-V code representation */
 	}
 } else {
 	To_Spirv_In_Debug :: struct {}
 }
+
 To_Spirv_In :: struct {
 	compiler: ^Compiler, /**< pointer to a valid compiler instance (this is required only for occasional type searches) */
-	builder: [dynamic]Spirv_Op,
+	builder: [dynamic]Spirv_Word,
+	ops: [dynamic]Spirv_Op,
 	node: ast.Node, /**< active node (being translated) */
-	next_constant_type: Spirv_SSA_Index,
+	type_node: ^ast.Any_Node, /**< node that may indicate the type of active `node' */
+	active_proc: ^Proc_Desc,
+	next_id: Spirv_SSA_Index,
+
+	type_table:  map[string]Spirv_Meta_Op,
+	const_table: map[string]Spirv_Op,
 
 	_debug: To_Spirv_In_Debug,
 }
 
-push_spirv_op :: #force_inline proc(using _in: ^To_Spirv_In, op: Spirv_Op) -> Spirv_SSA_Index {
-	return cast(Spirv_SSA_Index)append(&builder, op);
+/**
+ * @brief used for operations which are "pre-loaded", meaning they do not really have to contain valid Spirv_SSA_Index result id
+ */
+Spirv_Meta_Op :: distinct Spirv_Op;
+
+new_spirv_id :: #force_inline proc(using m: ^To_Spirv_In) -> Spirv_SSA_Index {
+	next_id += 1;
+	return next_id;
+}
+
+push_spirv_op :: #force_inline proc(using m: ^To_Spirv_In, op: _Spirv_Op) -> Spirv_SSA_Index {
+	id := new_spirv_id(m);
+	append(&ops, Spirv_Op {
+		base = Spirv_Op_Base {
+			id = id,
+		},
+		op = op
+	});
+	return id;
+}
+
+spirv_ops_to_binary :: proc(using m: ^To_Spirv_In) {
+	// first plug in all the types and constants
+	for _, type in type_table do if type.base.id != SPIRV_SSA_INDEX_INVALID {
+		#partial switch v in type.op {
+			case Spirv_Op_Type_Void:	spirv_op_type_void_to_binary(m, type.base, v);
+			case Spirv_Op_Type_Float:	spirv_op_type_float_to_binary(m, type.base, v);
+			case Spirv_Op_Type_Int:		spirv_op_type_int_to_binary(m, type.base, v);
+			case Spirv_Op_Type_Pointer:	spirv_op_type_pointer_to_binary(m, type.base, v);
+			case Spirv_Op_Type_Function:	spirv_op_type_function_to_binary(m, type.base, v);
+			case Spirv_Op_Type_Array:	spirv_op_type_array_to_binary(m, type.base, v);
+			case: unreachable();
+		}
+	}
+
+	for o in ops {
+		#partial switch v in o.op {
+			case Spirv_Op_Constant:	spirv_op_constant_to_binary(m, o.base, v);
+			case Spirv_Op_Variable:	spirv_op_variable_to_binary(m, o.base, v);
+			case Spirv_Op_Function:	spirv_op_function_to_binary(m, o.base, v);
+			case:
+				fmt.eprintfln("%v", v);
+				unreachable();
+		}
+	}
+}
+
+spirv_op_variable_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Variable) {
+	/* %result_id = OpVariable %type_id <storage_class> [%initializer_id] */
+	word_count: Spirv_Word = 4;
+	if op.initializer != SPIRV_SSA_INDEX_INVALID {
+		word_count = 5;
+	}
+	_spirv_op_to_binary(_in, word_count, SPIRV_OPCODE_OP_VARIABLE);
+	append(&builder, cast(Spirv_Word)op.type_id, cast(Spirv_Word)base.id, cast(Spirv_Word)op.class);
+	if op.initializer != SPIRV_SSA_INDEX_INVALID {
+		append(&builder, cast(Spirv_Word)op.initializer);
+	}
+	when ODIN_DEBUG {
+		if op.initializer != SPIRV_SSA_INDEX_INVALID {
+			fmt.sbprintfln(&_debug.builder, "%%%d = OpVariable %%%d %d %%%d", base.id, op.type_id, op.class, op.initializer);
+		} else {
+			fmt.sbprintfln(&_debug.builder, "%%%d = OpVariable %%%d %d", base.id, op.type_id, op.class);
+		}
+	}
+}
+
+spirv_op_function_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Function) {
+	/* %result_id = OpFunction %return_type_id %function_control %function_type_id */
+	_spirv_op_to_binary(_in, 5, SPIRV_OPCODE_OP_FUNCTION);
+	append(&builder, cast(Spirv_Word)op.return_type_id, cast(Spirv_Word)base.id, cast(Spirv_Word)op.control, cast(Spirv_Word)op.function_type_id);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpFunction %%%d %d %%%d", base.id, op.return_type_id, op.control, op.function_type_id);
+	}
+}
+
+spirv_op_type_void_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Void) {
+	/* %result_id = OpTypeVoid */
+	_spirv_op_to_binary(_in, 2, SPIRV_OPCODE_OP_TYPE_VOID);
+	append(&builder, cast(Spirv_Word)base.id);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpTypeVoid", base.id);
+	}
+}
+
+spirv_op_type_float_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Float) {
+	/* %result_id = OpTypeFloat <width> */
+	_spirv_op_to_binary(_in, 3, SPIRV_OPCODE_OP_TYPE_FLOAT);
+	append(&builder, cast(Spirv_Word)base.id, op.width);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpTypeFloat %d", base.id, op.width);
+	}
+}
+
+spirv_op_type_int_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Int) {
+	/* %result_id = OpTypeInt <width> <sign> */
+	_spirv_op_to_binary(_in, 4, SPIRV_OPCODE_OP_TYPE_INT);
+	append(&builder, cast(Spirv_Word)base.id, op.width, cast(Spirv_Word)op.sign);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpTypeInt %d %d", base.id, op.width, op.sign);
+	}
+}
+
+spirv_op_type_pointer_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Pointer) {
+	/* %result_id = OpTypePointer <storage_class> %type_id */
+	_spirv_op_to_binary(_in, 4, SPIRV_OPCODE_OP_TYPE_POINTER);
+	append(&builder, cast(Spirv_Word)base.id, cast(Spirv_Word)op.class, cast(Spirv_Word)op.type_idx);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpTypePointer %d %%%d", base.id, op.class, op.type_idx);
+	}
+}
+
+spirv_op_type_function_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Function) {
+	/* %result_id = OpTypeFunction %return_type_id %param1_type_id %param2_type_id ... */
+	_spirv_op_to_binary(_in, 3 + cast(Spirv_Word)len(op.params), SPIRV_OPCODE_OP_TYPE_FUNCTION);
+	append(&builder, cast(Spirv_Word)base.id, cast(Spirv_Word)op.return_type_id);
+	when ODIN_DEBUG {
+		fmt.sbprintf(&_debug.builder, "%%%d = OpTypeFunction %%%d", base.id, op.return_type_id);
+	}
+	for param in op.params {
+		append(&builder, cast(Spirv_Word)param.base.id);
+		when ODIN_DEBUG {
+			fmt.sbprintf(&_debug.builder, " %%%d", param.base.id);
+		}
+	}
+	when ODIN_DEBUG {
+		fmt.sbprintln(&_debug.builder);
+	}
+}
+
+spirv_op_type_array_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Type_Array) {
+	/* %result_id = OpTypeArray %element_type_id %length_id */
+	_spirv_op_to_binary(_in, 4, SPIRV_OPCODE_OP_TYPE_ARRAY);
+	append(&builder, cast(Spirv_Word)base.id, cast(Spirv_Word)op.element_type, cast(Spirv_Word)op.length_id);
+	when ODIN_DEBUG {
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpTypeArray %%%d %%%d", base.id, op.element_type, op.length_id);
+	}
+}
+
+_spirv_op_to_binary :: #force_inline proc(using m: ^To_Spirv_In, wc: Spirv_Word, opcode: Spirv_Word) {
+	when ODIN_DEBUG {
+		assert(transmute(u32)opcode & 0xFFFF0000 == 0 && transmute(u32)wc & 0x0000FFFF == transmute(u32)wc, "Invalid word count or opcode value!");
+	}
+	append(&builder, wc | opcode << 16);
+}
+
+spirv_op_constant_to_binary :: #force_inline proc(using _in: ^To_Spirv_In, base: Spirv_Op_Base, op: Spirv_Op_Constant) {
+	/* %result_id = OpConstant %type_id %value */
+	_spirv_op_to_binary(_in, 3 + op.value_width / size_of(Spirv_Word), SPIRV_OPCODE_OP_CONSTANT);
+	append(&builder, cast(Spirv_Word)op.type, cast(Spirv_Word)base.id);
+	if op.value_width > 4 {
+		append(&builder, cast(Spirv_Word)(op.value.i >> 16), cast(Spirv_Word)op.value.i);
+	} else {
+		append(&builder, cast(Spirv_Word)op.value.i);
+	}
+
+	when ODIN_DEBUG {
+		// NOTE(GowardSilk): this does not distinguish between float and int constants
+		fmt.sbprintfln(&_debug.builder, "%%%d = OpConstant %%%d %d", base.id, op.type, op.value.i);
+	}
+}
+
+Spirv_Op_Base :: struct {
+	id: Spirv_SSA_Index,
 }
 
 /**
- * @brief general spirv op
+ * @brief general spirv op descriptor
  */
-Spirv_Op :: union {
+Spirv_Op :: struct {
+	#subtype base: Spirv_Op_Base,
+	op: _Spirv_Op,
+}
+_Spirv_Op :: union {
 	Spirv_Op_Constant,
 	Spirv_Op_Variable,
+	Spirv_Op_Function,
+
 	Spirv_Op_Type_Void,
 	Spirv_Op_Type_Float,
 	Spirv_Op_Type_Int,
 	Spirv_Op_Type_Pointer,
+	Spirv_Op_Type_Function,
 	Spirv_Op_Type_Array,
-	Spirv_Op_Type_Variable,
 }
 
 Spirv_Word :: i32;
-Spirv_SSA_Index :: distinct i64;
+Spirv_SSA_Index :: distinct Spirv_Word;
 SPIRV_SSA_INDEX_INVALID: Spirv_SSA_Index: -1;
 
 SPIRV_OPCODE_OP_VARIABLE :: 59;
 Spirv_Op_Variable :: struct {
+	type_id: Spirv_SSA_Index, /**< res id of Spirv_Op_Type_Pointer */
+	class: Spirv_Storage_Class,
+	initializer: Spirv_SSA_Index, /**< optional, (if not used eq to SPIRV_SSA_INDEX_INVALID) */
 }
 
 SPIRV_OPCODE_OP_CONSTANT :: 43;
 Spirv_Op_Constant :: struct {
-	type: Spirv_SSA_Index, /**< index of Spirv_Op_Type_* of the underlying literal type */
+	type: Spirv_SSA_Index, /**< res id of Spirv_Op_Type_* of the underlying literal type */
 	value: #type struct #raw_union {
 		i: i64,
 		f: f64,
 	},
+	value_width: Spirv_Word, /**< actual width of `value' member (easier to store here than search dynamically via `type' SSA index) */
 }
 
 SPIRV_OPCODE_OP_TYPE_VOID :: 19;
@@ -559,7 +763,7 @@ Spirv_Float_Encoding :: enum {
 }
 SPIRV_OPCODE_OP_TYPE_FLOAT :: 22;
 Spirv_Op_Type_Float :: struct {
-	width: u32,
+	width: Spirv_Word,
 	encoding: Spirv_Float_Encoding,
 }
 
@@ -570,7 +774,7 @@ Spirv_Op_Type_Int_Sign :: enum u8 {
 }
 SPIRV_OPCODE_OP_TYPE_INT :: 21;
 Spirv_Op_Type_Int :: struct {
-	width: u32,
+	width: Spirv_Word,
 	sign:  Spirv_Op_Type_Int_Sign,
 }
 
@@ -593,15 +797,43 @@ Spirv_Op_Type_Pointer :: struct {
 	type_idx: Spirv_SSA_Index, /**< index of Spirv_Op_Type_* containing type id of the resource pointed to */
 }
 
-Spirv_Op_Type_Array :: struct {}
-Spirv_Op_Type_Variable :: struct {}
+SPIRV_OPCODE_OP_TYPE_FUNCTION :: 33;
+Spirv_Op_Type_Function :: struct {
+	return_type_id: Spirv_SSA_Index,
+	params: []Spirv_Op,
+}
+
+SPIRV_OPCODE_OP_TYPE_ARRAY :: 28;
+Spirv_Op_Type_Array :: struct {
+	element_type: Spirv_SSA_Index,
+	length_id: Spirv_SSA_Index, /**< length id of Spirv_Op_Constant */
+}
+
+Spirv_Op_Function_Control :: enum Spirv_Word {
+	None   = 0x0,
+	Inline = 0x1,
+	DontInline = 0x2,
+	Pure = 0x4,
+	Const = 0x8,
+
+	// Reserved
+	OptNoneEXT   = 0x10000,
+	OptNoneINTEL = 0x10000,
+}
+SPIRV_OPCODE_OP_FUNCTION :: 54;
+Spirv_Op_Function :: struct {
+	control: Spirv_Op_Function_Control,
+	return_type_id: Spirv_SSA_Index,
+	function_type_id: Spirv_SSA_Index,
+}
 
 update_active_node_opencl :: #force_inline proc(_in: ^To_Opencl_Lang_In, node: ast.Node) -> ^To_Opencl_Lang_In {
 	_in.node = node;
 	return _in;
 }
 
-update_active_node_spirv :: #force_inline proc(_in: ^To_Spirv_In, node: ast.Node) -> ^To_Spirv_In {
+update_active_node_spirv :: #force_inline proc(_in: ^To_Spirv_In, node: ast.Node, type_node: ^ast.Any_Node = nil) -> ^To_Spirv_In {
+	_in.type_node = type_node;
 	_in.node = node;
 	return _in;
 }
@@ -611,34 +843,80 @@ update_active_node :: proc {
 	update_active_node_spirv,
 }
 
-translate :: #force_inline proc(using _in: ^Translate_In) -> bool {
-	switch type {
-		case .OpenCL_Lang:
-			return to_opencl_lang(&cl_in);
-		case .SPIR_V:
-			return to_spirv(&sp_in);
-	}
-	unreachable();
+init_spirv_type_table :: proc(using _in: ^To_Spirv_In) {
+	_in.type_table = mem.make(map[string]Spirv_Meta_Op);
+	map_insert(&type_table, "Int", Spirv_Meta_Op {
+		/*
+		 * NOTE(GowardSilk): SPIRV_SSA_INDEX_INVALID is going to be set to the actual index
+		 * inside `ops' on the first query (aka indicating that the type will have been used)
+		 */
+		base = Spirv_Op_Base { SPIRV_SSA_INDEX_INVALID },
+		op   = Spirv_Op_Type_Int {
+			width = size_of(cl.Int),
+			sign = .Signed
+		}
+	});
+	#assert(size_of(cl.Float) == 4)
+	map_insert(&type_table, "Float", Spirv_Meta_Op {
+		base = Spirv_Op_Base { SPIRV_SSA_INDEX_INVALID },
+		op   = Spirv_Op_Type_Float {
+			width = size_of(cl.Float),
+			encoding = .IEEE754_BINARY32,
+		}
+	});
+	map_insert(&type_table, "void", Spirv_Meta_Op {
+		base = Spirv_Op_Base { SPIRV_SSA_INDEX_INVALID },
+		op   = Spirv_Op_Type_Void {}
+	});
 }
 
-spirv_infer_constant_type :: proc(using _in: ^To_Spirv_In, type: ^ast.Expr) {
-	#partial switch v in type.derived_expr {
-		case ^ast.Ident:
-		case ^ast.Selector_Expr:
-			assert(v.derived_expr.(^ast.Ident).name == "cl");
-			if v.field.name == "Int" {
-				@static int_constant := SPIRV_SSA_INDEX_INVALID;
-				if int_constant == SPIRV_SSA_INDEX_INVALID {
-					int_constant = append(&builder, Spirv_Op_Type_Int {
-						width = size_of(cl.Int),
-						sign  = .Signed,
-					});
-				} else do unimplemented();
-
-				next_constant_type = int_constant;
-			} else do unimplemented();
-		case: unimplemented();
+init_spirv_in :: proc(compiler: ^Compiler, active_node: ast.Node) -> (_in: To_Spirv_In, err: mem.Allocator_Error) {
+	_in.compiler = compiler;
+	_in.node = active_node;
+	_in.builder = mem.make([dynamic]Spirv_Word) or_return;
+	_in.ops = mem.make([dynamic]Spirv_Op) or_return;
+	_in.next_id = SPIRV_SSA_INDEX_INVALID;
+	_in.const_table = mem.make(map[string]Spirv_Op);
+	init_spirv_type_table(&_in);
+	when ODIN_DEBUG {
+		strings.builder_init(&_in._debug.builder);
 	}
+
+	return _in, nil;
+}
+
+/** NOTE(GowardSilk): No need to delete To_Spirv_In, since we are batching the mem calls inside Compiler_Allocator */
+@(disabled=true)
+delete_spirv_in :: proc(_in: ^To_Spirv_In) {}
+
+spirv_query_type :: #force_inline proc(using _in: ^To_Spirv_In, key: string) -> (Spirv_Op, bool) {
+	meta_type, type_found := &type_table[key];
+	if !type_found do return {}, false;
+	if meta_type.base.id == SPIRV_SSA_INDEX_INVALID {
+		// this meta type was not queried yet
+		// assign it a new valid id
+		meta_type.base.id = new_spirv_id(_in);
+	}
+	return cast(Spirv_Op)meta_type^, true;
+}
+
+spirv_infer_constant_type :: proc(using _in: ^To_Spirv_In) -> (Spirv_Op, bool) {
+	if type_node == nil do return {}, false;
+
+	#partial switch v in type_node {
+		case ^ast.Field_Value:
+			#partial switch vv in v.value.derived_expr {
+				case ^ast.Ident:
+					return spirv_query_type(_in, vv.name);
+				case ^ast.Selector_Expr:
+					assert(v.derived_expr.(^ast.Ident).name == "cl", "Types should be taken only from `cl' module!");
+					return spirv_query_type(_in, vv.field.name);
+
+				case: unimplemented();
+			}
+	}
+
+	unreachable();
 }
 
 /**
@@ -656,25 +934,30 @@ to_spirv :: proc(using _in: ^To_Spirv_In) -> bool {
 		case ^ast.Implicit: unimplemented();
 		case ^ast.Undef: unimplemented();
 		case ^ast.Basic_Lit:
-			// %N = OpConstant %X <<value>>
 			constant: Spirv_Op_Constant;
-
-			assert(next_constant_type != SPIRV_SSA_INDEX_INVALID, "Was unable to determine the constant literal type!");
-			constant.type = next_constant_type;
+			constant_type, found_constant_type := spirv_infer_constant_type(_in);
+			if !found_constant_type {
+				parser.default_error_handler(node.pos, "Failed to infer type for given basic literal (%s)!", v.tok.text);
+				return false;
+			}
+			constant.type = constant_type.base.id;
 
 			#partial switch v.tok.kind {
 				case .Integer:
-					constant.value.i = strconv.atoi(v.tok.text);
+					constant.value.i = cast(i64)strconv.atoi(v.tok.text);
 
 					when ODIN_DEBUG {
 						fmt.sbprintfln(
 							&_debug.builder,
 							"%d = OpConstant %%%d %d",
 							len(builder) + 1,
-							next_constant_type,
+							constant.type,
 							constant.value.i
 						);
 					}
+
+					constant.value_width = constant_type.op.(Spirv_Op_Type_Int).width;
+
 				case .Float:
 					constant.value.f = strconv.atof(v.tok.text);
 
@@ -683,17 +966,147 @@ to_spirv :: proc(using _in: ^To_Spirv_In) -> bool {
 							&_debug.builder,
 							"%d = OpConstant %%%d %f",
 							len(builder) + 1,
-							next_constant_type,
+							constant.type,
 							constant.value.f
 						);
 					}
+
+					constant.value_width = constant_type.op.(Spirv_Op_Type_Float).width;
+
 				case: unimplemented();
 			}
-			push_spirv_op(_in, constant);
+
+			// NOTE(GowardSilk): since constants have to preceed all other declarations (along with type decls)
+			// we plug them only inside the const_table with already valid id
+			map_insert(&const_table, v.tok.text, Spirv_Op {
+				base = { new_spirv_id(_in) },
+				op = constant,
+			});
 
 		case ^ast.Basic_Directive: unimplemented();
 		case ^ast.Ellipsis: unimplemented();
-		case ^ast.Proc_Lit: unimplemented();
+		case ^ast.Proc_Lit:
+			// write procedure type
+			proc_string_key: string;
+			proc_string_key_builder: strings.Builder;
+			strings.builder_init(&proc_string_key_builder, context.temp_allocator);
+			defer strings.builder_destroy(&proc_string_key_builder);
+
+			type_into_string :: proc(expr: ^ast.Expr) -> string {
+				#partial switch v in expr.derived_expr {
+					case ^ast.Ident:
+						return v.name;
+					case ^ast.Selector_Expr:
+						return v.field.name;
+					case ^ast.Multi_Pointer_Type:
+						return fmt.tprintf("[^]%s", type_into_string(v.elem));
+				}
+				unreachable();
+			}
+
+			// insert an indentifier before the actual type (param list)
+			// so that we can distinguish between <<theoretical>> cases like:
+			// my_kernel :: proc() {}
+			// aka
+			// __kernel void my_kernel(void) {}
+			// where parameters are "just" void
+			strings.write_string(&proc_string_key_builder, "proc");
+			arg_count := 0;
+			if len(v.type.params.list) > 0 {
+				/*
+				 * NOTE(GowardSilk): kernels should always have return type void so we do not have to iterate over the results....
+				 */
+				for arg_group in v.type.params.list {
+					type := type_into_string(arg_group.type);
+					for arg in arg_group.names {
+						strings.write_string(
+							&proc_string_key_builder,
+							type
+						);
+						arg_count += 1;
+					}
+				}
+			} else {
+				strings.write_string(&proc_string_key_builder, "void");
+			}
+
+			proc_type, proc_type_found := spirv_query_type(_in, proc_string_key);
+			if !proc_type_found {
+				proc_return_type, proc_return_type_found := spirv_query_type(_in, "void");
+				when ODIN_DEBUG do assert(proc_return_type_found);
+
+				proc_type_op := Spirv_Op_Type_Function {
+					return_type_id = proc_return_type.base.id,
+					params = make([]Spirv_Op, arg_count),
+				};
+
+				query_type :: proc(using _in: ^To_Spirv_In, e: ^ast.Expr, param: Proc_Desc_Param) -> (Spirv_Op, bool) {
+					type_key: string;
+					#partial switch v in e.derived_expr {
+						case ^ast.Ident:
+							type_key = v.name;
+						case ^ast.Selector_Expr:
+							type_key = v.field.name;
+						case ^ast.Multi_Pointer_Type:
+							type, found_type := query_type(_in, v.elem, param);
+							if found_type {
+								ptr_type := Spirv_Op_Type_Pointer {
+									class = opencl_qualifier_to_storage_class(param.qual),
+									type_idx = type.base.id,
+								};
+								type = auto_cast map_insert(
+									&type_table,
+									type_key,
+									Spirv_Meta_Op {
+										base = { new_spirv_id(_in) },
+										op = ptr_type,
+									}
+								)^;
+							}
+							// if base type was not found, report error
+						case ^ast.Pointer_Type: unimplemented();
+						case ^ast.Struct_Type: unimplemented();
+					}
+					p_type, p_type_found := spirv_query_type(_in, type_key);
+					if !p_type_found {
+						parser.default_error_handler(
+							e.pos, "Failed to query base type"
+						);
+						return {}, false;
+					}
+					return p_type, true;
+				}
+
+				arg_index := 0;
+				for arg_group in v.type.params.list {
+					param_name := arg_group.names[0].derived_expr.(^ast.Ident).name;
+					type := query_type(_in, arg_group.type, active_proc.params[param_name]) or_return;
+					for arg in arg_group.names {
+						proc_type_op.params[arg_index] = type;
+						arg_index += 1;
+					}
+				}
+
+				proc_type_meta_op := Spirv_Meta_Op {
+					base = {
+						id = new_spirv_id(_in),
+					},
+					op = proc_type_op,
+				};
+				proc_type = auto_cast map_insert(
+					&type_table,
+					proc_string_key,
+					proc_type_meta_op
+				)^;
+			}
+
+			func_type_op := proc_type.op.(Spirv_Op_Type_Function);
+			push_spirv_op(_in, Spirv_Op_Function {
+				control = .None,
+				return_type_id = func_type_op.return_type_id,
+				function_type_id = proc_type.base.id,
+			});
+
 		case ^ast.Comp_Lit: unimplemented();
 		case ^ast.Tag_Expr: unimplemented();
 		case ^ast.Unary_Expr: unimplemented();
@@ -712,17 +1125,14 @@ to_spirv :: proc(using _in: ^To_Spirv_In) -> bool {
 			if is_selector do ident = selector.field;
 			else do ident, _ = v.expr.derived_expr.(^ast.Ident);
 
-			builtin_kernel := _in.compiler.proc_table[ident];
+			//builtin_kernel := _in.compiler.proc_table[ident];
 
 			for arg, arg_idx in v.args {
-				_, is_constant := arg.derived_expr.(^ast.Basic_Lit);
-				if is_constant {
-					spirv_infer_constant_type(builtin_kernel.lit.type.params.list[arg_idx].type);
-				}
-				to_spirv(_update_active_node(_in, arg.expr_base));
+				to_spirv(update_active_node(_in, arg.expr_base, &arg.derived));
 			}
 
 			return true;
+
 		case ^ast.Field_Value: unimplemented();
 		case ^ast.Ternary_If_Expr: unimplemented();
 		case ^ast.Ternary_When_Expr: unimplemented();

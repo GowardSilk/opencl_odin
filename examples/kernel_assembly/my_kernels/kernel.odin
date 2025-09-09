@@ -48,7 +48,7 @@ local_mem_kernel :: proc(data: [^]cl.Float, scratch: [^]cl.Float) {
 @(kernel)
 @(params={partial_sums="global", local_sums="local"})
 pi :: proc(
-	niters: c.int,
+	niters: cl.Int,
 	step_size: cl.Float,
 	local_sums: [^]cl.Float,
 	partial_sums: [^]cl.Float)
